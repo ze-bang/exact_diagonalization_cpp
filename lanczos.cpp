@@ -5,14 +5,15 @@
 #include <cblas.h>
 #include <lapacke.h>
 #include <cstring>
-
+#include <functional>
 template<size_t N, size_t M>
 class LanczosAlgorithm {
 public:
     using complex_t = std::complex<double>;
+    using MatrixVectorFunction = std::function<void(const complex_t*, complex_t*)>;
     
-    // Constructor takes a Hermitian matrix A
-    LanczosAlgorithm(const complex_t* A) : A_(A) {}
+    // Constructor takes a function that computes A*v
+    LanczosAlgorithm(MatrixVectorFunction matvec_func) : matvec_func_(matvec_func) {}
 
     // Perform the Lanczos algorithm and return eigenvalues and eigenvectors
     void compute(double* eigenvalues, complex_t* eigenvectors) const {
@@ -40,12 +41,8 @@ public:
             complex_t* v_j = &V[j * N];
             complex_t* v_jp1 = &V[(j + 1) * N];
             
-            // w = A * v_j
-            // Create local variables for alpha and beta to avoid rvalue issues
-            complex_t complex_1(1.0, 0.0);
-            complex_t complex_0(0.0, 0.0);
-            cblas_zhemv(CblasColMajor, CblasUpper, N, &complex_1, A_, N, 
-                        v_j, 1, &complex_0, w, 1);
+            // w = A * v_j using the function instead of a matrix
+            matvec_func_(v_j, w);
             
             // Subtract beta_{j-1} * v_{j-1} if j > 0
             if (j > 0) {
@@ -66,7 +63,8 @@ public:
             for (size_t k = 0; k <= j; ++k) {
                 complex_t proj;
                 cblas_zdotc_sub(N, w, 1, &V[k * N], 1, &proj);
-                cblas_zaxpy(N, &proj, &V[k * N], 1, w, 1);
+                complex_t neg_proj = -proj;
+                cblas_zaxpy(N, &neg_proj, &V[k * N], 1, w, 1);
             }
             
             // Calculate beta_j = ||w||
@@ -112,7 +110,7 @@ public:
             }
             
             for (size_t k = 0; k < M; ++k) {
-                if (beta[k] == 0.0) break;  // Stop at convergence
+                if (beta[k] == 0.0 && k > 0) break;  // Stop at convergence
                 complex_t z_jk(z[j * M + k], 0.0);
                 cblas_zaxpy(N, &z_jk, &V[k * N], 1, &eigenvectors[j * N], 1);
             }
@@ -120,7 +118,7 @@ public:
     }
     
 private:
-    const complex_t* A_;  // The input matrix
+    MatrixVectorFunction matvec_func_;  // Function that computes A*v
 };
 
 int main() {
