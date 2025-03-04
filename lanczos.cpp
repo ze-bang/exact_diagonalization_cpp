@@ -11,9 +11,30 @@ class LanczosAlgorithm {
 public:
     using complex_t = std::complex<double>;
     using MatrixVectorFunction = std::function<void(const complex_t*, complex_t*)>;
+    using VectorApplyFunction = std::function<std::vector<complex_t>(const std::vector<complex_t>&)>;
     
-    // Constructor takes a function that computes A*v
-    LanczosAlgorithm(MatrixVectorFunction matvec_func) : matvec_func_(matvec_func) {}
+    // Constructor for direct matrix operations
+    LanczosAlgorithm(const complex_t* matrix) {
+        matvec_func_ = [matrix](const complex_t* v, complex_t* result) {
+            std::complex<double> one(1.0, 0.0);
+            std::complex<double> zero(0.0, 0.0);
+            cblas_zhemv(CblasColMajor, CblasUpper, N, &one, matrix, N, v, 1, &zero, result, 1);
+        };
+    }
+    
+    // Constructor for vector-based apply function (compatible with Operator::apply)
+    LanczosAlgorithm(VectorApplyFunction vector_apply_func) {
+        matvec_func_ = [vector_apply_func](const complex_t* v, complex_t* result) {
+            // Convert raw array to vector
+            std::vector<complex_t> vec_in(v, v + N);
+            
+            // Apply the function
+            std::vector<complex_t> vec_out = vector_apply_func(vec_in);
+            
+            // Copy result back to raw array
+            std::copy(vec_out.begin(), vec_out.end(), result);
+        };
+    }
 
     // Perform the Lanczos algorithm and return eigenvalues and eigenvectors
     void compute(double* eigenvalues, complex_t* eigenvectors) const {
@@ -41,7 +62,7 @@ public:
             complex_t* v_j = &V[j * N];
             complex_t* v_jp1 = &V[(j + 1) * N];
             
-            // w = A * v_j using the function instead of a matrix
+            // w = A * v_j using the function
             matvec_func_(v_j, w);
             
             // Subtract beta_{j-1} * v_{j-1} if j > 0
