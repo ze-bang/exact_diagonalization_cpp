@@ -6,6 +6,7 @@
 #include <lapacke.h>
 #include <cstring>
 #include <functional>
+#include "construct_ham.h"
 template<size_t N, size_t M>
 class LanczosAlgorithm {
 public:
@@ -34,10 +35,11 @@ public:
             // Copy result back to raw array
             std::copy(vec_out.begin(), vec_out.end(), result);
         };
+        std::cout << "LanczosAlgorithm initialized" << std::endl;
     }
 
     // Perform the Lanczos algorithm and return eigenvalues and eigenvectors
-    void compute(double* eigenvalues, complex_t* eigenvectors) const {
+    void compute(double* eigenvalues) const {
         // Initialize random v_1
         complex_t V[N * (M + 1)];
         complex_t w[N];
@@ -45,6 +47,7 @@ public:
         double beta[M];
         
         // Create random initial vector
+        std::cout << "Generating random initial vector" << std::endl;
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_real_distribution<double> dist(-1.0, 1.0);
@@ -52,19 +55,30 @@ public:
         for (size_t i = 0; i < N; ++i) {
             V[i] = complex_t(dist(gen), dist(gen));
         }
+
         
         // Normalize v_1
         double norm = cblas_dznrm2(N, V, 1);
         cblas_zdscal(N, 1.0 / norm, V, 1);
-        
+
+        std::cout << "Random initial vector generated" << std::endl;
+        for (size_t i = 0; i < N; ++i) {
+            std::cout << V[i] << " ";
+        }
+        std::cout << std::endl;
         // Lanczos iteration
         for (size_t j = 0; j < M; ++j) {
+            std::cout << "Lanczos step " << j << std::endl;
             complex_t* v_j = &V[j * N];
             complex_t* v_jp1 = &V[(j + 1) * N];
             
             // w = A * v_j using the function
             matvec_func_(v_j, w);
-            
+            std::cout << "Computing w " << std::endl;
+            for (size_t i = 0; i < N; ++i) {
+                std::cout << w[i] << " ";
+            }
+            std::cout << std::endl;
             // Subtract beta_{j-1} * v_{j-1} if j > 0
             if (j > 0) {
                 complex_t beta_jm1(-beta[j-1], 0.0);
@@ -125,160 +139,44 @@ public:
         std::memcpy(eigenvalues, d, M * sizeof(double));
         
         // Transform eigenvectors back to original space: eigenvectors = V * z
-        for (size_t j = 0; j < M; ++j) {
-            for (size_t i = 0; i < N; ++i) {
-                eigenvectors[j * N + i] = 0.0;
-            }
+        // for (size_t j = 0; j < M; ++j) {
+        //     for (size_t i = 0; i < N; ++i) {
+        //         eigenvectors[j * N + i] = 0.0;
+        //     }
             
-            for (size_t k = 0; k < M; ++k) {
-                if (beta[k] == 0.0 && k > 0) break;  // Stop at convergence
-                complex_t z_jk(z[j * M + k], 0.0);
-                cblas_zaxpy(N, &z_jk, &V[k * N], 1, &eigenvectors[j * N], 1);
-            }
-        }
+        //     for (size_t k = 0; k < M; ++k) {
+        //         if (beta[k] == 0.0 && k > 0) break;  // Stop at convergence
+        //         complex_t z_jk(z[j * M + k], 0.0);
+        //         cblas_zaxpy(N, &z_jk, &V[k * N], 1, &eigenvectors[j * N], 1);
+        //     }
+        // }
     }
     
 private:
     MatrixVectorFunction matvec_func_;  // Function that computes A*v
 };
 
+
+
+// Example of how to use the Operator class
 int main() {
-    constexpr size_t N = 100;
-    constexpr size_t M = 20;  // Number of Lanczos vectors to use
+    // Create an operator for a 3-bit system
+    int n_bits = 4;
+    Operator op(n_bits);
 
-    // Create a sparse Hermitian matrix (100x100)
-    // This matrix has the following structure:
-    // 1. Real values on the diagonal
-    // 2. A tridiagonal structure (common in many physical systems)
-    // 3. A few random off-diagonal elements (~5% of total elements)
-    // 4. Hermitian property: A[i][j] = conj(A[j][i])
-    std::complex<double> A[N * N] = {};  // Initialize all elements to zero
+    op.loadFromFile("./ED_test/Trans.def");
+    // op.loadFromInterAllFile("./ED_test/InterAll.def");
 
-    // Set up random number generation
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<double> diag_dist(1.0, 10.0);    // For diagonal elements
-    std::uniform_real_distribution<double> real_dist(-1.0, 1.0);    // For real parts
-    std::uniform_real_distribution<double> imag_dist(-1.0, 1.0);    // For imaginary parts
-    std::uniform_int_distribution<int> index_dist(0, N-1);          // For random indices
-
-    // Fill diagonal with real values (Hermitian matrices have real diagonals)
-    for (size_t i = 0; i < N; ++i) {
-        A[i * N + i] = std::complex<double>(diag_dist(gen), 0.0);
-    }
-
-    // Add a tridiagonal structure (common in physical systems)
-    for (size_t i = 0; i < N - 1; ++i) {
-        std::complex<double> val(real_dist(gen), imag_dist(gen));
-        A[i * N + (i + 1)] = val;
-        A[(i + 1) * N + i] = std::conj(val);  // Ensure Hermitian property
-    }
-
-    // Add some random off-diagonal elements to make the matrix more interesting
-    // while keeping it sparse (about 5% non-zero elements)
-    int num_random_elements = N * 5;
-    for (int k = 0; k < num_random_elements; ++k) {
-        int i = index_dist(gen);
-        int j = index_dist(gen);
-        
-        // Skip diagonal and adjacent elements as they're already filled
-        if (i == j || i == j + 1 || i == j - 1) continue;
-        
-        // Ensure i < j to avoid setting the same element twice
-        if (i > j) std::swap(i, j);
-        
-        std::complex<double> val(real_dist(gen), imag_dist(gen));
-        A[i * N + j] = val;
-        A[j * N + i] = std::conj(val);  // Ensure Hermitian property
+    printMatrix(op.generateMatrix());
+    LanczosAlgorithm<1 << 4, 16> lanczos([&op](const std::vector<std::complex<double>>& vec) {
+        return op.apply(vec);
+    });
+    double eigenvalues[16];
+    // std::complex<double> eigenvectors[100 * (1 << 16)];
+    lanczos.compute(eigenvalues);
+    for (int i = 0; i < 16; ++i) {
+        std::cout << "Eigenvalue " << i << ": " << eigenvalues[i] << std::endl;
     }
     
-    LanczosAlgorithm<N, M> lanczos(A);
-    
-    double eigenvalues[M];
-    std::complex<double> eigenvectors[N * M];
-    
-    lanczos.compute(eigenvalues, eigenvectors);
-    
-    // Display results
-    std::cout << "Eigenvalues:" << std::endl;
-    for (size_t i = 0; i < M; ++i) {
-        std::cout << eigenvalues[i] << std::endl;
-    }
-    
-    std::cout << "\nEigenvectors:" << std::endl;
-    for (size_t j = 0; j < M; ++j) {
-        std::cout << "Eigenvector " << j << ":" << std::endl;
-        for (size_t i = 0; i < N; ++i) {
-            std::cout << eigenvectors[j * N + i] << " ";
-        }
-        std::cout << std::endl;
-    }
-    
-    // Compare with direct diagonalization using LAPACK
-    std::cout << "\nComparing with direct diagonalization:" << std::endl;
-
-    // Create a copy of A for LAPACK (ZHEEV overwrites the input)
-    std::complex<double> A_copy[N * N];
-    std::memcpy(A_copy, A, N * N * sizeof(std::complex<double>));
-
-    // Workspace for LAPACK
-    double w_direct[N];
-
-    // Call ZHEEV to compute all eigenvalues and eigenvectors
-    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', N, (lapack_complex_double*)A_copy, N, w_direct);
-    if (info != 0) {
-        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
-        return 1;
-    }
-
-    // Display direct diagonalization results
-    std::cout << "Direct eigenvalues:" << std::endl;
-    for (size_t i = 0; i < N; ++i) {
-        std::cout << w_direct[i] << std::endl;
-    }
-
-    // Find closest matches between Lanczos and direct eigenvalues
-    std::cout << "\nEigenvalue comparison:" << std::endl;
-    for (size_t i = 0; i < M; ++i) {
-        // Find the closest eigenvalue from direct method
-        size_t closest_idx = 0;
-        double min_diff = std::abs(eigenvalues[i] - w_direct[0]);
-        
-        for (size_t j = 1; j < N; ++j) {
-            double diff = std::abs(eigenvalues[i] - w_direct[j]);
-            if (diff < min_diff) {
-                min_diff = diff;
-                closest_idx = j;
-            }
-        }
-        
-        double rel_error = std::abs(eigenvalues[i] - w_direct[closest_idx]) / 
-                          std::abs(w_direct[closest_idx]);
-        
-        std::cout << "Lanczos λ" << i << " = " << eigenvalues[i] 
-                  << " closest to direct λ" << closest_idx << " = " << w_direct[closest_idx]
-                  << " (relative error: " << rel_error << ")" << std::endl;
-    }
-
-    // Calculate residual norms to verify eigenpairs quality
-    std::cout << "\nResidual norms for Lanczos eigenpairs:" << std::endl;
-    for (size_t i = 0; i < M; ++i) {
-        std::complex<double> Av[N];
-        
-        // Calculate A*v
-        std::complex<double> one(1.0, 0.0);
-        std::complex<double> zero(0.0, 0.0);
-        cblas_zhemv(CblasColMajor, CblasUpper, N, &one, A, N, 
-                    &eigenvectors[i * N], 1, &zero, Av, 1);
-        
-        // Calculate A*v - λ*v
-        for (size_t j = 0; j < N; ++j) {
-            Av[j] -= eigenvalues[i] * eigenvectors[i * N + j];
-        }
-        
-        double residual = cblas_dznrm2(N, Av, 1);
-        std::cout << "Residual for eigenpair " << i << ": " << residual << std::endl;
-    }
-
     return 0;
 }
