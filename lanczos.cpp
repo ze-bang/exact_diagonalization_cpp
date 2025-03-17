@@ -95,6 +95,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
             Complex alpha(-beta[j], 0.0);  // -beta[j] as complex number
             cblas_zaxpy(N, &alpha, v_prev.data(), 1, w.data(), 1);
         }
+
         
         // alpha_j = <v_j, w>
         Complex dot_product;
