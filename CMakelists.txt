@@ -1,0 +1,49 @@
+cmake_minimum_required(VERSION 3.15)
+
+project(Exact_Diagonalization_Cpp LANGUAGES CXX)
+
+# Set build type if not specified
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Compiler flags
+set(CMAKE_CXX_FLAGS "-Wall -Wextra")
+set(CMAKE_CXX_FLAGS_DEBUG "-g")
+set(CMAKE_CXX_FLAGS_RELEASE "-Ofast")
+
+# C++ standard
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Homebrew paths
+set(OPENBLAS_ROOT "/opt/homebrew/opt/openblas")
+set(LAPACK_ROOT "/opt/homebrew/opt/lapack")
+
+# Find packages
+find_package(BLAS REQUIRED)
+find_package(LAPACK REQUIRED)
+
+# Include directories for libraries that don't provide targets
+include_directories(
+    ${OPENBLAS_ROOT}/include
+    ${LAPACK_ROOT}/include
+)
+
+# Library directories for libraries without proper CMake targets
+link_directories(
+    ${OPENBLAS_ROOT}/lib
+    ${LAPACK_ROOT}/lib
+)
+
+# Create executables
+add_executable(lanczos lanczos.cpp)
+
+# Link libraries
+target_link_libraries(lanczos 
+    ${LAPACK_LIBRARIES}
+    ${BLAS_LIBRARIES}
+    openblas
+    lapacke
+    cblas
+)
