@@ -1,182 +1,347 @@
 #include <iostream>
 #include <complex>
 #include <vector>
+#include <functional>
 #include <random>
+#include <cmath>
 #include <cblas.h>
 #include <lapacke.h>
-#include <cstring>
-#include <functional>
 #include "construct_ham.h"
-template<size_t N, size_t M>
-class LanczosAlgorithm {
-public:
-    using complex_t = std::complex<double>;
-    using MatrixVectorFunction = std::function<void(const complex_t*, complex_t*)>;
-    using VectorApplyFunction = std::function<std::vector<complex_t>(const std::vector<complex_t>&)>;
-    
-    // Constructor for direct matrix operations
-    LanczosAlgorithm(const complex_t* matrix) {
-        matvec_func_ = [matrix](const complex_t* v, complex_t* result) {
-            std::complex<double> one(1.0, 0.0);
-            std::complex<double> zero(0.0, 0.0);
-            cblas_zhemv(CblasColMajor, CblasUpper, N, &one, matrix, N, v, 1, &zero, result, 1);
-        };
-    }
-    
-    // Constructor for vector-based apply function (compatible with Operator::apply)
-    LanczosAlgorithm(VectorApplyFunction vector_apply_func) {
-        matvec_func_ = [vector_apply_func](const complex_t* v, complex_t* result) {
-            // Convert raw array to vector
-            std::vector<complex_t> vec_in(v, v + N);
-            
-            // Apply the function
-            std::vector<complex_t> vec_out = vector_apply_func(vec_in);
-            
-            // Copy result back to raw array
-            std::copy(vec_out.begin(), vec_out.end(), result);
-        };
-        std::cout << "LanczosAlgorithm initialized" << std::endl;
-    }
 
-    // Perform the Lanczos algorithm and return eigenvalues and eigenvectors
-    void compute(double* eigenvalues) const {
-        // Initialize random v_1
-        complex_t V[N * (M + 1)];
-        complex_t w[N];
-        double alpha[M];
-        double beta[M];
+// Type definition for complex vector and matrix operations
+using Complex = std::complex<double>;
+using ComplexVector = std::vector<Complex>;
+
+ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
+    ComplexVector v(N);
+    
+    for (int i = 0; i < N; i++) {
+        v[i] = Complex(dist(gen), dist(gen));
+    }
+    
+    double norm = cblas_dznrm2(N, v.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v.data(), 1);
+
+    return v;
+}
+
+// Generate a random complex vector that is orthogonal to all vectors in the provided set
+ComplexVector generateOrthogonalVector(int N, const std::vector<ComplexVector>& vectors, std::mt19937& gen, std::uniform_real_distribution<double>& dist
+                                    ) {
+    ComplexVector result(N);
+    
+    // Generate a random vector
+    result = generateRandomVector(N, gen, dist);
+    
+    // Orthogonalize against all provided vectors using Gram-Schmidt
+    for (const auto& v : vectors) {
+        // Calculate projection: <v, result>
+        Complex projection;
+        cblas_zdotc_sub(N, v.data(), 1, result.data(), 1, &projection);
         
-        // Create random initial vector
-        std::cout << "Generating random initial vector" << std::endl;
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        // Subtract projection: result -= projection * v
+        Complex neg_projection = -projection;
+        cblas_zaxpy(N, &neg_projection, v.data(), 1, result.data(), 1);
+    }
+    
+    // Check if the resulting vector has sufficient magnitude
+    double norm = cblas_dznrm2(N, result.data(), 1);
+        // Normalize
+    Complex scale = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, result.data(), 1);
+    return result;
+    
+    // If all attempts failed, throw an exception
+}
+
+// Lanczos algorithm implementation
+// H: Function representing the Hamiltonian operator (H|v⟩)
+// N: Dimension of the Hilbert space
+// max_iter: Maximum number of Lanczos iterations
+// tol: Tolerance for convergence and detecting invariant subspaces
+// eigenvalues: Output vector to store the eigenvalues
+// eigenvectors: Output matrix to store the eigenvectors (optional)
+void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
+             double tol, std::vector<double>& eigenvalues, 
+             std::vector<ComplexVector>* eigenvectors = nullptr) {
+    
+    // Initialize random starting vector
+    ComplexVector v_current(N);
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
+    v_current = generateRandomVector(N, gen, dist);
+    
+    // Initialize Lanczos vectors and coefficients
+    std::vector<ComplexVector> basis_vectors;
+    basis_vectors.push_back(v_current);
+    
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    std::vector<double> alpha;  // Diagonal elements
+    std::vector<double> beta;   // Off-diagonal elements
+    beta.push_back(0.0);        // β_0 is not used
+    double norm;
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        // w = H*v_j
+        H(v_current.data(), w.data(), N);
         
-        for (size_t i = 0; i < N; ++i) {
-            V[i] = complex_t(dist(gen), dist(gen));
+        // w = w - beta_j * v_{j-1}
+        if (j > 0) {
+            Complex alpha(-beta[j], 0.0);  // -beta[j] as complex number
+            cblas_zaxpy(N, &alpha, v_prev.data(), 1, w.data(), 1);
         }
 
         
-        // Normalize v_1
-        double norm = cblas_dznrm2(N, V, 1);
-        cblas_zdscal(N, 1.0 / norm, V, 1);
-
-        std::cout << "Random initial vector generated" << std::endl;
-        for (size_t i = 0; i < N; ++i) {
-            std::cout << V[i] << " ";
+        // alpha_j = <v_j, w>
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // Reorthogonalize (for numerical stability)
+        for (int k = 0; k <= j; k++) {
+            // Calculate overlap = <basis_vectors[k], w>
+            Complex overlap;
+            cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
+            
+            // Subtract projection: w -= overlap * basis_vectors[k]
+            Complex neg_overlap = -overlap;
+            cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
         }
-        std::cout << std::endl;
-        // Lanczos iteration
-        for (size_t j = 0; j < M; ++j) {
-            std::cout << "Lanczos step " << j << std::endl;
-            complex_t* v_j = &V[j * N];
-            complex_t* v_jp1 = &V[(j + 1) * N];
+        
+        // beta_{j+1} = ||w||
+        norm = cblas_dznrm2(N, w.data(), 1);
+        
+        // Check for invariant subspace
+        if (norm < tol) {
+            // Generate a random vector instead of breaking
+            v_next = generateOrthogonalVector(N, basis_vectors, gen, dist);
             
-            // w = A * v_j using the function
-            matvec_func_(v_j, w);
-            std::cout << "Computing w " << std::endl;
-            for (size_t i = 0; i < N; ++i) {
-                std::cout << w[i] << " ";
-            }
-            std::cout << std::endl;
-            // Subtract beta_{j-1} * v_{j-1} if j > 0
-            if (j > 0) {
-                complex_t beta_jm1(-beta[j-1], 0.0);
-                cblas_zaxpy(N, &beta_jm1, &V[(j-1) * N], 1, w, 1);
-            }
+            // Update the norm for use in scaling
+            norm = cblas_dznrm2(N, v_next.data(), 1);
             
-            // Calculate alpha_j = <w, v_j>
-            complex_t dot_product;
-            cblas_zdotc_sub(N, w, 1, v_j, 1, &dot_product);
-            alpha[j] = dot_product.real();  // For Hermitian matrices, alpha is real
-            
-            // w = w - alpha_j * v_j
-            complex_t alpha_jm1(-alpha[j], 0.0);
-            cblas_zaxpy(N, &alpha_jm1, v_j, 1, w, 1);
-            
-            // Reorthogonalize (for numerical stability)
-            for (size_t k = 0; k <= j; ++k) {
-                complex_t proj;
-                cblas_zdotc_sub(N, w, 1, &V[k * N], 1, &proj);
-                complex_t neg_proj = -proj;
-                cblas_zaxpy(N, &neg_proj, &V[k * N], 1, w, 1);
-            }
-            
-            // Calculate beta_j = ||w||
-            beta[j] = cblas_dznrm2(N, w, 1);
-            
-            // Check for convergence or linear dependency
-            if (beta[j] < 1e-12) {
-                std::cout << "Converged or found linear dependency at iteration " << j << std::endl;
-                beta[j] = 0.0;
+            // If after orthogonalization the norm is still too small, we should break
+            if (norm < tol) {
                 break;
             }
-            
-            // v_{j+1} = w / beta_j
-            cblas_zcopy(N, w, 1, v_jp1, 1);
-            cblas_zdscal(N, 1.0 / beta[j], v_jp1, 1);
+        }else{
+            cblas_zcopy(N, w.data(), 1, v_next.data(), 1);
         }
         
-        // Construct the tridiagonal matrix
-        double d[M];  // Diagonal elements
-        double e[M-1];  // Off-diagonal elements
+        beta.push_back(norm);
         
-        std::memcpy(d, alpha, M * sizeof(double));
-        std::memcpy(e, beta, (M - 1) * sizeof(double));
+        // v_{j+1} = w / beta_{j+1}
+        // Copy w to v_next
+
+        // Check for invariant subspace
+        // Scale v_next by 1/norm
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, v_next.data(), 1);
         
-        // Workspace for LAPACK
-        double z[M * M];
-        
-        // Solve the eigenvalue problem for the tridiagonal matrix
-        int info = LAPACKE_dsteqr(LAPACK_COL_MAJOR, 'I', M, d, e, z, M);
-        
-        if (info != 0) {
-            std::cerr << "LAPACKE_dsteqr failed with error code " << info << std::endl;
-            return;
+        // Store basis vector
+        if (j < max_iter - 1) {
+            basis_vectors.push_back(v_next);
         }
         
-        // Copy eigenvalues
-        std::memcpy(eigenvalues, d, M * sizeof(double));
-        
-        // Transform eigenvectors back to original space: eigenvectors = V * z
-        // for (size_t j = 0; j < M; ++j) {
-        //     for (size_t i = 0; i < N; ++i) {
-        //         eigenvectors[j * N + i] = 0.0;
-        //     }
-            
-        //     for (size_t k = 0; k < M; ++k) {
-        //         if (beta[k] == 0.0 && k > 0) break;  // Stop at convergence
-        //         complex_t z_jk(z[j * M + k], 0.0);
-        //         cblas_zaxpy(N, &z_jk, &V[k * N], 1, &eigenvectors[j * N], 1);
-        //     }
-        // }
+        // Update for next iteration
+        v_prev = v_current;
+        v_current = v_next;
     }
     
-private:
-    MatrixVectorFunction matvec_func_;  // Function that computes A*v
-};
+    // Construct tridiagonal matrix
+    int m = alpha.size();
+    std::vector<double> diag = alpha;
+    std::vector<double> offdiag(beta.begin() + 1, beta.end()); // Skip β_0
+    
+    // Allocate arrays for eigenvalues and eigenvectors
+    std::vector<double> evals(m);
+    std::vector<double> z(m * m, 0.0);
+    
+    // Diagonalize tridiagonal matrix using LAPACK
+    int info = LAPACKE_dstev(LAPACK_ROW_MAJOR, eigenvectors ? 'V' : 'N', m, 
+                           diag.data(), offdiag.data(), z.data(), m);
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_dstev failed with error code " << info << std::endl;
+        return;
+    }
+    
+    // Copy eigenvalues to output
+    eigenvalues = diag;
+    
+    // If eigenvectors requested, transform back to original basis
+    if (eigenvectors) {
+        eigenvectors->clear();
+        eigenvectors->resize(m, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        for (int j = 0; j < m; j++) {
+            for (int i = 0; i < N; i++) {
+                for (int k = 0; k < m; k++) {
+                    (*eigenvectors)[j][i] += z[k*m + j] * basis_vectors[k][i];
+                }
+            }
+        }
+    }
+}
 
+// Lanczos algorithm with Conjugate Gradient refinement for eigenvectors
+void lanczos_with_cg(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
+                    double tol, std::vector<double>& eigenvalues, 
+                    std::vector<ComplexVector>* eigenvectors = nullptr) {
+    
+    // First, run the standard Lanczos algorithm to get initial approximations
+    std::vector<ComplexVector> initial_eigenvectors;
+    lanczos(H, N, max_iter, tol, eigenvalues, eigenvectors ? &initial_eigenvectors : nullptr);
+    
+    // If eigenvectors are not requested, we're done
+    if (!eigenvectors) return;
+    
+    // Initialize output eigenvectors
+    eigenvectors->clear();
+    eigenvectors->resize(initial_eigenvectors.size(), ComplexVector(N, Complex(0.0, 0.0)));
+    
+    // For each eigenvector, apply CG refinement
+    for (size_t i = 0; i < initial_eigenvectors.size(); i++) {
+        double lambda = eigenvalues[i];
+        ComplexVector v = initial_eigenvectors[i];
+        
+        // Normalize initial vector
+        double norm = cblas_dznrm2(N, v.data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, v.data(), 1);
+        
+        ComplexVector r(N), p(N), Hp(N), Hv(N);
+        
+        // Apply H to v: Hv = H*v
+        H(v.data(), Hv.data(), N);
+        
+        // Initial residual: r = Hv - λv
+        std::copy(Hv.begin(), Hv.end(), r.begin());
+        Complex neg_lambda(-lambda, 0.0);
+        cblas_zaxpy(N, &neg_lambda, v.data(), 1, r.data(), 1);
+        
+        // Initial search direction
+        std::copy(r.begin(), r.end(), p.begin());
+        
+        // CG iteration
+        const int max_cg_iter = 50;
+        const double cg_tol = tol * 0.1;
+        double res_norm = cblas_dznrm2(N, r.data(), 1);
+        
+        for (int iter = 0; iter < max_cg_iter && res_norm > cg_tol; iter++) {
+            // Apply (H - λI) to p
+            H(p.data(), Hp.data(), N);
+            cblas_zaxpy(N, &neg_lambda, p.data(), 1, Hp.data(), 1);
+            
+            // α = (r·r) / (p·(H-λI)p)
+            Complex r_dot_r, p_dot_Hp;
+            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+            cblas_zdotc_sub(N, p.data(), 1, Hp.data(), 1, &p_dot_Hp);
+            
+            Complex alpha = r_dot_r / p_dot_Hp;
+            
+            // v = v + α*p
+            cblas_zaxpy(N, &alpha, p.data(), 1, v.data(), 1);
+            
+            // Store old r·r
+            Complex r_dot_r_old = r_dot_r;
+            
+            // r = r - α*(H-λI)p
+            Complex neg_alpha = -alpha;
+            cblas_zaxpy(N, &neg_alpha, Hp.data(), 1, r.data(), 1);
+            
+            // Check convergence
+            res_norm = cblas_dznrm2(N, r.data(), 1);
+            
+            // β = (r_new·r_new) / (r_old·r_old)
+            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+            Complex beta = r_dot_r / r_dot_r_old;
+            
+            // p = r + β*p
+            for (int j = 0; j < N; j++) {
+                p[j] = r[j] + beta * p[j];
+            }
+        }
+        
+        // Normalize final eigenvector
+        norm = cblas_dznrm2(N, v.data(), 1);
+        scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, v.data(), 1);
+        
+        // Update eigenvalue using Rayleigh quotient
+        H(v.data(), Hv.data(), N);
+        Complex lambda_new;
+        cblas_zdotc_sub(N, v.data(), 1, Hv.data(), 1, &lambda_new);
+        eigenvalues[i] = std::real(lambda_new);
+        
+        // Store the refined eigenvector
+        (*eigenvectors)[i] = v;
+    }
+}
 
-
-// Example of how to use the Operator class
-int main() {
-    // Create an operator for a 3-bit system
-    int n_bits = 4;
-    Operator op(n_bits);
-
+int main(){
+    Operator op(4);
     op.loadFromFile("./ED_test/Trans.def");
-    // op.loadFromInterAllFile("./ED_test/InterAll.def");
+    op.loadFromInterAllFile("./ED_test/InterAll.def");
+    // op.printMatrix();
+    // std::vector<double> eigenvalues;
+    ComplexVector v(4);
+    v[0] = Complex(1.0, 0.0);
+    op.apply(v);
+    std::cout << v[0] << " " << v[1] << " " << v[2] << " " << v[3] << std::endl;
 
-    printMatrix(op.generateMatrix());
-    LanczosAlgorithm<1 << 4, 16> lanczos([&op](const std::vector<std::complex<double>>& vec) {
-        return op.apply(vec);
-    });
-    double eigenvalues[16];
-    // std::complex<double> eigenvectors[100 * (1 << 16)];
-    lanczos.compute(eigenvalues);
-    for (int i = 0; i < 16; ++i) {
-        std::cout << "Eigenvalue " << i << ": " << eigenvalues[i] << std::endl;
-    }
+    // lanczos_with_cg([&](const Complex* v, Complex* Hv, int N) {
+    //     std::vector<Complex> vec(v, v + N);
+    //     std::vector<Complex> result = op.apply(vec);
+    //     std::copy(result.begin(), result.end(), Hv);
+    // }, 16, 16, 1e-6, eigenvalues);
     
-    return 0;
+    // for (size_t i = 0; i < eigenvalues.size(); i++) {
+    //     std::cout << "Eigenvalue " << i << ": " << eigenvalues[i] << std::endl;
+    // }
+    // // Compare with direct diagonalization
+    // std::cout << "\nComparing with direct diagonalization:" << std::endl;
+    
+    // // Get the full Hamiltonian matrix
+    // std::vector<std::vector<Complex>> full_matrix = op.returnMatrix();
+    // int N = full_matrix.size();
+    
+    // // Convert to LAPACK format
+    // std::vector<Complex> matrix(N*N);
+    // for (int i = 0; i < N; i++) {
+    //     for (int j = 0; j < N; j++) {
+    //         matrix[i*N + j] = full_matrix[i][j];
+    //     }
+    // }
+    
+    // // Allocate arrays for eigenvalues and eigenvectors
+    // std::vector<double> w(N);
+    
+    // // Solve the full eigenvalue problem
+    // int info = LAPACKE_zheev(LAPACK_ROW_MAJOR, 'N', 'U', N, 
+    //                         reinterpret_cast<lapack_complex_double*>(matrix.data()), 
+    //                         N, w.data());
+    
+    // if (info != 0) {
+    //     std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+    //     return 1;
+    // }
+    
+    // // Print and compare eigenvalues
+    // std::cout << "Direct diagonalization eigenvalues:" << std::endl;
+    // for (int i = 0; i < std::min(N, (int)eigenvalues.size()); i++) {
+    //     std::cout << "Eigenvalue " << i << ": " << w[i] 
+    //               << " (Lanczos: " << eigenvalues[i] 
+    //               << ", diff: " << std::abs(w[i] - eigenvalues[i]) << ")" << std::endl;
+    // }
+
+    // return 0;
 }
