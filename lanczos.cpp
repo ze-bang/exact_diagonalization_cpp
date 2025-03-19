@@ -289,59 +289,20 @@ void lanczos_with_cg(std::function<void(const Complex*, Complex*, int)> H, int N
 
 int main(){
     Operator op(4);
-    op.loadFromFile("./ED_test/Trans.def");
-    op.loadFromInterAllFile("./ED_test/InterAll.def");
-    // op.printMatrix();
-    // std::vector<double> eigenvalues;
-    ComplexVector v(4);
-    v[0] = Complex(1.0, 0.0);
-    op.apply(v);
-    std::cout << v[0] << " " << v[1] << " " << v[2] << " " << v[3] << std::endl;
+    op.readTrans("./ED_test/Trans.def");
+    // op.readInterAll("./ED_test/InterAll.def");
+    // printMatrixRepresentation(op);
+    std::vector<double> eigenvalues;
 
-    // lanczos_with_cg([&](const Complex* v, Complex* Hv, int N) {
-    //     std::vector<Complex> vec(v, v + N);
-    //     std::vector<Complex> result = op.apply(vec);
-    //     std::copy(result.begin(), result.end(), Hv);
-    // }, 16, 16, 1e-6, eigenvalues);
+    lanczos([&](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result(N, Complex(0.0, 0.0));
+        op.transform(vec, result);
+        std::copy(result.begin(), result.end(), Hv);
+    }, 16, 16, 1e-6, eigenvalues);
     
-    // for (size_t i = 0; i < eigenvalues.size(); i++) {
-    //     std::cout << "Eigenvalue " << i << ": " << eigenvalues[i] << std::endl;
-    // }
-    // // Compare with direct diagonalization
-    // std::cout << "\nComparing with direct diagonalization:" << std::endl;
-    
-    // // Get the full Hamiltonian matrix
-    // std::vector<std::vector<Complex>> full_matrix = op.returnMatrix();
-    // int N = full_matrix.size();
-    
-    // // Convert to LAPACK format
-    // std::vector<Complex> matrix(N*N);
-    // for (int i = 0; i < N; i++) {
-    //     for (int j = 0; j < N; j++) {
-    //         matrix[i*N + j] = full_matrix[i][j];
-    //     }
-    // }
-    
-    // // Allocate arrays for eigenvalues and eigenvectors
-    // std::vector<double> w(N);
-    
-    // // Solve the full eigenvalue problem
-    // int info = LAPACKE_zheev(LAPACK_ROW_MAJOR, 'N', 'U', N, 
-    //                         reinterpret_cast<lapack_complex_double*>(matrix.data()), 
-    //                         N, w.data());
-    
-    // if (info != 0) {
-    //     std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
-    //     return 1;
-    // }
-    
-    // // Print and compare eigenvalues
-    // std::cout << "Direct diagonalization eigenvalues:" << std::endl;
-    // for (int i = 0; i < std::min(N, (int)eigenvalues.size()); i++) {
-    //     std::cout << "Eigenvalue " << i << ": " << w[i] 
-    //               << " (Lanczos: " << eigenvalues[i] 
-    //               << ", diff: " << std::abs(w[i] - eigenvalues[i]) << ")" << std::endl;
-    // }
-
-    // return 0;
+    for (size_t i = 0; i < eigenvalues.size(); i++) {
+        std::cout << "Eigenvalue " << i << ": " << eigenvalues[i] << std::endl;
+    } 
+    return 0;
 }
