@@ -3,7 +3,7 @@ import sys
 import os
 z = np.array([np.array([1,1,1])/np.sqrt(3), np.array([1,-1,-1])/np.sqrt(3), np.array([-1,1,-1])/np.sqrt(3), np.array([-1,-1,1])/np.sqrt(3)])
 
-def indices(i,j,k,u,d1, d2, d3):
+def indices_periodic_BC(i,j,k,u,d1, d2, d3):
     if u == 0:
         return np.array([[i, j, k, 1], [i, j, k, 2], [i, j, k, 3], [np.mod(i-1, d1), j, k, 1], [i, np.mod(j-1, d2), k, 2], [i, j, np.mod(k-1, d3), 3]])
     elif u == 1:
@@ -12,6 +12,17 @@ def indices(i,j,k,u,d1, d2, d3):
         return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 3], [i, np.mod(j+1, d2), k, 0], [np.mod(i-1, d1), np.mod(j+1, d2), k, 1], [i, np.mod(j+1, d2), np.mod(k-1, d3), 3]])
     elif u == 3:
         return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 2], [i, j, np.mod(k+1, d3), 0], [np.mod(i-1, d1), j, np.mod(k+1, d3), 1], [i, np.mod(j-1, d2), np.mod(k+1, d3), 2]])
+
+def indices_open_BC(i,j,k,u,d1, d2, d3):
+    if u == 0:
+        return np.array([[i, j, k, 1], [i, j, k, 2], [i, j, k, 3], [i-1, j, k, 1], [i, j-1, k, 2], [i, j, k-1, 3]])
+    elif u == 1:
+        return np.array([[i, j, k, 0], [i, j, k, 2], [i, j, k, 3], [i+1, j, k, 0],[i+1, j-1, k, 2], [i+1, j, k-1, 3]])
+    elif u == 2:
+        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 3], [i, j+1, k, 0], [i-1, j+1, k, 1], [i, j+1, k-1, 3]])
+    elif u == 3:
+        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 2], [i, j, k+1, 0], [i-1, j, k+1, 1], [i, j-1, k+1, 2]])
+
 
 
 dim1 = int(sys.argv[9])
@@ -32,31 +43,38 @@ B = np.einsum('r, ir->i', h*fielddir,z)
 
 
 def flattenIndex(Indx):
-    temp = np.zeros(6)
+    temp = np.zeros(len(Indx))
     for i in range(6):
         temp[i] = Indx[i][0]*dim2*dim3*4 + Indx[i][1]*dim3*4 + Indx[i][2]*4 + Indx[i][3]
     return temp
 
-def genNN_list(d1,d2,d3):
+def genNN_list(d1,d2,d3, PBC = True):
     NN_list = np.zeros((d1*d2*d3*4, 6))
     for i in range(d1):
         for j in range(d2):
             for k in range(d3):
                 for u in range(4):
-                    NN_list[i*d2*d3*4+j*d3*4+k*4+u] = flattenIndex(indices(i,j,k,u,d1,d2,d3))
+                    if PBC:
+                        NN_list[i*d2*d3*4+j*d3*4+k*4+u] = flattenIndex(indices_periodic_BC(i,j,k,u,d1,d2,d3))
+                    else:
+                        NN_list[i*d2*d3*4+j*d3*4+k*4+u] = flattenIndex(indices_open_BC(i,j,k,u,d1,d2,d3))
     return NN_list
 
 look_up_table = genNN_list(dim1, dim2, dim3)
 
 #Sz = 2, Sp = 0, Sm = 1
 def HeisenbergNN(Jzz, Jpm, Jpmpm, indx1, indx2):
-    return np.array([[2, indx1, 2, indx2, Jzz, 0],
-                     
-                     [0, indx1, 1, indx2, -Jpm, 0],
-                     [1, indx1, 0, indx2, -Jpm, 0],
+    if indx1 <= dim1*dim2*dim3*4 and indx2 <= dim1*dim2*dim3*4 and indx1 >= 0 and indx2 >= 0:
+        Jzz = Jzz/2 
+        Jpm = Jpm/2
+        Jpmpm = Jpmpm/2
+        return np.array([[2, indx1, 2, indx2, Jzz, 0],
+                        
+                        [0, indx1, 1, indx2, -Jpm, 0],
+                        [1, indx1, 0, indx2, -Jpm, 0],
 
-                     [1, indx1, 1, indx2, Jpmpm, 0],
-                     [0, indx1, 0, indx2, Jpmpm, 0]])
+                        [1, indx1, 1, indx2, Jpmpm, 0],
+                        [0, indx1, 0, indx2, Jpmpm, 0]])
 
 def Zeeman(h, indx):
     here = h[indx % 4]

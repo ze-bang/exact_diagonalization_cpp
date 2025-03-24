@@ -291,7 +291,13 @@ int main(){
     Operator op(4);
     op.readTrans("./ED_test/Trans.def");
     // op.readInterAll("./ED_test/InterAll.def");
-    // printMatrixRepresentation(op);
+    Matrix matrix = op.returnMatrix();
+    for (int i = 0; i < matrix.size(); i++) {
+        for (int j = 0; j < matrix[i].size(); j++) {
+            std::cout << matrix[i][j] << " ";
+        }
+        std::cout << std::endl;
+    }
     std::vector<double> eigenvalues;
 
     lanczos([&](const Complex* v, Complex* Hv, int N) {
