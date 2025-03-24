@@ -35,7 +35,7 @@ public:
 
     // Apply the operator to a complex vector
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
-        int dim = n_bits_;  // Dimension of the vector space (2^n_bits)
+        int dim = 1 << n_bits_;  // Dimension of the vector space (2^n_bits)
         
         // Check if the input vector has the correct dimension
         if (vec.size() != static_cast<size_t>(dim)) {
@@ -94,7 +94,7 @@ public:
         int numLines;
         std::string m;
         iss >> m >> numLines;
-        std::cout << "Number of lines: " << numLines << std::endl;
+        // std::cout << "Number of lines: " << numLines << std::endl;
         // Skip the next 3 lines (separators/headers)
         for (int i = 0; i < 3; ++i) {
             std::getline(file, line);
@@ -106,36 +106,25 @@ public:
             std::istringstream lineStream(line);
             int Op, indx;
             double E, F;
-            std::cout << "Reading line: " << line << std::endl;
+            // std::cout << "Reading line: " << line << std::endl;
             if (!(lineStream >> Op >> indx >> E >> F)) {
                 continue; // Skip invalid lines
             }
-            
-            // // Update n_bits if needed
-            // n_bits_ = std::max({n_bits_, A + 1, C + 1});
-            
-            // Add a transform function for this interaction
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 // Check if all bits match their expected values
                 if (Op == 2){
-                    return {basis, Complex(E*0.5*pow(-1,(basis >> indx) & 1),F)};
+                    return {basis, Complex(E,F)*0.5*pow(-1,(basis >> indx) & 1)};
                 }
                 else{
-                    bool A_matches = ((basis >> indx) & 1) == Op;
-                    if (A_matches) {
-                        return {-1, Complex(0.0, 0.0)}; // No contribution
+                    if (((basis >> indx) & 1) != Op) {
+                        // Flip the A bit
+                        int flipped_basis = basis ^ (1 << indx);
+                        return {flipped_basis, Complex(E, F)};                    
                     }
-                    // Flip the A bit
-                    int flipped_basis = basis ^ (1 << indx);
-                    return {flipped_basis, Complex(E, F)};
                 }
-                // }
-                // else{
-                //     return {basis, Complex(0.0, 0.0)};
-                // }
+                // Default case: no transformation applies
+                return {-1, Complex(0.0, 0.0)};
             });
-            
-            
             lineCount++;
         }
         std::cout << "File read complete." << std::endl;
@@ -158,7 +147,7 @@ public:
         int numLines;
         std::string m;
         iss >> m >> numLines;
-        std::cout << "Number of lines: " << numLines << std::endl;
+        // std::cout << "Number of lines: " << numLines << std::endl;
         
         // Skip the next 3 lines (separators/headers)
         for (int i = 0; i < 3; ++i) {
@@ -171,49 +160,57 @@ public:
             std::istringstream lineStream(line);
             int Op1, indx1, Op2, indx2;
             double E, F;
-            std::cout << "Reading line: " << line << std::endl;
+            // std::cout << "Reading line: " << line << std::endl;
             if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
                 continue; // Skip invalid lines
             }
-            
-            // Add a transform function for this interaction
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                // Check if all bits match their expected values
-                if (Op2 == 2){
-                    return {basis, Complex(0.5*pow(-1,(basis >> indx2) & 1), 0)};
-                }
-                else{
-                    bool A_matches = ((basis >> indx2) & 1) == Op2;
-                    if (A_matches) {
-                        return {-1, Complex(0.0, 0.0)}; // No contribution
+                // Check what type of operators we're dealing with
+                if (Op1 == 2 && Op2 == 2) {
+                    // Both are identity operators with phase factors
+                    int bit1 = (basis >> indx1) & 1;
+                    int bit2 = (basis >> indx2) & 1;
+                    return {basis, Complex(E, F)* 0.25 * pow(-1, bit1) * pow(-1, bit2)};
+                } 
+                else if (Op1 == 2) {
+                    // Op1 is identity with phase, Op2 is bit flip
+                    int bit1 = (basis >> indx1) & 1;
+                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                    
+                    if (bit2_matches) {
+                        int flipped_basis = basis ^ (1 << indx2);
+                        return {flipped_basis, Complex(E, F) * 0.5 * pow(-1, bit1)};
                     }
-                    // Flip the A bit
-                    int flipped_basis = basis ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0)};
-                }
-            });
-
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                // Check if all bits match their expected values
-                if (Op1 == 2){
-                    return {basis, Complex(E*0.5*pow(-1,(basis >> indx1) & 1), F)};
-                }
-                else{
-                    bool A_matches = ((basis >> indx1) & 1) == Op1;
-                    if (A_matches) {
-                        return {-1, Complex(0.0, 0.0)}; // No contribution
+                } 
+                else if (Op2 == 2) {
+                    // Op2 is identity with phase, Op1 is bit flip
+                    int bit2 = (basis >> indx2) & 1;
+                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                    
+                    if (bit1_matches) {
+                        // Flip the first bit
+                        int flipped_basis = basis ^ (1 << indx1);
+                        return {flipped_basis, Complex(E, F)* 0.5 * pow(-1, bit2)};
                     }
-                    // Flip the A bit
-                    int flipped_basis = basis ^ (1 << indx1);
-                    return {flipped_basis, Complex(E, F)};
+                } 
+                else {
+                    // Both are bit flip operators
+                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                    
+                    if (bit1_matches && bit2_matches) {
+                        // Flip both bits
+                        int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
+                        return {flipped_basis, Complex(E, F)};
+                    }
                 }
+                // Default case: no transformation applies
+                return {-1, Complex(0.0, 0.0)};
             });
-            
             lineCount++;
         }
-        std::cout << "File read complete." << std::endl;
+        std::cout << "File read complete." << std::endl;    
     }
-    
 };
     // Load operator definition from an InterAll.def file
     

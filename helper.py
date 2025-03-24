@@ -61,7 +61,6 @@ def genNN_list(d1,d2,d3, PBC = True):
     return NN_list
 
 look_up_table = genNN_list(dim1, dim2, dim3)
-
 #Sz = 2, Sp = 0, Sm = 1
 def HeisenbergNN(Jzz, Jpm, Jpmpm, indx1, indx2):
     if indx1 <= dim1*dim2*dim3*4 and indx2 <= dim1*dim2*dim3*4 and indx1 >= 0 and indx2 >= 0:
