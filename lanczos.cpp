@@ -2238,117 +2238,80 @@ std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
         Complex scale = Complex(1.0/norm, 0.0);
         cblas_zscal(N, &scale, r_vec.data(), 1);
         
-        // Run Lanczos to get eigenpairs
-        std::vector<double> alpha(M, 0.0);
-        std::vector<double> beta(M+1, 0.0);
-        std::vector<ComplexVector> V(M, ComplexVector(N));
-        V[0] = r_vec;
-        
-        ComplexVector w(N);
-        for (int j = 0; j < M; j++) {
-            H(V[j].data(), w.data(), N);
-            
-            Complex dot_prod;
-            cblas_zdotc_sub(N, V[j].data(), 1, w.data(), 1, &dot_prod);
-            alpha[j] = std::real(dot_prod);
-            
-            if (j > 0) {
-                Complex neg_beta = Complex(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, V[j-1].data(), 1, w.data(), 1);
-            }
-            
-            Complex neg_alpha = Complex(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, V[j].data(), 1, w.data(), 1);
-            
-            // Full reorthogonalization
-            for (int k = 0; k <= j; k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, V[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, V[k].data(), 1, w.data(), 1);
-            }
-            
-            beta[j+1] = cblas_dznrm2(N, w.data(), 1);
-            
-            if (beta[j+1] < tol) {
-                M = j + 1;
-                break;
-            }
-            
-            if (j < M - 1) {
-                Complex beta_inv = Complex(1.0/beta[j+1], 0.0);
-                for (int i = 0; i < N; i++) {
-                    V[j+1][i] = w[i] * beta_inv;
+        // Create a function that applies H but starts from our random vector
+        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
+            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
+            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
+                bool is_e0 = true;
+                for (int i = 1; i < size; i++) {
+                    if (std::abs(v[i]) > 1e-10) {
+                        is_e0 = false;
+                        break;
+                    }
+                }
+                
+                if (is_e0) {
+                    H(r_vec.data(), result, size);
+                    return;
                 }
             }
-        }
+            
+            // Regular application of H
+            H(v, result, size);
+        };
         
-        // Diagonalize tridiagonal matrix
-        std::vector<double> eigvals(M);
-        std::vector<double> eigvecs(M * M);
+        // Run Chebyshev filtered Lanczos to get eigenpairs
+        std::vector<double> eigvals;
+        std::vector<ComplexVector> eigvecs;
         
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', M, alpha.data(), 
-                               &beta[1], eigvecs.data(), M);
-        
-        if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error " << info << std::endl;
-            continue;
-        }
+        chebyshev_filtered_lanczos(H_from_r, N, M, tol, eigvals, &eigvecs);
         
         // Update partition function
         double Z_r = 0.0;
-        for (int j = 0; j < M; j++) {
-            double psi_r_j = eigvecs[j * M];
-            Z_r += std::exp(-b * eigvals[j]) * psi_r_j * psi_r_j;
+        for (int j = 0; j < eigvals.size(); j++) {
+            // Calculate |⟨r|ψ_j⟩|^2
+            Complex r_psi_j;
+            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
+            Z_r += std::exp(-b * eigvals[j]) * std::norm(r_psi_j);
         }
         Z += Z_r;
         
         // For each eigenstate |j⟩
-        for (int j = 0; j < M; j++) {
-            // Thermal weight
-            double weight = std::exp(-b * eigvals[j]) * eigvecs[j * M] * eigvecs[j * M];
+        for (int j = 0; j < eigvals.size(); j++) {
+            // Calculate |⟨r|ψ_j⟩|^2
+            Complex r_psi_j;
+            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
             
-            // Reconstruct eigenstate |ψ_j⟩
-            ComplexVector psi_j(N, Complex(0.0, 0.0));
-            for (int k = 0; k < M; k++) {
-                Complex coef(eigvecs[j * M + k], 0.0);
-                cblas_zaxpy(N, &coef, V[k].data(), 1, psi_j.data(), 1);
-            }
+            // Thermal weight
+            double weight = std::exp(-b * eigvals[j]) * std::norm(r_psi_j);
             
             // Apply B to |ψ_j⟩: |φ⟩ = B|ψ_j⟩
             ComplexVector phi(N);
-            B(psi_j.data(), phi.data(), N);
+            B(eigvecs[j].data(), phi.data(), N);
             
             // For each time point
             for (int t_idx = 0; t_idx < n_points; t_idx++) {
                 double t = time_values[t_idx];
                 
                 // Time-evolved state |φ(t)⟩ = exp(-iHt)|φ⟩ = exp(-iHt)B|ψ_j⟩
-                // Use the eigendecomposition for time evolution
                 ComplexVector phi_t(N, Complex(0.0, 0.0));
                 
                 // For each eigenvalue/vector pair
-                for (int m = 0; m < M; m++) {
+                for (int m = 0; m < eigvals.size(); m++) {
                     // Calculate ⟨ψ_m|φ⟩
-                    ComplexVector psi_m(N, Complex(0.0, 0.0));
-                    for (int k = 0; k < M; k++) {
-                        Complex coef(eigvecs[m * M + k], 0.0);
-                        cblas_zaxpy(N, &coef, V[k].data(), 1, psi_m.data(), 1);
-                    }
-                    
                     Complex psi_m_phi;
-                    cblas_zdotc_sub(N, psi_m.data(), 1, phi.data(), 1, &psi_m_phi);
+                    cblas_zdotc_sub(N, eigvecs[m].data(), 1, phi.data(), 1, &psi_m_phi);
                     
                     // Apply time evolution: exp(-iE_m t)⟨ψ_m|φ⟩|ψ_m⟩
                     Complex phase = std::exp(Complex(0.0, -eigvals[m] * t));
                     Complex coef = phase * psi_m_phi;
                     
-                    cblas_zaxpy(N, &coef, psi_m.data(), 1, phi_t.data(), 1);
+                    cblas_zaxpy(N, &coef, eigvecs[m].data(), 1, phi_t.data(), 1);
                 }
                 
                 // Calculate ⟨φ(t)|A|ψ_j⟩
                 ComplexVector A_psi(N);
-                A(psi_j.data(), A_psi.data(), N);
+                A(eigvecs[j].data(), A_psi.data(), N);
                 
                 Complex corr;
                 cblas_zdotc_sub(N, phi_t.data(), 1, A_psi.data(), 1, &corr);
