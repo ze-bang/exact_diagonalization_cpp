@@ -1706,7 +1706,7 @@ Complex FTLM(
     std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
     std::function<void(const Complex*, Complex*, int)> A, // Observable matrix-vector product
     int N,             // Dimension of Hilbert space
-    double b,          // Inverse temperature (β = 1/kT)
+    double beta,          // Inverse temperature (β = 1/kT)
     int r_max = 20,    // Number of random vectors for sampling the trace
     int m_max = 100,   // Maximum Lanczos iterations per random vector
     double tol = 1e-10 // Tolerance
@@ -1764,7 +1764,7 @@ Complex FTLM(
         
         // Calculate contributions to the thermal traces
         for (int i = 0; i < m; i++) {
-            double exp_factor = std::exp(-b * evals[i]);
+            double exp_factor = std::exp(-beta * evals[i]);
             trace_exp_H += exp_factor;
             trace_A_exp_H += A_reduced[i][i] * exp_factor;
         }
@@ -1776,7 +1776,7 @@ Complex FTLM(
 
 // Calculate the dynamical correlation function S_AB(ω) using FTLM
 // S_AB(ω) = (1/Z) ∑_n,m e^(-βE_n) ⟨n|A|m⟩⟨m|B|n⟩ δ(ω - (E_m - E_n))
-std::vector<std::pair<double, Complex>> calculateDynamicalResponse(
+std::vector<std::pair<double, Complex>> FTLM_dynamical(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
     std::function<void(const Complex*, Complex*, int)> A,  // First operator
     std::function<void(const Complex*, Complex*, int)> B,  // Second operator (use A for auto-correlation)
@@ -1912,6 +1912,461 @@ std::vector<std::pair<double, Complex>> calculateDynamicalResponse(
     return result;
 }
 
+// Low-Temperature Lanczos Method (LTLM) for thermal expectation values
+Complex LTLM(
+    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A, // Observable operator
+    int N,              // Dimension of Hilbert space
+    double beta,        // Inverse temperature (β = 1/kT)
+    int R,              // Number of random samples
+    int M,              // Lanczos iterations per sample
+    double tol = 1e-10  // Tolerance for convergence
+) {
+    // Random number generator for random states
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Accumulators for numerator and denominator
+    Complex num(0.0, 0.0);
+    double denom = 0.0;
+    
+    // For each random sample
+    for (int r = 0; r < R; r++) {
+        // Generate random vector |r⟩
+        ComplexVector r_vec(N);
+        for (int i = 0; i < N; i++) {
+            r_vec[i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, r_vec.data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, r_vec.data(), 1);
+        
+        // Create a matrix-vector product that starts from our random vector
+        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
+            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
+            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
+                bool is_e0 = true;
+                for (int i = 1; i < size; i++) {
+                    if (std::abs(v[i]) > 1e-10) {
+                        is_e0 = false;
+                        break;
+                    }
+                }
+                
+                if (is_e0) {
+                    H(r_vec.data(), result, size);
+                    return;
+                }
+            }
+            
+            // Regular application of H
+            H(v, result, size);
+        };
+        
+        // Use Chebyshev filtered Lanczos to get eigenvalues and eigenvectors
+        std::vector<double> eigenvalues;
+        std::vector<ComplexVector> eigenvectors;
+        
+        chebyshev_filtered_lanczos(H, N, M, tol, eigenvalues, &eigenvectors);
+        
+        int m = eigenvalues.size();
+        
+        // Calculate ⟨r|e^{-βH}A|r⟩ and ⟨r|e^{-βH}|r⟩
+        Complex exp_H_A_r(0.0, 0.0);
+        double exp_H_r = 0.0;
+        
+        // For each eigenvalue/vector pair
+        for (int j = 0; j < m; j++) {
+            // Calculate |⟨r|ψ_j⟩|²
+            Complex r_psi_j;
+            cblas_zdotc_sub(N, r_vec.data(), 1, eigenvectors[j].data(), 1, &r_psi_j);
+            double weight = std::exp(-beta * eigenvalues[j]) * std::norm(r_psi_j);
+            
+            // Add to denominator
+            exp_H_r += weight;
+            
+            // Apply A to |ψ_j⟩
+            ComplexVector A_psi(N);
+            A(eigenvectors[j].data(), A_psi.data(), N);
+            
+            // Calculate ⟨r|A|ψ_j⟩
+            Complex r_A_psi;
+            cblas_zdotc_sub(N, r_vec.data(), 1, A_psi.data(), 1, &r_A_psi);
+            
+            // Add contribution to numerator
+            exp_H_A_r += weight * r_A_psi;
+        }
+        
+        // Add to accumulators
+        num += exp_H_A_r;
+        denom += exp_H_r;
+    }
+    
+    // Return thermal average ⟨A⟩ = Tr(e^{-βH}A)/Tr(e^{-βH})
+    return num / denom;
+}
+
+// LTLM for dynamical correlation function at low temperatures
+// Calculates S_AB(ω) = (1/Z) ∑_j e^{-βE_j} ∑_i |⟨i|A|j⟩|^2 δ(ω - (E_i - E_j))
+std::vector<std::pair<double, Complex>> LTLM_dynamical(
+    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A, // First operator
+    std::function<void(const Complex*, Complex*, int)> B, // Second operator
+    int N,              // Dimension of Hilbert space
+    double beta,        // Inverse temperature (β = 1/kT)
+    double omega_min,   // Minimum frequency
+    double omega_max,   // Maximum frequency
+    int n_points,       // Number of frequency points
+    double eta,         // Broadening parameter
+    int R,              // Number of random samples
+    int M,              // Lanczos iterations per sample
+    double tol = 1e-10  // Tolerance for convergence
+) {
+    // Generate frequency grid
+    std::vector<double> omega_values(n_points);
+    double delta_omega = (omega_max - omega_min) / (n_points - 1);
+    for (int i = 0; i < n_points; i++) {
+        omega_values[i] = omega_min + i * delta_omega;
+    }
+    
+    // Initialize result vector
+    std::vector<Complex> S_AB(n_points, Complex(0.0, 0.0));
+    
+    // Initialize random number generator
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Accumulator for partition function
+    double Z = 0.0;
+    
+    // For each random sample
+    for (int r = 0; r < R; r++) {
+        // Generate random vector |r⟩
+        ComplexVector r_vec(N);
+        for (int i = 0; i < N; i++) {
+            r_vec[i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, r_vec.data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, r_vec.data(), 1);
+        
+        // Create a function that applies H but starts from our random vector
+        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
+            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
+            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
+                bool is_e0 = true;
+                for (int i = 1; i < size; i++) {
+                    if (std::abs(v[i]) > 1e-10) {
+                        is_e0 = false;
+                        break;
+                    }
+                }
+                
+                if (is_e0) {
+                    H(r_vec.data(), result, size);
+                    return;
+                }
+            }
+            
+            // Regular application of H
+            H(v, result, size);
+        };
+        
+        // Run Chebyshev filtered Lanczos to get eigenpairs
+        std::vector<double> eigvals;
+        std::vector<ComplexVector> eigvecs;
+        
+        chebyshev_filtered_lanczos(H_from_r, N, M, tol, eigvals, &eigvecs);
+        
+        // Calculate Z contribution for this sample
+        double Z_r = 0.0;
+        for (int j = 0; j < eigvals.size(); j++) {
+            // Calculate |⟨r|ψ_j⟩|^2
+            Complex r_psi_j;
+            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
+            Z_r += std::exp(-beta * eigvals[j]) * std::norm(r_psi_j);
+        }
+        Z += Z_r;
+        
+        // For each eigenstate |j⟩
+        for (int j = 0; j < eigvals.size(); j++) {
+            // Calculate |⟨r|ψ_j⟩|^2
+            Complex r_psi_j;
+            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
+            
+            // Thermodynamic weight factor e^{-βE_j}|⟨r|ψ_j⟩|^2
+            double weight = std::exp(-beta * eigvals[j]) * std::norm(r_psi_j);
+            
+            // Apply A to |ψ_j⟩
+            ComplexVector A_psi_j(N);
+            A(eigvecs[j].data(), A_psi_j.data(), N);
+            
+            // Normalize A|ψ_j⟩
+            double A_psi_norm = cblas_dznrm2(N, A_psi_j.data(), 1);
+            if (A_psi_norm < tol) continue;  // Skip if A|ψ_j⟩ is approximately 0
+            
+            Complex A_scale = Complex(1.0/A_psi_norm, 0.0);
+            cblas_zscal(N, &A_scale, A_psi_j.data(), 1);
+            
+            // Create a function that applies H but starts from A|ψ_j⟩
+            auto H_from_Apsi = [&H, &A_psi_j, N](const Complex* v, Complex* result, int size) {
+                // If v is the unit vector e_0 = [1,0,0,...], we return H*A_psi_j
+                if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
+                    bool is_e0 = true;
+                    for (int i = 1; i < size; i++) {
+                        if (std::abs(v[i]) > 1e-10) {
+                            is_e0 = false;
+                            break;
+                        }
+                    }
+                    
+                    if (is_e0) {
+                        H(A_psi_j.data(), result, size);
+                        return;
+                    }
+                }
+                
+                // Regular application of H
+                H(v, result, size);
+            };
+            
+            // Run second Chebyshev filtered Lanczos with A|ψ_j⟩ as starting vector
+            std::vector<double> eigvals2;
+            std::vector<ComplexVector> eigvecs2;
+            
+            chebyshev_filtered_lanczos(H_from_Apsi, N, M, tol, eigvals2, &eigvecs2);
+            
+            // Calculate B matrix elements if B is different from A
+            bool B_is_A = (&B == &A);
+            ComplexVector B_psi_j;
+            double B_psi_norm = 0.0;
+            
+            if (!B_is_A) {
+                B_psi_j.resize(N);
+                B(eigvecs[j].data(), B_psi_j.data(), N);
+                B_psi_norm = cblas_dznrm2(N, B_psi_j.data(), 1);
+            }
+            
+            // For each final state |i⟩
+            for (int i = 0; i < eigvals2.size(); i++) {
+                // Energy difference
+                double omega_ij = eigvals2[i] - eigvals[j];
+                
+                // Calculate ⟨ψ_i|A|ψ_j⟩
+                Complex A_matrix_element;
+                cblas_zdotc_sub(N, eigvecs2[i].data(), 1, A_psi_j.data(), 1, &A_matrix_element);
+                A_matrix_element *= A_psi_norm; // Adjust for normalization
+                
+                // For cross-correlation <AB>, compute <i|B|j> matrix element
+                Complex B_matrix_element;
+                if (B_is_A) {
+                    B_matrix_element = A_matrix_element;
+                } else {
+                    // Calculate ⟨ψ_i|B|ψ_j⟩
+                    cblas_zdotc_sub(N, eigvecs2[i].data(), 1, B_psi_j.data(), 1, &B_matrix_element);
+                }
+                
+                // Contribution to correlation function with Lorentzian broadening
+                Complex contrib = weight * A_matrix_element * std::conj(B_matrix_element);
+                
+                // Add to all frequency points with broadening
+                for (int p = 0; p < n_points; p++) {
+                    double omega = omega_values[p];
+                    // Lorentzian: η/π / [(ω-ω_ij)^2 + η^2]
+                    double lorentz = eta / (M_PI * ((omega - omega_ij)*(omega - omega_ij) + eta*eta));
+                    S_AB[p] += contrib * Complex(lorentz, 0.0);
+                }
+            }
+        }
+    }
+    
+    // Normalize by partition function and prepare result
+    std::vector<std::pair<double, Complex>> result(n_points);
+    for (int i = 0; i < n_points; i++) {
+        result[i] = std::make_pair(omega_values[i], S_AB[i] / Z);
+    }
+    
+    return result;
+}
+
+// LTLM for calculating thermal real-time correlation function
+// Computes C_AB(t) = (1/Z) ∑_j e^{-βE_j} ⟨j|A(t)B|j⟩
+std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
+    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A, // First operator
+    std::function<void(const Complex*, Complex*, int)> B, // Second operator
+    int N,              // Dimension of Hilbert space
+    double b,        // Inverse temperature (β = 1/kT)
+    double t_min,       // Minimum time
+    double t_max,       // Maximum time
+    int n_points,       // Number of time points
+    int R,              // Number of random samples
+    int M,              // Lanczos iterations per sample
+    double tol = 1e-10  // Tolerance for convergence
+) {
+    // Generate time grid
+    std::vector<double> time_values(n_points);
+    double delta_t = (t_max - t_min) / (n_points - 1);
+    for (int i = 0; i < n_points; i++) {
+        time_values[i] = t_min + i * delta_t;
+    }
+    
+    // Initialize result
+    std::vector<Complex> C_AB(n_points, Complex(0.0, 0.0));
+    
+    // Random generator
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Partition function accumulator
+    double Z = 0.0;
+    
+    // For each random sample
+    for (int r = 0; r < R; r++) {
+        // Generate random vector |r⟩
+        ComplexVector r_vec(N);
+        for (int i = 0; i < N; i++) {
+            r_vec[i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, r_vec.data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, r_vec.data(), 1);
+        
+        // Run Lanczos to get eigenpairs
+        std::vector<double> alpha(M, 0.0);
+        std::vector<double> beta(M+1, 0.0);
+        std::vector<ComplexVector> V(M, ComplexVector(N));
+        V[0] = r_vec;
+        
+        ComplexVector w(N);
+        for (int j = 0; j < M; j++) {
+            H(V[j].data(), w.data(), N);
+            
+            Complex dot_prod;
+            cblas_zdotc_sub(N, V[j].data(), 1, w.data(), 1, &dot_prod);
+            alpha[j] = std::real(dot_prod);
+            
+            if (j > 0) {
+                Complex neg_beta = Complex(-beta[j], 0.0);
+                cblas_zaxpy(N, &neg_beta, V[j-1].data(), 1, w.data(), 1);
+            }
+            
+            Complex neg_alpha = Complex(-alpha[j], 0.0);
+            cblas_zaxpy(N, &neg_alpha, V[j].data(), 1, w.data(), 1);
+            
+            // Full reorthogonalization
+            for (int k = 0; k <= j; k++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, V[k].data(), 1, w.data(), 1, &overlap);
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, V[k].data(), 1, w.data(), 1);
+            }
+            
+            beta[j+1] = cblas_dznrm2(N, w.data(), 1);
+            
+            if (beta[j+1] < tol) {
+                M = j + 1;
+                break;
+            }
+            
+            if (j < M - 1) {
+                Complex beta_inv = Complex(1.0/beta[j+1], 0.0);
+                for (int i = 0; i < N; i++) {
+                    V[j+1][i] = w[i] * beta_inv;
+                }
+            }
+        }
+        
+        // Diagonalize tridiagonal matrix
+        std::vector<double> eigvals(M);
+        std::vector<double> eigvecs(M * M);
+        
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', M, alpha.data(), 
+                               &beta[1], eigvecs.data(), M);
+        
+        if (info != 0) {
+            std::cerr << "LAPACKE_dstevd failed with error " << info << std::endl;
+            continue;
+        }
+        
+        // Update partition function
+        double Z_r = 0.0;
+        for (int j = 0; j < M; j++) {
+            double psi_r_j = eigvecs[j * M];
+            Z_r += std::exp(-b * eigvals[j]) * psi_r_j * psi_r_j;
+        }
+        Z += Z_r;
+        
+        // For each eigenstate |j⟩
+        for (int j = 0; j < M; j++) {
+            // Thermal weight
+            double weight = std::exp(-b * eigvals[j]) * eigvecs[j * M] * eigvecs[j * M];
+            
+            // Reconstruct eigenstate |ψ_j⟩
+            ComplexVector psi_j(N, Complex(0.0, 0.0));
+            for (int k = 0; k < M; k++) {
+                Complex coef(eigvecs[j * M + k], 0.0);
+                cblas_zaxpy(N, &coef, V[k].data(), 1, psi_j.data(), 1);
+            }
+            
+            // Apply B to |ψ_j⟩: |φ⟩ = B|ψ_j⟩
+            ComplexVector phi(N);
+            B(psi_j.data(), phi.data(), N);
+            
+            // For each time point
+            for (int t_idx = 0; t_idx < n_points; t_idx++) {
+                double t = time_values[t_idx];
+                
+                // Time-evolved state |φ(t)⟩ = exp(-iHt)|φ⟩ = exp(-iHt)B|ψ_j⟩
+                // Use the eigendecomposition for time evolution
+                ComplexVector phi_t(N, Complex(0.0, 0.0));
+                
+                // For each eigenvalue/vector pair
+                for (int m = 0; m < M; m++) {
+                    // Calculate ⟨ψ_m|φ⟩
+                    ComplexVector psi_m(N, Complex(0.0, 0.0));
+                    for (int k = 0; k < M; k++) {
+                        Complex coef(eigvecs[m * M + k], 0.0);
+                        cblas_zaxpy(N, &coef, V[k].data(), 1, psi_m.data(), 1);
+                    }
+                    
+                    Complex psi_m_phi;
+                    cblas_zdotc_sub(N, psi_m.data(), 1, phi.data(), 1, &psi_m_phi);
+                    
+                    // Apply time evolution: exp(-iE_m t)⟨ψ_m|φ⟩|ψ_m⟩
+                    Complex phase = std::exp(Complex(0.0, -eigvals[m] * t));
+                    Complex coef = phase * psi_m_phi;
+                    
+                    cblas_zaxpy(N, &coef, psi_m.data(), 1, phi_t.data(), 1);
+                }
+                
+                // Calculate ⟨φ(t)|A|ψ_j⟩
+                ComplexVector A_psi(N);
+                A(psi_j.data(), A_psi.data(), N);
+                
+                Complex corr;
+                cblas_zdotc_sub(N, phi_t.data(), 1, A_psi.data(), 1, &corr);
+                
+                // Add contribution
+                C_AB[t_idx] += weight * corr;
+            }
+        }
+    }
+    
+    // Normalize by partition function
+    std::vector<std::pair<double, Complex>> result(n_points);
+    for (int i = 0; i < n_points; i++) {
+        result[i] = std::make_pair(time_values[i], C_AB[i] / Z);
+    }
+    
+    return result;
+}
 
 // Advanced FTLM with adaptive convergence strategy
 Complex FTLM_adaptive(
