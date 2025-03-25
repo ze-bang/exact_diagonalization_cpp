@@ -495,7 +495,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
 // tol: Tolerance for convergence
 // eigenvalues: Output vector to store the eigenvalues
 // eigenvectors: Output matrix to store the eigenvectors (optional)
-void cg_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
+void CG(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
                       double tol, std::vector<double>& eigenvalues, 
                       std::vector<ComplexVector>* eigenvectors = nullptr) {
     
@@ -1934,13 +1934,6 @@ ThermodynamicResults calculate_thermodynamics(
     
     return results;
 }
-
-
-
-
-
-
-
 // Function to output thermodynamic results to file
 void output_thermodynamic_data(const ThermodynamicResults& results, const std::string& filename) {
     std::ofstream outfile(filename);
@@ -2039,6 +2032,332 @@ ThermodynamicResults calculate_thermodynamics_adaptive(
     }
     
     return results;
+}
+
+// ShiftedKrylovSolver class to calculate Green's function using
+// the shifted Krylov subspace method from the paper
+class ShiftedKrylovSolver {
+public:
+    // Calculate Green's function G(z) = <a|(zI-H)^(-1)|b> for multiple z-values
+    static std::vector<Complex> calculateGreenFunction(
+        std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+        const ComplexVector& b,                               // Source vector
+        const ComplexVector& a,                               // Projection vector
+        const std::vector<Complex>& shifts,                   // List of energy points z_k
+        int max_iter,                                         // Maximum iterations
+        double tol,                                          // Convergence tolerance
+        bool hermitian = true                                // Whether H is Hermitian
+    ) {
+        int N = b.size();
+        
+        if (hermitian) {
+            return solveShiftedCG(H, b, a, shifts, N, max_iter, tol);
+        } else {
+            return solveShiftedCOCG(H, b, a, shifts, N, max_iter, tol);
+        }
+    }
+
+private:
+    // Shifted CG method for Hermitian matrices
+    static std::vector<Complex> solveShiftedCG(
+        std::function<void(const Complex*, Complex*, int)> H,
+        const ComplexVector& b,
+        const ComplexVector& a,
+        const std::vector<Complex>& shifts,
+        int N, int max_iter, double tol
+    ) {
+        int n_shifts = shifts.size();
+        
+        // Select the first shift as the seed
+        Complex sigma_seed = shifts[0];
+        
+        // Define the seed shifted matrix A = sigma_seed*I - H
+        auto A = [&H, &sigma_seed, N](const Complex* v, Complex* result, int size) {
+            // First compute H*v
+            H(v, result, size);
+            
+            // Then compute (sigma_seed*I - H)*v
+            for (int i = 0; i < size; i++) {
+                result[i] = sigma_seed * v[i] - result[i];
+            }
+        };
+        
+        // Initialize residual vectors for the seed equation
+        ComplexVector r_prev(N, Complex(0.0, 0.0));
+        ComplexVector r_curr(b);  // r_0 = b
+        ComplexVector r_next(N);
+        
+        // Initialize coefficients
+        Complex rho_curr, rho_prev = Complex(0.0, 0.0);
+        Complex alpha, alpha_prev = Complex(0.0, 0.0);
+        Complex beta, beta_prev = Complex(0.0, 0.0);
+        
+        // Calculate initial rho_0 = <r_0|r_0>
+        cblas_zdotc_sub(N, r_curr.data(), 1, r_curr.data(), 1, &rho_curr);
+        
+        // Initialize collinearity factors for each shift
+        std::vector<Complex> pi_prev(n_shifts, Complex(1.0, 0.0));
+        std::vector<Complex> pi_curr(n_shifts, Complex(1.0, 0.0));
+        std::vector<Complex> pi_next(n_shifts);
+        
+        // Initialize projected solution and search vectors
+        std::vector<Complex> y_sigma(n_shifts, Complex(0.0, 0.0));
+        
+        // Calculate initial projection u_0^sigma = <a|b>
+        Complex a_dot_b;
+        cblas_zdotc_sub(N, a.data(), 1, b.data(), 1, &a_dot_b);
+        std::vector<Complex> u_sigma(n_shifts, a_dot_b);
+        
+        // Main iteration loop
+        for (int n = 0; n < max_iter; n++) {
+            // Apply matrix A to current residual
+            ComplexVector Ar(N);
+            A(r_curr.data(), Ar.data(), N);
+            
+            // Calculate <r_n|A*r_n>
+            Complex r_dot_Ar;
+            cblas_zdotc_sub(N, r_curr.data(), 1, Ar.data(), 1, &r_dot_Ar);
+            
+            // Calculate alpha_n using three-term recurrence
+            if (n == 0) {
+                alpha = rho_curr / r_dot_Ar;
+            } else {
+                alpha = rho_curr / (r_dot_Ar - (beta_prev / alpha_prev) * rho_curr);
+            }
+            
+            // Update residual using three-term recurrence (Eq. 9)
+            if (n == 0) {
+                for (int i = 0; i < N; i++) {
+                    r_next[i] = r_curr[i] - alpha * Ar[i];
+                }
+            } else {
+                Complex factor = alpha * beta_prev / alpha_prev;
+                for (int i = 0; i < N; i++) {
+                    r_next[i] = (1.0 + factor) * r_curr[i] - factor * r_prev[i] - alpha * Ar[i];
+                }
+            }
+            
+            // Calculate the projection <a|r_{n+1}>
+            Complex a_dot_r_next;
+            cblas_zdotc_sub(N, a.data(), 1, r_next.data(), 1, &a_dot_r_next);
+            
+            // Calculate rho_{n+1}
+            rho_prev = rho_curr;
+            cblas_zdotc_sub(N, r_next.data(), 1, r_next.data(), 1, &rho_curr);
+            
+            // Calculate beta_n
+            beta = rho_curr / rho_prev;
+            
+            // Update for all shifts
+            for (int k = 0; k < n_shifts; k++) {
+                Complex sigma_diff = shifts[k] - sigma_seed;
+                
+                // Calculate pi_{n+1}^sigma using recurrence (Eq. 17)
+                if (n == 0) {
+                    pi_next[k] = (1.0 + alpha * sigma_diff) * pi_curr[k];
+                } else {
+                    Complex factor = alpha * beta_prev / alpha_prev;
+                    pi_next[k] = (1.0 + factor + alpha * sigma_diff) * pi_curr[k] - 
+                                  factor * pi_prev[k];
+                }
+                
+                // Calculate alpha_n^sigma and beta_n^sigma (Eq. 18 and 19)
+                Complex alpha_sigma = alpha * (pi_curr[k] / pi_next[k]);
+                Complex beta_sigma = beta * std::pow(pi_curr[k] / pi_next[k], 2);
+                
+                // Update projected solution (Eq. 21)
+                y_sigma[k] += alpha_sigma * u_sigma[k];
+                
+                // Update projected search vector (Eq. 22)
+                u_sigma[k] = a_dot_r_next / pi_next[k] + beta_sigma * u_sigma[k];
+            }
+            
+            // Check convergence
+            double res_norm = cblas_dznrm2(N, r_next.data(), 1);
+            if (res_norm < tol) {
+                std::cout << "Converged after " << n+1 << " iterations." << std::endl;
+                break;
+            }
+            
+            // Update for next iteration
+            r_prev = r_curr;
+            r_curr = r_next;
+            
+            alpha_prev = alpha;
+            beta_prev = beta;
+            
+            pi_prev = pi_curr;
+            pi_curr = pi_next;
+            
+            // Optional: Implement seed switching for better performance
+        }
+        
+        return y_sigma;
+    }
+    
+    // Shifted COCG method for complex symmetric matrices
+    static std::vector<Complex> solveShiftedCOCG(
+        std::function<void(const Complex*, Complex*, int)> H,
+        const ComplexVector& b,
+        const ComplexVector& a,
+        const std::vector<Complex>& shifts,
+        int N, int max_iter, double tol
+    ) {
+        int n_shifts = shifts.size();
+        
+        // Select the first shift as the seed
+        Complex sigma_seed = shifts[0];
+        
+        // Define the seed shifted matrix A = sigma_seed*I - H
+        auto A = [&H, &sigma_seed, N](const Complex* v, Complex* result, int size) {
+            H(v, result, size);
+            for (int i = 0; i < size; i++) {
+                result[i] = sigma_seed * v[i] - result[i];
+            }
+        };
+        
+        // Initialize vectors for COCG algorithm
+        ComplexVector r(b);  // r_0 = b
+        ComplexVector p(r);  // p_0 = r_0
+        
+        // Initialize coefficients
+        std::vector<Complex> pi_curr(n_shifts, Complex(1.0, 0.0));
+        std::vector<Complex> pi_prev(n_shifts, Complex(1.0, 0.0));
+        
+        // Initialize projected solution and search vectors
+        std::vector<Complex> y_sigma(n_shifts, Complex(0.0, 0.0));
+        Complex a_dot_p;
+        cblas_zdotc_sub(N, a.data(), 1, p.data(), 1, &a_dot_p);
+        std::vector<Complex> u_sigma(n_shifts, a_dot_p);
+        
+        // Main iteration
+        for (int n = 0; n < max_iter; n++) {
+            // Calculate (r_n, r_n)
+            Complex r_dot_r;
+            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+            
+            // Apply A to p_n
+            ComplexVector Ap(N);
+            A(p.data(), Ap.data(), N);
+            
+            // Calculate (p_n, Ap_n) - note: transpose, not conjugate transpose for COCG
+            Complex p_dot_Ap = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                p_dot_Ap += p[i] * Ap[i];  // Complex multiplication without conjugation
+            }
+            
+            // Calculate alpha_n
+            Complex alpha = r_dot_r / p_dot_Ap;
+            
+            // Calculate a^T * Ap_n (transpose)
+            Complex a_dot_Ap = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                a_dot_Ap += a[i] * Ap[i];  // Complex multiplication without conjugation
+            }
+            
+            // Update residual: r_{n+1} = r_n - alpha_n * Ap_n
+            ComplexVector r_next(N);
+            for (int i = 0; i < N; i++) {
+                r_next[i] = r[i] - alpha * Ap[i];
+            }
+            
+            // Calculate a^T * r_{n+1}
+            Complex a_dot_r_next = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                a_dot_r_next += a[i] * r_next[i];  // Complex multiplication without conjugation
+            }
+            
+            // Update for all shifts
+            for (int k = 0; k < n_shifts; k++) {
+                Complex sigma_diff = shifts[k] - sigma_seed;
+                
+                // Update collinearity factor pi
+                Complex pi_next = pi_curr[k] * (1.0 + sigma_diff * alpha) / 
+                                (1.0 + sigma_diff * alpha * pi_curr[k] / pi_prev[k]);
+                
+                // Calculate alpha_sigma
+                Complex alpha_sigma = alpha * (pi_curr[k] / pi_next);
+                
+                // Update projected solution
+                y_sigma[k] += alpha_sigma * u_sigma[k];
+                
+                // Update parameters for next iteration
+                Complex beta = (r_next[0] * r_next[0]) / (r[0] * r[0]);  // Simplified
+                Complex beta_sigma = beta * std::pow(pi_next / pi_curr[k], 2);
+                
+                // Update projected search direction
+                u_sigma[k] = a_dot_r_next / pi_next + beta_sigma * u_sigma[k];
+                
+                // Update pi for next iteration
+                pi_prev[k] = pi_curr[k];
+                pi_curr[k] = pi_next;
+            }
+            
+            // Check for convergence
+            double res_norm = cblas_dznrm2(N, r_next.data(), 1);
+            if (res_norm < tol) {
+                std::cout << "COCG converged after " << n+1 << " iterations." << std::endl;
+                break;
+            }
+            
+            // Calculate beta_n = (r_{n+1}, r_{n+1})/(r_n, r_n)
+            Complex r_next_dot_r_next;
+            cblas_zdotc_sub(N, r_next.data(), 1, r_next.data(), 1, &r_next_dot_r_next);
+            Complex beta = r_next_dot_r_next / r_dot_r;
+            
+            // Update search direction: p_{n+1} = r_{n+1} + beta_n * p_n
+            ComplexVector p_next(N);
+            for (int i = 0; i < N; i++) {
+                p_next[i] = r_next[i] + beta * p[i];
+            }
+            
+            // Update for next iteration
+            r = r_next;
+            p = p_next;
+        }
+        
+        return y_sigma;
+    }
+};
+
+// Function to calculate dynamical Green's function for a range of frequencies
+std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                               // Dimension of Hilbert space
+    const ComplexVector& a,                              // Left vector <a|
+    const ComplexVector& b,                              // Right vector |b>
+    double omega_min,                                    // Minimum frequency
+    double omega_max,                                    // Maximum frequency
+    int n_points,                                        // Number of frequency points
+    double eta,                                          // Small imaginary broadening
+    int max_iter = 1000,                                 // Maximum iterations
+    double tol = 1e-10                                   // Convergence tolerance
+) {
+    // Generate frequency grid
+    std::vector<double> omega_values(n_points);
+    double delta_omega = (omega_max - omega_min) / (n_points - 1);
+    for (int i = 0; i < n_points; i++) {
+        omega_values[i] = omega_min + i * delta_omega;
+    }
+    
+    // Generate complex shifts z = omega + i*eta
+    std::vector<Complex> shifts(n_points);
+    for (int i = 0; i < n_points; i++) {
+        shifts[i] = Complex(omega_values[i], eta);
+    }
+    
+    // Calculate Green's function using shifted Krylov solver
+    std::vector<Complex> green_function = ShiftedKrylovSolver::calculateGreenFunction(
+        H, b, a, shifts, max_iter, tol, true  // Assuming Hermitian H
+    );
+    
+    // Combine frequencies and Green's function values
+    std::vector<std::pair<double, Complex>> result(n_points);
+    for (int i = 0; i < n_points; i++) {
+        result[i] = std::make_pair(omega_values[i], green_function[i]);
+    }
+    
+    return result;
 }
 
 
