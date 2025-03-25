@@ -1844,7 +1844,7 @@ ThermodynamicResults calculate_thermodynamics(
         
         // Calculate partition function Z = Tr[e^(-βH)]
         // We use the identity operator for the observable
-        Complex Z_complex = FTLM(H, identity_op, N, beta, r_max, m_max, tol) * N;
+        Complex Z_complex = FTLM(H, identity_op, N, beta, r_max, m_max, tol) * Complex(N, 0.0);
         double Z = Z_complex.real();
         
         // Calculate free energy F = -T * ln(Z)
