@@ -1774,6 +1774,145 @@ Complex FTLM(
     return trace_A_exp_H / trace_exp_H;
 }
 
+// Calculate the dynamical correlation function S_AB(ω) using FTLM
+// S_AB(ω) = (1/Z) ∑_n,m e^(-βE_n) ⟨n|A|m⟩⟨m|B|n⟩ δ(ω - (E_m - E_n))
+std::vector<std::pair<double, Complex>> calculateDynamicalResponse(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A,  // First operator
+    std::function<void(const Complex*, Complex*, int)> B,  // Second operator (use A for auto-correlation)
+    int N,                    // Dimension of Hilbert space
+    double beta,              // Inverse temperature β = 1/kT
+    double omega_min,         // Minimum frequency
+    double omega_max,         // Maximum frequency
+    int n_points,             // Number of frequency points
+    double eta,               // Broadening parameter (half-width of Lorentzian)
+    int r_max = 30,           // Number of random vectors for sampling
+    int m_max = 100           // Maximum Lanczos iterations per random vector
+) {
+    // Generate frequency grid
+    std::vector<double> omega_values(n_points);
+    double delta_omega = (omega_max - omega_min) / (n_points - 1);
+    for (int i = 0; i < n_points; i++) {
+        omega_values[i] = omega_min + i * delta_omega;
+    }
+    
+    // Initialize result vector with zeros
+    std::vector<Complex> response(n_points, Complex(0.0, 0.0));
+    
+    // Initialize random number generator
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Accumulators for the partition function
+    double Z = 0.0;
+    
+    // For each random vector
+    for (int r = 0; r < r_max; r++) {
+        // Generate random starting vector
+        ComplexVector v0(N);
+        for (int i = 0; i < N; i++) {
+            v0[i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, v0.data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, v0.data(), 1);
+        
+        // Create a modified Hamiltonian operator that starts from our random vector
+        auto H_from_v0 = [&H, &v0, N](const Complex* v, Complex* result, int size) {
+            // If v is the unit vector e_0 = [1,0,0,...], we return H*v0
+            // Otherwise we apply H normally
+            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
+                bool is_e0 = true;
+                for (int i = 1; i < size; i++) {
+                    if (std::abs(v[i]) > 1e-10) {
+                        is_e0 = false;
+                        break;
+                    }
+                }
+                
+                if (is_e0) {
+                    H(v0.data(), result, size);
+                    return;
+                }
+            }
+            
+            // Regular application of H
+            H(v, result, size);
+        };
+        
+        // Use Chebyshev filtered Lanczos to get eigenvalues and eigenvectors
+        std::vector<double> eigenvalues;
+        std::vector<ComplexVector> eigenvectors;
+        
+        // Call chebyshev_filtered_lanczos with appropriate parameters
+        const double tol = 1e-10;
+        chebyshev_filtered_lanczos(H, N, m_max, tol, eigenvalues, &eigenvectors);
+        
+        int m = eigenvalues.size();
+        
+        // Calculate partition function contribution
+        double Z_r = 0.0;
+        for (int n = 0; n < m; n++) {
+            Z_r += std::exp(-beta * eigenvalues[n]);
+        }
+        Z += Z_r;
+        
+        // Apply operators A and B to eigenvectors
+        std::vector<ComplexVector> A_eigenvectors(m, ComplexVector(N));
+        std::vector<ComplexVector> B_eigenvectors(m, ComplexVector(N));
+        
+        for (int n = 0; n < m; n++) {
+            A(eigenvectors[n].data(), A_eigenvectors[n].data(), N);
+            B(eigenvectors[n].data(), B_eigenvectors[n].data(), N);
+        }
+        
+        // Calculate matrix elements and dynamical response
+        for (int n = 0; n < m; n++) {
+            double weight = std::exp(-beta * eigenvalues[n]);
+            
+            for (int p = 0; p < m; p++) {
+                // Compute <n|A|p>
+                Complex A_np;
+                cblas_zdotc_sub(N, eigenvectors[n].data(), 1, A_eigenvectors[p].data(), 1, &A_np);
+                
+                // Compute <p|B|n>
+                Complex B_pn;
+                cblas_zdotc_sub(N, eigenvectors[p].data(), 1, B_eigenvectors[n].data(), 1, &B_pn);
+                
+                // Matrix element product
+                Complex matrix_element = A_np * B_pn;
+                
+                // Energy difference
+                double omega_np = eigenvalues[p] - eigenvalues[n];
+                
+                // Add contribution to all frequency points with Lorentzian broadening
+                for (int i = 0; i < n_points; i++) {
+                    double omega = omega_values[i];
+                    // Lorentzian: 1/π * η/((ω-ω_0)² + η²)
+                    Complex lorentzian = Complex(eta / (M_PI * ((omega - omega_np)*(omega - omega_np) + eta*eta)), 0.0);
+                    response[i] += weight * matrix_element * lorentzian;
+                }
+            }
+        }
+    }
+    
+    // Normalize by partition function
+    for (int i = 0; i < n_points; i++) {
+        response[i] /= Z;
+    }
+    
+    // Create result pair vector
+    std::vector<std::pair<double, Complex>> result(n_points);
+    for (int i = 0; i < n_points; i++) {
+        result[i] = std::make_pair(omega_values[i], response[i]);
+    }
+    
+    return result;
+}
+
+
 // Advanced FTLM with adaptive convergence strategy
 Complex FTLM_adaptive(
     std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
