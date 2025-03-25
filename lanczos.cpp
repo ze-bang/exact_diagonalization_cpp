@@ -1940,7 +1940,7 @@ ThermodynamicResults calculate_thermodynamics_adaptive(
         results.specific_heat[i] = beta * beta * var_energy;
         
         // Calculate partition function Z = Tr[e^(-βH)]
-        Complex Z_complex = FTLM_adaptive(H, identity_op, N, beta, conv_tol, r_start, m_start) * N;
+        Complex Z_complex = FTLM_adaptive(H, identity_op, N, beta, conv_tol, r_start, m_start) * Complex(N, 0.0);
         double Z = Z_complex.real();
         
         // Calculate free energy F = -T * ln(Z)
