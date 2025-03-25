@@ -1622,6 +1622,84 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     }
 }
 
+// Calculate the expectation value <ψ_a|A|ψ_a> for the a-th eigenstate of H
+Complex calculate_expectation_value(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
+    int N,                                                // Dimension of Hilbert space
+    int a = 0,                                           // Index of eigenstate (default: ground state)
+    int max_iter = 100,                                  // Maximum iterations for eigenstate calculation
+    double tol = 1e-10                                   // Tolerance
+) {
+    // First, calculate the a-th eigenstate of H
+    std::vector<double> eigenvalues;
+    std::vector<ComplexVector> eigenvectors;
+    
+    // Use Chebyshev filtered Lanczos for better accuracy
+    chebyshev_filtered_lanczos(H, N, max_iter, tol, eigenvalues, &eigenvectors);
+    
+    // Check if we have enough eigenstates
+    if (a >= eigenvectors.size()) {
+        std::cerr << "Error: Requested eigenstate index " << a 
+                  << " but only " << eigenvectors.size() << " states computed." << std::endl;
+        return Complex(0.0, 0.0);
+    }
+    
+    // Get the a-th eigenstate
+    const ComplexVector& psi = eigenvectors[a];
+    ComplexVector A_psi(N);
+    
+    // Apply operator A to the eigenstate
+    A(psi.data(), A_psi.data(), N);
+    
+    // Calculate <ψ_a|A|ψ_a>
+    Complex expectation_value;
+    cblas_zdotc_sub(N, psi.data(), 1, A_psi.data(), 1, &expectation_value);
+    
+    return expectation_value;
+}
+
+// Calculate the expectation value <ψ_a|A|ψ_b> between two different eigenstates
+Complex calculate_matrix_element(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
+    int N,                                                // Dimension of Hilbert space
+    int a = 0,                                           // Index of first eigenstate
+    int b = 1,                                           // Index of second eigenstate
+    int max_iter = 100,                                  // Maximum iterations for eigenstate calculation
+    double tol = 1e-10                                   // Tolerance
+) {
+    // Calculate eigenstates of H
+    std::vector<double> eigenvalues;
+    std::vector<ComplexVector> eigenvectors;
+    
+    // Compute enough states to cover both indices
+    int max_index = std::max(a, b);
+    chebyshev_filtered_lanczos(H, N, max_index + 30, tol, eigenvalues, &eigenvectors);
+    
+    // Check if we have enough eigenstates
+    if (a >= eigenvectors.size() || b >= eigenvectors.size()) {
+        std::cerr << "Error: Requested eigenstate indices " << a << " and " << b
+                  << " but only " << eigenvectors.size() << " states computed." << std::endl;
+        return Complex(0.0, 0.0);
+    }
+    
+    // Get the eigenstates
+    const ComplexVector& psi_a = eigenvectors[a];
+    const ComplexVector& psi_b = eigenvectors[b];
+    ComplexVector A_psi_b(N);
+    
+    // Apply operator A to |ψ_b⟩
+    A(psi_b.data(), A_psi_b.data(), N);
+    
+    // Calculate <ψ_a|A|ψ_b>
+    Complex matrix_element;
+    cblas_zdotc_sub(N, psi_a.data(), 1, A_psi_b.data(), 1, &matrix_element);
+    
+    return matrix_element;
+}
+
+
 // Finite Temperature Lanczos Method (FTLM)
 // Calculates <A> = Tr(A*e^(-βH))/Tr(e^(-βH)) for inverse temperature β
 Complex FTLM(
@@ -1856,6 +1934,12 @@ ThermodynamicResults calculate_thermodynamics(
     
     return results;
 }
+
+
+
+
+
+
 
 // Function to output thermodynamic results to file
 void output_thermodynamic_data(const ThermodynamicResults& results, const std::string& filename) {
