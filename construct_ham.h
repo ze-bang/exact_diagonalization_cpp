@@ -6,7 +6,8 @@
 #include <string>
 #include <fstream>
 #include <sstream>
-
+#include <Eigen/Sparse>
+#include <Eigen/Dense>
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
 using Matrix = std::vector<std::vector<Complex>>;
@@ -23,42 +24,70 @@ public:
 private:
     std::vector<TransformFunction> transforms_;
     int n_bits_; // Number of bits in the basis representation
+    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
+    mutable bool matrixBuilt_ = false;
 
-public:
-    // Constructor
-    Operator(int n_bits) : n_bits_(n_bits) {}
-
-    // Add a transform operation to the operator
-    void addTransform(TransformFunction transform) {
-        transforms_.push_back(transform);
-    }
-
-    // Apply the operator to a complex vector
-    std::vector<Complex> apply(const std::vector<Complex>& vec) const {
-        int dim = 1 << n_bits_;  // Dimension of the vector space (2^n_bits)
+    // Build the sparse matrix from transforms if needed
+    void buildSparseMatrix() const {
+        if (matrixBuilt_) return;
         
-        // Check if the input vector has the correct dimension
-        if (vec.size() != static_cast<size_t>(dim)) {
-            throw std::invalid_argument("Input vector dimension does not match operator dimension");
-        }
+        int dim = 1 << n_bits_;
+        sparseMatrix_.resize(dim, dim);
         
-        // Initialize result vector with zeros
-        std::vector<Complex> result(dim, 0.0);
+        // Use triplets to efficiently build the sparse matrix
+        std::vector<Eigen::Triplet<Complex>> triplets;
         
-        // For each input basis state
         for (int i = 0; i < dim; ++i) {
-            // Apply each transform to the current basis state
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {  // Ensure the output state is valid
-                    // Add the contribution to the result
-                    result[j] += scalar * vec[i];
+                if (j >= 0 && j < dim) {
+                    triplets.emplace_back(j, i, scalar);
                 }
             }
         }
         
-        return result;
+        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
+        matrixBuilt_ = true;
     }
+public:
+    // Constructor
+    Operator(int n_bits) : n_bits_(n_bits) {}
+
+    // Mark matrix as needing rebuild when new transform is added
+    void addTransform(TransformFunction transform) {
+        transforms_.push_back(transform);
+        matrixBuilt_ = false;  // Matrix needs to be rebuilt
+    }
+
+    // Apply the operator to a complex vector using Eigen sparse matrix operations
+    std::vector<Complex> apply(const std::vector<Complex>& vec) const {
+        int dim = 1 << n_bits_;
+        
+        if (vec.size() != static_cast<size_t>(dim)) {
+            throw std::invalid_argument("Input vector dimension does not match operator dimension");
+        }
+        
+        // Build the sparse matrix if not already built
+        buildSparseMatrix();
+        
+        // Convert input vector to Eigen vector
+        Eigen::VectorXcd eigenVec(dim);
+        for (int i = 0; i < dim; ++i) {
+            eigenVec(i) = vec[i];
+        }
+        
+        // Perform sparse matrix-vector multiplication
+        Eigen::VectorXcd result = sparseMatrix_ * eigenVec;
+        
+        // Convert back to std::vector
+        std::vector<Complex> resultVec(dim);
+        for (int i = 0; i < dim; ++i) {
+            resultVec[i] = result(i);
+        }
+        
+        return resultVec;
+    }
+
 
     // Print the operator as a matrix
     Matrix returnMatrix(){

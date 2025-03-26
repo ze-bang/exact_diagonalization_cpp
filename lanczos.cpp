@@ -12,12 +12,14 @@
 #include <ezarpack/arpack_solver.hpp>
 #include <ezarpack/storages/eigen.hpp>
 #include <ezarpack/version.hpp>
-#include <eigen3/Eigen/Dense>
-#include <eigen3/Eigen/Eigenvalues>
-#include <eigen3/Eigen/Sparse>
-#include <eigen3/Eigen/SparseQR>
-#include <eigen3/Eigen/SparseLU>
-#include <eigen3/Eigen/SparseCholesky>
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Sparse>
+#include <Eigen/SparseQR>
+#include <Eigen/SparseLU>
+#include <Eigen/SparseCholesky>
+#include <omp.h>
+
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -251,13 +253,19 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
              double tol, std::vector<double>& eigenvalues, 
              std::vector<ComplexVector>* eigenvectors = nullptr) {
     
-    // Initialize random starting vector
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    // Initialize random starting vector with thread-local random generators
     ComplexVector v_current(N);
     
-    for (int i = 0; i < N; i++) {
-        v_current[i] = Complex(dist(gen), dist(gen));
+    #pragma omp parallel
+    {
+        // Thread-local random generators for better performance
+        std::mt19937 local_gen(std::random_device{}() + omp_get_thread_num());
+        std::uniform_real_distribution<double> local_dist(-1.0, 1.0);
+        
+        #pragma omp for
+        for (int i = 0; i < N; i++) {
+            v_current[i] = Complex(local_dist(local_gen), local_dist(local_gen));
+        }
     }
     
     // Normalize the starting vector
@@ -302,11 +310,34 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         
         // Full reorthogonalization (twice for numerical stability)
         for (int iter = 0; iter < 2; iter++) {
-            for (size_t k = 0; k <= j; k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
+            // Store original w for reduction
+            ComplexVector w_orig = w;
+            std::fill(w.begin(), w.end(), Complex(0.0, 0.0));
+            
+            #pragma omp parallel
+            {
+                // Thread-private copy of the correction
+                ComplexVector w_correction(N, Complex(0.0, 0.0));
+                
+                #pragma omp for nowait
+                for (size_t k = 0; k <= j; k++) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w_orig.data(), 1, &overlap);
+                    
+                    // Add -overlap * basis_vector[k] to the correction
+                    #pragma omp simd
+                    for (int i = 0; i < N; i++) {
+                        w_correction[i] -= overlap * basis_vectors[k][i];
+                    }
+                }
+                
+                // Reduce corrections into w
+                #pragma omp critical
+                {
+                    for (int i = 0; i < N; i++) {
+                        w[i] += w_orig[i] + w_correction[i];
+                    }
+                }
             }
         }
         
@@ -316,15 +347,39 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         // Check for invariant subspace
         if (norm < tol) {
             // Generate a random vector orthogonal to basis
+            std::mt19937 gen(std::random_device{}());
+            std::uniform_real_distribution<double> dist(-1.0, 1.0);
             v_next = generateRandomVector(N, gen, dist);
             
             // Orthogonalize against all basis vectors
             for (int iter = 0; iter < 2; iter++) {
-                for (const auto& basis_vec : basis_vectors) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, basis_vec.data(), 1, v_next.data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vec.data(), 1, v_next.data(), 1);
+                // Store original vector for reduction
+                ComplexVector v_next_orig = v_next;
+                std::fill(v_next.begin(), v_next.end(), Complex(0.0, 0.0));
+                
+                #pragma omp parallel
+                {
+                    ComplexVector v_correction(N, Complex(0.0, 0.0));
+                    
+                    #pragma omp for nowait
+                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                        Complex overlap;
+                        cblas_zdotc_sub(N, basis_vectors[k].data(), 1, v_next_orig.data(), 1, &overlap);
+                        
+                        // Add -overlap * basis_vector[k] to the correction
+                        #pragma omp simd
+                        for (int i = 0; i < N; i++) {
+                            v_correction[i] -= overlap * basis_vectors[k][i];
+                        }
+                    }
+                    
+                    // Combine results
+                    #pragma omp critical
+                    {
+                        for (int i = 0; i < N; i++) {
+                            v_next[i] += v_next_orig[i] + v_correction[i];
+                        }
+                    }
                 }
             }
             
@@ -361,9 +416,12 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     // Allocate arrays for LAPACKE
     std::vector<double> diag = alpha;    // Copy of diagonal elements
     std::vector<double> offdiag(m-1);    // Off-diagonal elements
+    
+    #pragma omp parallel for simd
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
+    
     std::vector<double> evals(m);        // For eigenvalues
     std::vector<double> evecs;           // For eigenvectors if needed
     
@@ -416,77 +474,90 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         eigenvectors->clear();
         eigenvectors->resize(m, ComplexVector(N, Complex(0.0, 0.0)));
         
-        // Process each cluster separately
-        for (const auto& cluster : degen_clusters) {
-            if (cluster.size() == 1) {
-                // Non-degenerate case - standard treatment
-                int idx = cluster[0];
-                ComplexVector evec(N, Complex(0.0, 0.0));
-                
-                // Transform: evec = sum_k z(k,idx) * basis_vectors[k]
-                for (int k = 0; k < m; k++) {
-                    Complex coeff(evecs[k*m + idx], 0.0);
-                    cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, evec.data(), 1);
-                }
-                
-                // Normalize
-                double norm = cblas_dznrm2(N, evec.data(), 1);
-                Complex scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, evec.data(), 1);
-                
-                (*eigenvectors)[idx] = evec;
-            } else {
-                // Degenerate case - special handling
-                int subspace_dim = cluster.size();
-                std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N, Complex(0.0, 0.0)));
-                
-                // Compute raw eigenvectors in original basis
-                for (int c = 0; c < subspace_dim; c++) {
-                    int idx = cluster[c];
-                    for (int k = 0; k < m; k++) {
-                        Complex coeff(evecs[k*m + idx], 0.0);
-                        cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, subspace_vectors[c].data(), 1);
+        // Process each cluster separately, using task-based parallelism
+        #pragma omp parallel
+        {
+            #pragma omp single
+            {
+                for (size_t c_idx = 0; c_idx < degen_clusters.size(); c_idx++) {
+                    #pragma omp task
+                    {
+                        const auto& cluster = degen_clusters[c_idx];
+                        if (cluster.size() == 1) {
+                            // Non-degenerate case - standard treatment
+                            int idx = cluster[0];
+                            ComplexVector evec(N, Complex(0.0, 0.0));
+                            
+                            // Transform: evec = sum_k z(k,idx) * basis_vectors[k]
+                            for (int k = 0; k < m; k++) {
+                                Complex coeff(evecs[k*m + idx], 0.0);
+                                cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, evec.data(), 1);
+                            }
+                            
+                            // Normalize
+                            double norm = cblas_dznrm2(N, evec.data(), 1);
+                            Complex scale = Complex(1.0/norm, 0.0);
+                            cblas_zscal(N, &scale, evec.data(), 1);
+                            
+                            (*eigenvectors)[idx] = evec;
+                        } else {
+                            // Degenerate case - special handling
+                            int subspace_dim = cluster.size();
+                            std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N, Complex(0.0, 0.0)));
+                            
+                            // Compute raw eigenvectors in original basis
+                            for (int c = 0; c < subspace_dim; c++) {
+                                int idx = cluster[c];
+                                for (int k = 0; k < m; k++) {
+                                    Complex coeff(evecs[k*m + idx], 0.0);
+                                    cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, subspace_vectors[c].data(), 1);
+                                }
+                            }
+                            
+                            // Re-orthogonalize within degenerate subspace
+                            for (int c = 0; c < subspace_dim; c++) {
+                                // Normalize current vector
+                                double norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
+                                Complex scale = Complex(1.0/norm, 0.0);
+                                cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
+                                
+                                // Orthogonalize against previous vectors
+                                for (int prev = 0; prev < c; prev++) {
+                                    Complex overlap;
+                                    cblas_zdotc_sub(N, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1, &overlap);
+                                    Complex neg_overlap = -overlap;
+                                    cblas_zaxpy(N, &neg_overlap, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1);
+                                }
+                                
+                                // Renormalize if necessary
+                                norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
+                                if (norm > tol) {
+                                    scale = Complex(1.0/norm, 0.0);
+                                    cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
+                                }
+                                
+                                // Store vector
+                                int idx = cluster[c];
+                                (*eigenvectors)[idx] = subspace_vectors[c];
+                            }
+                        }
                     }
                 }
                 
-                // Re-orthogonalize within degenerate subspace
-                for (int c = 0; c < subspace_dim; c++) {
-                    // Normalize current vector
-                    double norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
-                    Complex scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
-                    
-                    // Orthogonalize against previous vectors
-                    for (int prev = 0; prev < c; prev++) {
-                        Complex overlap;
-                        cblas_zdotc_sub(N, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1, &overlap);
-                        Complex neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1);
+                // Wait for all cluster tasks to complete
+                #pragma omp taskwait
+                
+                // Refine eigenvectors using conjugate gradient
+                for (size_t i = 0; i < eigenvalues.size(); i++) {
+                    #pragma omp task
+                    {
+                        refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
                     }
-                    
-                    // Renormalize if necessary
-                    norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
-                    if (norm > tol) {
-                        scale = Complex(1.0/norm, 0.0);
-                        cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
-                    }
-                    
-                    // Store vector
-                    int idx = cluster[c];
-                    (*eigenvectors)[idx] = subspace_vectors[c];
                 }
-            }
-        }
-        
-        // Optionally refine eigenvectors using conjugate gradient
-        if (eigenvalues.size() > 0 && eigenvectors->size() > 0) {
-            for (size_t i = 0; i < eigenvalues.size(); i++) {
-                refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
             }
         }
     }
 }
-
 
 // Conjugate Gradient (CG) method for matrix diagonalization
 // H: Function representing the Hamiltonian operator (H|v⟩)
@@ -519,22 +590,52 @@ void CG(std::function<void(const Complex*, Complex*, int)> H, int N, int max_ite
     for (int k = 0; k < num_ev; k++) {
         // Generate random starting vector
         ComplexVector x(N);
-        for (int i = 0; i < N; i++) {
-            x[i] = Complex(dist(gen), dist(gen));
+        
+        #pragma omp parallel
+        {
+            unsigned int seed = std::random_device{}() + omp_get_thread_num();
+            std::mt19937 local_gen(seed);
+            std::uniform_real_distribution<double> local_dist(-1.0, 1.0);
+            
+            #pragma omp for nowait
+            for (int i = 0; i < N; i++) {
+                x[i] = Complex(local_dist(local_gen), local_dist(local_gen));
+            }
         }
         
         // Orthogonalize against already found eigenvectors
-        for (const auto& v : converged_vectors) {
-            Complex overlap;
-            cblas_zdotc_sub(N, v.data(), 1, x.data(), 1, &overlap);
-            Complex neg_overlap = -overlap;
-            cblas_zaxpy(N, &neg_overlap, v.data(), 1, x.data(), 1);
+        for (size_t v_idx = 0; v_idx < converged_vectors.size(); v_idx++) {
+            const ComplexVector& v = converged_vectors[v_idx];
+            double overlap_real = 0.0, overlap_imag = 0.0;
+            
+            #pragma omp parallel for reduction(+:overlap_real,overlap_imag)
+            for (int i = 0; i < N; i++) {
+                Complex temp = std::conj(v[i]) * x[i];
+                overlap_real += temp.real();
+                overlap_imag += temp.imag();
+            }
+            
+            Complex overlap(overlap_real, overlap_imag);
+            
+            #pragma omp parallel for
+            for (int i = 0; i < N; i++) {
+                x[i] -= overlap * v[i];
+            }
         }
         
         // Normalize initial vector
-        double norm = cblas_dznrm2(N, x.data(), 1);
+        double norm_squared = 0.0;
+        #pragma omp parallel for reduction(+:norm_squared)
+        for (int i = 0; i < N; i++) {
+            norm_squared += std::norm(x[i]);
+        }
+        double norm = std::sqrt(norm_squared);
         Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, x.data(), 1);
+        
+        #pragma omp parallel for
+        for (int i = 0; i < N; i++) {
+            x[i] *= scale;
+        }
         
         // CG variables
         ComplexVector Hx(N), r(N), p(N), Hp(N);
@@ -548,43 +649,92 @@ void CG(std::function<void(const Complex*, Complex*, int)> H, int N, int max_ite
             H(x.data(), Hx.data(), N);
             
             // Calculate Rayleigh quotient lambda = <x|H|x>
-            Complex dot_product;
-            cblas_zdotc_sub(N, x.data(), 1, Hx.data(), 1, &dot_product);
-            lambda = std::real(dot_product);
+            double dot_real = 0.0, dot_imag = 0.0;
+            #pragma omp parallel for reduction(+:dot_real,dot_imag)
+            for (int i = 0; i < N; i++) {
+                Complex temp = std::conj(x[i]) * Hx[i];
+                dot_real += temp.real();
+                dot_imag += temp.imag();
+            }
+            lambda = dot_real; // For Hermitian operators, lambda should be real
             
             // Compute residual r = Hx - lambda*x
-            std::copy(Hx.begin(), Hx.end(), r.begin());
-            Complex neg_lambda = Complex(-lambda, 0.0);
-            cblas_zaxpy(N, &neg_lambda, x.data(), 1, r.data(), 1);
+            #pragma omp parallel for
+            for (int i = 0; i < N; i++) {
+                r[i] = Hx[i] - lambda * x[i];
+            }
             
             // Check convergence
-            double res_norm = cblas_dznrm2(N, r.data(), 1);
+            double res_norm_squared = 0.0;
+            #pragma omp parallel for reduction(+:res_norm_squared)
+            for (int i = 0; i < N; i++) {
+                res_norm_squared += std::norm(r[i]);
+            }
+            double res_norm = std::sqrt(res_norm_squared);
             
             // Orthogonalize against already found eigenvectors
-            for (const auto& v : converged_vectors) {
-                Complex overlap;
-                cblas_zdotc_sub(N, v.data(), 1, r.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, v.data(), 1, r.data(), 1);
+            for (size_t v_idx = 0; v_idx < converged_vectors.size(); v_idx++) {
+                const ComplexVector& v = converged_vectors[v_idx];
+                double overlap_real = 0.0, overlap_imag = 0.0;
+                
+                #pragma omp parallel for reduction(+:overlap_real,overlap_imag)
+                for (int i = 0; i < N; i++) {
+                    Complex temp = std::conj(v[i]) * r[i];
+                    overlap_real += temp.real();
+                    overlap_imag += temp.imag();
+                }
+                
+                Complex overlap(overlap_real, overlap_imag);
+                
+                #pragma omp parallel for
+                for (int i = 0; i < N; i++) {
+                    r[i] -= overlap * v[i];
+                }
             }
             
             // Re-check norm after orthogonalization
-            res_norm = cblas_dznrm2(N, r.data(), 1);
+            res_norm_squared = 0.0;
+            #pragma omp parallel for reduction(+:res_norm_squared)
+            for (int i = 0; i < N; i++) {
+                res_norm_squared += std::norm(r[i]);
+            }
+            res_norm = std::sqrt(res_norm_squared);
+            
             if (res_norm < tol || std::abs(lambda - lambda_prev) < tol) {
                 break;
             }
             
             // First iteration, p = r
             if (iter == 0) {
-                std::copy(r.begin(), r.end(), p.begin());
+                #pragma omp parallel for
+                for (int i = 0; i < N; i++) {
+                    p[i] = r[i];
+                }
             } else {
                 // Calculate beta = <r_new|r_new>/<r_old|r_old>
-                Complex r_dot_r, r_old_dot_r_old;
-                cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
-                cblas_zdotc_sub(N, p.data(), 1, p.data(), 1, &r_old_dot_r_old);
-                Complex beta = r_dot_r / r_old_dot_r_old;
+                double r_dot_r_real = 0.0, r_dot_r_imag = 0.0;
+                double p_dot_p_real = 0.0, p_dot_p_imag = 0.0;
+                
+                #pragma omp parallel for reduction(+:r_dot_r_real,r_dot_r_imag)
+                for (int i = 0; i < N; i++) {
+                    Complex temp = std::conj(r[i]) * r[i];
+                    r_dot_r_real += temp.real();
+                    r_dot_r_imag += temp.imag();
+                }
+                
+                #pragma omp parallel for reduction(+:p_dot_p_real,p_dot_p_imag)
+                for (int i = 0; i < N; i++) {
+                    Complex temp = std::conj(p[i]) * p[i];
+                    p_dot_p_real += temp.real();
+                    p_dot_p_imag += temp.imag();
+                }
+                
+                Complex r_dot_r(r_dot_r_real, r_dot_r_imag);
+                Complex p_dot_p(p_dot_p_real, p_dot_p_imag);
+                Complex beta = r_dot_r / p_dot_p;
                 
                 // Update search direction p = r + beta*p
+                #pragma omp parallel for
                 for (int i = 0; i < N; i++) {
                     p[i] = r[i] + beta * p[i];
                 }
@@ -594,18 +744,46 @@ void CG(std::function<void(const Complex*, Complex*, int)> H, int N, int max_ite
             H(p.data(), Hp.data(), N);
             
             // Calculate alpha = <r|r>/<p|Hp>
-            Complex r_dot_r, p_dot_Hp;
-            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
-            cblas_zdotc_sub(N, p.data(), 1, Hp.data(), 1, &p_dot_Hp);
+            double r_dot_r_real = 0.0, r_dot_r_imag = 0.0;
+            double p_dot_Hp_real = 0.0, p_dot_Hp_imag = 0.0;
+            
+            #pragma omp parallel for reduction(+:r_dot_r_real,r_dot_r_imag)
+            for (int i = 0; i < N; i++) {
+                Complex temp = std::conj(r[i]) * r[i];
+                r_dot_r_real += temp.real();
+                r_dot_r_imag += temp.imag();
+            }
+            
+            #pragma omp parallel for reduction(+:p_dot_Hp_real,p_dot_Hp_imag)
+            for (int i = 0; i < N; i++) {
+                Complex temp = std::conj(p[i]) * Hp[i];
+                p_dot_Hp_real += temp.real();
+                p_dot_Hp_imag += temp.imag();
+            }
+            
+            Complex r_dot_r(r_dot_r_real, r_dot_r_imag);
+            Complex p_dot_Hp(p_dot_Hp_real, p_dot_Hp_imag);
             Complex alpha = r_dot_r / p_dot_Hp;
             
             // Update x = x + alpha*p
-            cblas_zaxpy(N, &alpha, p.data(), 1, x.data(), 1);
+            #pragma omp parallel for
+            for (int i = 0; i < N; i++) {
+                x[i] += alpha * p[i];
+            }
             
             // Normalize x
-            norm = cblas_dznrm2(N, x.data(), 1);
+            norm_squared = 0.0;
+            #pragma omp parallel for reduction(+:norm_squared)
+            for (int i = 0; i < N; i++) {
+                norm_squared += std::norm(x[i]);
+            }
+            norm = std::sqrt(norm_squared);
             scale = Complex(1.0/norm, 0.0);
-            cblas_zscal(N, &scale, x.data(), 1);
+            
+            #pragma omp parallel for
+            for (int i = 0; i < N; i++) {
+                x[i] *= scale;
+            }
             
             // Remember previous eigenvalue for convergence check
             lambda_prev = lambda;
@@ -637,22 +815,31 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     // Block size for handling degenerate eigenvalues
     const int block_size = 4;
     
-    // Initialize random starting vectors
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    // Initialize random starting vectors with thread-local generators
+    unsigned int seed = std::random_device{}();
     
     // Generate orthonormal set of starting vectors
     std::vector<ComplexVector> basis_vectors;
     std::vector<ComplexVector> curr_block(block_size);
     
-    curr_block[0] = generateRandomVector(N, gen, dist);
-    basis_vectors.push_back(curr_block[0]);
-    
-    for (int i = 1; i < block_size; i++) {
-        curr_block[i] = generateOrthogonalVector(N, 
-                                              std::vector<ComplexVector>(basis_vectors.begin(), basis_vectors.end()), 
-                                              gen, dist);
-        basis_vectors.push_back(curr_block[i]);
+    #pragma omp parallel
+    {
+        // Thread local random generators
+        std::mt19937 local_gen(seed + omp_get_thread_num());
+        std::uniform_real_distribution<double> local_dist(-1.0, 1.0);
+        
+        #pragma omp single
+        {
+            curr_block[0] = generateRandomVector(N, local_gen, local_dist);
+            basis_vectors.push_back(curr_block[0]);
+            
+            for (int i = 1; i < block_size; i++) {
+                curr_block[i] = generateOrthogonalVector(N, 
+                                                      std::vector<ComplexVector>(basis_vectors.begin(), basis_vectors.end()), 
+                                                      local_gen, local_dist);
+                basis_vectors.push_back(curr_block[i]);
+            }
+        }
     }
     
     std::vector<ComplexVector> prev_block(block_size, ComplexVector(N, Complex(0.0, 0.0)));
@@ -675,12 +862,14 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         std::vector<std::vector<Complex>> curr_alpha(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
         
         // Apply H to each vector in current block
+        #pragma omp parallel for schedule(dynamic)
         for (int b = 0; b < block_size; b++) {
             H(curr_block[b].data(), work_block[b].data(), N);
         }
         
         // Subtract contribution from previous block: w = w - beta_j * prev_block
         if (j > 0) {
+            #pragma omp parallel for collapse(2) schedule(static)
             for (int i = 0; i < block_size; i++) {
                 for (int k = 0; k < block_size; k++) {
                     Complex neg_beta = -beta[j][i][k];
@@ -690,28 +879,54 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         }
         
         // Compute alpha_j block and update residuals
-        for (int i = 0; i < block_size; i++) {
-            for (int k = 0; k < block_size; k++) {
-                Complex dot;
-                cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
-                curr_alpha[i][k] = dot;
-                
-                // Subtract from work vector: work -= dot * curr
-                Complex neg_dot = -dot;
-                cblas_zaxpy(N, &neg_dot, curr_block[k].data(), 1, work_block[i].data(), 1);
+        #pragma omp parallel
+        {
+            #pragma omp for collapse(2) schedule(static)
+            for (int i = 0; i < block_size; i++) {
+                for (int k = 0; k < block_size; k++) {
+                    Complex dot;
+                    cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
+                    
+                    #pragma omp critical
+                    {
+                        curr_alpha[i][k] = dot;
+                    }
+                    
+                    // Subtract from work vector: work -= dot * curr
+                    Complex neg_dot = -dot;
+                    cblas_zaxpy(N, &neg_dot, curr_block[k].data(), 1, work_block[i].data(), 1);
+                }
             }
         }
         
         alpha.push_back(curr_alpha);
         
         // Full reorthogonalization against all previous basis vectors
+        #pragma omp parallel for schedule(dynamic)
         for (int b = 0; b < block_size; b++) {
             for (int iter = 0; iter < 2; iter++) {  // Double orthogonalization for stability
+                // Store original work vector for reduction
+                ComplexVector work_orig = work_block[b];
+                ComplexVector work_correction(N, Complex(0.0, 0.0));
+                
+                // Calculate all corrections
                 for (size_t k = 0; k < basis_vectors.size(); k++) {
                     Complex overlap;
-                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, work_block[b].data(), 1, &overlap);
+                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, work_orig.data(), 1, &overlap);
                     Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, work_block[b].data(), 1);
+                    
+                    // Add correction
+                    for (int i = 0; i < N; i++) {
+                        work_correction[i] += neg_overlap * basis_vectors[k][i];
+                    }
+                }
+                
+                // Apply all corrections at once
+                #pragma omp critical
+                {
+                    for (int i = 0; i < N; i++) {
+                        work_block[b][i] = work_orig[i] + work_correction[i];
+                    }
                 }
             }
         }
@@ -725,14 +940,49 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             
             // Handle invariant subspace or linear dependence
             if (norm < tol) {
-                next_block[i] = generateOrthogonalVector(N, basis_vectors, gen, dist);
+                #pragma omp parallel
+                {
+                    std::mt19937 local_gen(seed + omp_get_thread_num());
+                    std::uniform_real_distribution<double> local_dist(-1.0, 1.0);
+                    
+                    #pragma omp single
+                    {
+                        next_block[i] = generateOrthogonalVector(N, basis_vectors, local_gen, local_dist);
+                    }
+                }
                 
                 // Re-orthogonalize
-                for (size_t k = 0; k < basis_vectors.size(); k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, next_block[i].data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, next_block[i].data(), 1);
+                ComplexVector vec_orig = next_block[i];
+                ComplexVector vec_correction(N, Complex(0.0, 0.0));
+                
+                #pragma omp parallel
+                {
+                    // Thread-local correction vector
+                    ComplexVector local_correction(N, Complex(0.0, 0.0));
+                    
+                    #pragma omp for nowait
+                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                        Complex overlap;
+                        cblas_zdotc_sub(N, basis_vectors[k].data(), 1, vec_orig.data(), 1, &overlap);
+                        Complex neg_overlap = -overlap;
+                        
+                        for (int idx = 0; idx < N; idx++) {
+                            local_correction[idx] += neg_overlap * basis_vectors[k][idx];
+                        }
+                    }
+                    
+                    // Combine corrections
+                    #pragma omp critical
+                    {
+                        for (int idx = 0; idx < N; idx++) {
+                            vec_correction[idx] += local_correction[idx];
+                        }
+                    }
+                }
+                
+                // Apply all corrections
+                for (int idx = 0; idx < N; idx++) {
+                    next_block[i][idx] = vec_orig[idx] + vec_correction[idx];
                 }
                 
                 norm = cblas_dznrm2(N, next_block[i].data(), 1);
@@ -749,10 +999,16 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             cblas_zscal(N, &scale, next_block[i].data(), 1);
             
             // Orthogonalize remaining work vectors against this one
+            #pragma omp parallel for schedule(static)
             for (int l = i + 1; l < block_size; l++) {
                 Complex overlap;
                 cblas_zdotc_sub(N, next_block[i].data(), 1, work_block[l].data(), 1, &overlap);
-                next_beta[l][i] = overlap;
+                
+                #pragma omp critical
+                {
+                    next_beta[l][i] = overlap;
+                }
+                
                 Complex neg_overlap = -overlap;
                 cblas_zaxpy(N, &neg_overlap, next_block[i].data(), 1, work_block[l].data(), 1);
             }
@@ -777,6 +1033,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     std::vector<Complex> block_matrix(total_dim * total_dim, Complex(0.0, 0.0));
     
     // Fill diagonal blocks (alpha)
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t j = 0; j < alpha.size(); j++) {
         for (int r = 0; r < block_size; r++) {
             for (int c = 0; c < block_size; c++) {
@@ -790,6 +1047,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     }
     
     // Fill off-diagonal blocks (beta)
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t j = 1; j < beta.size(); j++) {
         for (int r = 0; r < block_size; r++) {
             for (int c = 0; c < block_size; c++) {
@@ -840,48 +1098,66 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             }
         }
         
-        // Process each cluster
-        for (const auto& cluster : degen_clusters) {
-            if (cluster.size() == 1) {
-                // Non-degenerate case
-                int idx = cluster[0];
-                for (int i = 0; i < N; i++) {
-                    for (size_t k = 0; k < basis_vectors.size(); k++) {
-                        (*eigenvectors)[idx][i] += evecs[k*total_dim + idx] * basis_vectors[k][i];
-                    }
-                }
-                
-                // Normalize
-                double norm = cblas_dznrm2(N, (*eigenvectors)[idx].data(), 1);
-                Complex scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, (*eigenvectors)[idx].data(), 1);
-            } else {
-                // Handle degenerate case
-                std::vector<ComplexVector> subspace(cluster.size(), ComplexVector(N, Complex(0.0, 0.0)));
-                
-                // Compute raw vectors
-                for (size_t c = 0; c < cluster.size(); c++) {
-                    int idx = cluster[c];
-                    for (int i = 0; i < N; i++) {
-                        for (size_t k = 0; k < basis_vectors.size(); k++) {
-                            subspace[c][i] += evecs[k*total_dim + idx] * basis_vectors[k][i];
+        // Process each cluster in parallel using tasks
+        #pragma omp parallel
+        {
+            #pragma omp single
+            {
+                for (const auto& cluster : degen_clusters) {
+                    #pragma omp task
+                    {
+                        if (cluster.size() == 1) {
+                            // Non-degenerate case
+                            int idx = cluster[0];
+                            ComplexVector& eigenvector = (*eigenvectors)[idx];
+                            std::fill(eigenvector.begin(), eigenvector.end(), Complex(0.0, 0.0));
+                            
+                            // Transform eigenvector using basis vectors
+                            for (int i = 0; i < N; i++) {
+                                for (size_t k = 0; k < basis_vectors.size(); k++) {
+                                    eigenvector[i] += evecs[k*total_dim + idx] * basis_vectors[k][i];
+                                }
+                            }
+                            
+                            // Normalize
+                            double norm = cblas_dznrm2(N, eigenvector.data(), 1);
+                            Complex scale = Complex(1.0/norm, 0.0);
+                            cblas_zscal(N, &scale, eigenvector.data(), 1);
+                        } else {
+                            // Handle degenerate case
+                            std::vector<ComplexVector> subspace(cluster.size(), ComplexVector(N, Complex(0.0, 0.0)));
+                            
+                            // Compute raw vectors
+                            #pragma omp parallel for collapse(2) if(N > 1000) schedule(static)
+                            for (size_t c = 0; c < cluster.size(); c++) {
+                                for (int i = 0; i < N; i++) {
+                                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                                        subspace[c][i] += evecs[k*total_dim + cluster[c]] * basis_vectors[k][i];
+                                    }
+                                }
+                            }
+                            
+                            // Re-orthogonalize
+                            refine_degenerate_eigenvectors(H, subspace, evals[cluster[0]], N, tol);
+                            
+                            // Copy back
+                            for (size_t c = 0; c < cluster.size(); c++) {
+                                (*eigenvectors)[cluster[c]] = subspace[c];
+                            }
                         }
                     }
                 }
                 
-                // Re-orthogonalize
-                refine_degenerate_eigenvectors(H, subspace, evals[cluster[0]], N, tol);
+                #pragma omp taskwait
                 
-                // Copy back
-                for (size_t c = 0; c < cluster.size(); c++) {
-                    (*eigenvectors)[cluster[c]] = subspace[c];
+                // Optional refinement in parallel
+                for (int i = 0; i < total_dim; i++) {
+                    #pragma omp task
+                    {
+                        refine_eigenvector_with_cg(H, (*eigenvectors)[i], evals[i], N, tol);
+                    }
                 }
             }
-        }
-        
-        // Optional refinement
-        for (int i = 0; i < total_dim; i++) {
-            refine_eigenvector_with_cg(H, (*eigenvectors)[i], evals[i], N, tol);
         }
     } else {
         // Just compute eigenvalues
@@ -1027,16 +1303,31 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     // Initialize random starting vectors
     std::vector<ComplexVector> block_vectors(block_size, ComplexVector(N));
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Generate orthonormal set of starting vectors
-    block_vectors[0] = generateRandomVector(N, gen, dist);
-    for (int i = 1; i < block_size; i++) {
-        block_vectors[i] = generateOrthogonalVector(N, 
-                                                  std::vector<ComplexVector>(block_vectors.begin(), 
-                                                                          block_vectors.begin() + i), 
-                                                  gen, dist);
+    #pragma omp parallel
+    {
+        // Thread-local random generators for better performance
+        unsigned int seed = std::random_device{}() + omp_get_thread_num();
+        std::mt19937 local_gen(seed);
+        std::uniform_real_distribution<double> local_dist(-1.0, 1.0);
+        
+        #pragma omp single
+        {
+            // Generate first random vector
+            block_vectors[0] = generateRandomVector(N, local_gen, local_dist);
+            
+            // Generate orthogonal vectors sequentially (depends on previous vectors)
+            for (int i = 1; i < block_size; i++) {
+                #pragma omp task
+                {
+                    block_vectors[i] = generateOrthogonalVector(N, 
+                                                            std::vector<ComplexVector>(block_vectors.begin(), 
+                                                                                    block_vectors.begin() + i), 
+                                                            local_gen, local_dist);
+                }
+            }
+            #pragma omp taskwait
+        }
     }
     
     // Get filter parameters if not provided
@@ -1047,19 +1338,26 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         filter_degree = params.filter_degree;
     }
     
-    // Apply initial Chebyshev filter to each starting vector
+    // Apply initial Chebyshev filter to each starting vector in parallel
+    #pragma omp parallel for schedule(dynamic)
     for (int i = 0; i < block_size; i++) {
         chebyshev_filter(H, block_vectors[i], block_vectors[i], N, a, b, filter_degree);
     }
     
     // Re-orthonormalize after filtering
     for (int i = 0; i < block_size; i++) {
+        #pragma omp parallel for
         for (int j = 0; j < i; j++) {
             Complex overlap;
             cblas_zdotc_sub(N, block_vectors[j].data(), 1, block_vectors[i].data(), 1, &overlap);
-            Complex neg_overlap = -overlap;
-            cblas_zaxpy(N, &neg_overlap, block_vectors[j].data(), 1, block_vectors[i].data(), 1);
+            
+            #pragma omp critical
+            {
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, block_vectors[j].data(), 1, block_vectors[i].data(), 1);
+            }
         }
+        
         double norm = cblas_dznrm2(N, block_vectors[i].data(), 1);
         Complex scale = Complex(1.0/norm, 0.0);
         cblas_zscal(N, &scale, block_vectors[i].data(), 1);
@@ -1091,13 +1389,15 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         // Current alpha block
         std::vector<std::vector<Complex>> curr_alpha(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
         
-        // Apply H to each vector in the current block
+        // Apply H to each vector in the current block in parallel
+        #pragma omp parallel for schedule(dynamic)
         for (int b = 0; b < block_size; b++) {
             H(curr_block[b].data(), work_block[b].data(), N);
         }
         
         // Subtract beta_j * prev_block
         if (j > 0) {
+            #pragma omp parallel for collapse(2)
             for (int i = 0; i < block_size; i++) {
                 for (int k = 0; k < block_size; k++) {
                     Complex neg_beta = -beta[j][i][k];
@@ -1107,11 +1407,16 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         }
         
         // Compute alpha_j block and residuals
+        #pragma omp parallel for collapse(2) schedule(dynamic)
         for (int i = 0; i < block_size; i++) {
             for (int k = 0; k < block_size; k++) {
                 Complex dot;
                 cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
-                curr_alpha[i][k] = dot;
+                
+                #pragma omp critical
+                {
+                    curr_alpha[i][k] = dot;
+                }
                 
                 // Subtract from work vector: work -= dot * curr
                 Complex neg_dot = -dot;
@@ -1122,13 +1427,43 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         alpha.push_back(curr_alpha);
         
         // Full reorthogonalization against all previous basis vectors
+        #pragma omp parallel for schedule(dynamic)
         for (int b = 0; b < block_size; b++) {
             for (int iter = 0; iter < 2; iter++) {  // Do twice for numerical stability
-                for (size_t k = 0; k < basis_vectors.size(); k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, work_block[b].data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, work_block[b].data(), 1);
+                // Store original vector for consistent orthogonalization
+                ComplexVector work_orig = work_block[b];
+                ComplexVector work_correction(N, Complex(0.0, 0.0));
+                
+                #pragma omp parallel
+                {
+                    // Thread-local correction vector
+                    ComplexVector local_correction(N, Complex(0.0, 0.0));
+                    
+                    #pragma omp for schedule(guided) nowait
+                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                        Complex overlap;
+                        cblas_zdotc_sub(N, basis_vectors[k].data(), 1, work_orig.data(), 1, &overlap);
+                        Complex neg_overlap = -overlap;
+                        
+                        // Update local correction vector
+                        for (int i = 0; i < N; i++) {
+                            local_correction[i] += neg_overlap * basis_vectors[k][i];
+                        }
+                    }
+                    
+                    // Combine local corrections into the shared work_correction
+                    #pragma omp critical
+                    {
+                        for (int i = 0; i < N; i++) {
+                            work_correction[i] += local_correction[i];
+                        }
+                    }
+                }
+                
+                // Apply all corrections at once
+                #pragma omp parallel for simd
+                for (int i = 0; i < N; i++) {
+                    work_block[b][i] = work_orig[i] + work_correction[i];
                 }
             }
         }
@@ -1137,21 +1472,54 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         // We'll use a simplified Gram-Schmidt for this
         std::vector<std::vector<Complex>> next_beta(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
         
+        // Process each vector sequentially since they depend on previous vectors
         for (int i = 0; i < block_size; i++) {
             // Compute the norm of the work vector
             double norm = cblas_dznrm2(N, work_block[i].data(), 1);
             
             // If nearly zero, generate a new orthogonal vector
             if (norm < tol) {
+                // Thread-local random generator for better performance
+                unsigned int seed = std::random_device{}();
+                std::mt19937 gen(seed);
+                std::uniform_real_distribution<double> dist(-1.0, 1.0);
+                
                 next_block[i] = generateOrthogonalVector(N, basis_vectors, gen, dist);
                 chebyshev_filter(H, next_block[i], next_block[i], N, a, b, filter_degree);
                 
-                // Re-orthogonalize against basis
-                for (size_t k = 0; k < basis_vectors.size(); k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, next_block[i].data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, next_block[i].data(), 1);
+                // Re-orthogonalize against basis (in parallel)
+                ComplexVector vec_orig = next_block[i];
+                ComplexVector vec_correction(N, Complex(0.0, 0.0));
+                
+                #pragma omp parallel
+                {
+                    // Thread-local correction vector
+                    ComplexVector local_correction(N, Complex(0.0, 0.0));
+                    
+                    #pragma omp for nowait
+                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                        Complex overlap;
+                        cblas_zdotc_sub(N, basis_vectors[k].data(), 1, vec_orig.data(), 1, &overlap);
+                        Complex neg_overlap = -overlap;
+                        
+                        for (int idx = 0; idx < N; idx++) {
+                            local_correction[idx] += neg_overlap * basis_vectors[k][idx];
+                        }
+                    }
+                    
+                    // Combine corrections
+                    #pragma omp critical
+                    {
+                        for (int idx = 0; idx < N; idx++) {
+                            vec_correction[idx] += local_correction[idx];
+                        }
+                    }
+                }
+                
+                // Apply corrections
+                #pragma omp parallel for simd
+                for (int idx = 0; idx < N; idx++) {
+                    next_block[i][idx] = vec_orig[idx] + vec_correction[idx];
                 }
                 
                 norm = cblas_dznrm2(N, next_block[i].data(), 1);
@@ -1168,10 +1536,16 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
             cblas_zscal(N, &scale, next_block[i].data(), 1);
             
             // Orthogonalize remaining work vectors against this one
+            #pragma omp parallel for
             for (int j = i + 1; j < block_size; j++) {
                 Complex overlap;
                 cblas_zdotc_sub(N, next_block[i].data(), 1, work_block[j].data(), 1, &overlap);
-                next_beta[j][i] = overlap;  // Off-diagonal beta element
+                
+                #pragma omp critical
+                {
+                    next_beta[j][i] = overlap;  // Off-diagonal beta element
+                }
+                
                 Complex neg_overlap = -overlap;
                 cblas_zaxpy(N, &neg_overlap, next_block[i].data(), 1, work_block[j].data(), 1);
             }
@@ -1195,7 +1569,8 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     int total_dim = basis_vectors.size();
     std::vector<Complex> block_matrix(total_dim * total_dim, Complex(0.0, 0.0));
     
-    // Fill diagonal blocks (alpha)
+    // Fill diagonal blocks (alpha) in parallel
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t j = 0; j < alpha.size(); j++) {
         for (int r = 0; r < block_size; r++) {
             for (int c = 0; c < block_size; c++) {
@@ -1208,7 +1583,8 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         }
     }
     
-    // Fill off-diagonal blocks (beta)
+    // Fill off-diagonal blocks (beta) in parallel
+    #pragma omp parallel for collapse(3) schedule(static)
     for (size_t j = 1; j < beta.size(); j++) {
         for (int r = 0; r < block_size; r++) {
             for (int c = 0; c < block_size; c++) {
@@ -1224,7 +1600,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     // Diagonalize the block tridiagonal matrix
     std::vector<double> evals(total_dim);
-    std::vector<Complex> evecs(total_dim * total_dim);
+    std::vector<Complex> evecs;
     
     if (eigenvectors) {
         evecs = block_matrix;  // Copy for LAPACK which overwrites input
@@ -1265,77 +1641,90 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
             }
         }
         
-        // Process each cluster separately
-        for (const auto& cluster : degen_clusters) {
-            if (cluster.size() == 1) {
-                // Non-degenerate case
-                int idx = cluster[0];
-                for (int i = 0; i < N; i++) {
-                    for (size_t k = 0; k < basis_vectors.size(); k++) {
-                        (*eigenvectors)[idx][i] += evecs[k*total_dim + idx] * basis_vectors[k][i];
-                    }
-                }
-            } else {
-                // Degenerate case
-                int subspace_dim = cluster.size();
-                std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N));
-                
-                // Compute raw eigenvectors in original basis
-                for (int c = 0; c < subspace_dim; c++) {
-                    int idx = cluster[c];
-                    for (int i = 0; i < N; i++) {
-                        for (size_t k = 0; k < basis_vectors.size(); k++) {
-                            subspace_vectors[c][i] += evecs[k*total_dim + idx] * basis_vectors[k][i];
+        // Process each cluster separately using parallel tasks
+        #pragma omp parallel
+        {
+            #pragma omp single
+            {
+                for (const auto& cluster : degen_clusters) {
+                    #pragma omp task
+                    {
+                        if (cluster.size() == 1) {
+                            // Non-degenerate case
+                            int idx = cluster[0];
+                            ComplexVector& eigenvector = (*eigenvectors)[idx];
+                            std::fill(eigenvector.begin(), eigenvector.end(), Complex(0.0, 0.0));
+                            
+                            // Transform eigenvector using basis vectors
+                            for (size_t k = 0; k < basis_vectors.size(); k++) {
+                                Complex coef = evecs[k*total_dim + idx];
+                                #pragma omp parallel for simd
+                                for (int i = 0; i < N; i++) {
+                                    eigenvector[i] += coef * basis_vectors[k][i];
+                                }
+                            }
+                        } else {
+                            // Degenerate case
+                            int subspace_dim = cluster.size();
+                            std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N));
+                            
+                            // Compute raw eigenvectors in original basis (in parallel)
+                            #pragma omp parallel for collapse(2) if(N > 1000) schedule(static)
+                            for (int c = 0; c < subspace_dim; c++) {
+                                for (int i = 0; i < N; i++) {
+                                    for (size_t k = 0; k < basis_vectors.size(); k++) {
+                                        subspace_vectors[c][i] += evecs[k*total_dim + cluster[c]] * basis_vectors[k][i];
+                                    }
+                                }
+                            }
+                            
+                            // Orthogonalize within degenerate subspace
+                            for (int c = 0; c < subspace_dim; c++) {
+                                for (int prev = 0; prev < c; prev++) {
+                                    Complex overlap;
+                                    cblas_zdotc_sub(N, subspace_vectors[prev].data(), 1, 
+                                                  subspace_vectors[c].data(), 1, &overlap);
+                                    
+                                    Complex neg_overlap = -overlap;
+                                    cblas_zaxpy(N, &neg_overlap, subspace_vectors[prev].data(), 1, 
+                                              subspace_vectors[c].data(), 1);
+                                }
+                                
+                                // Normalize
+                                double norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
+                                if (norm > tol) {
+                                    Complex scale = Complex(1.0/norm, 0.0);
+                                    cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
+                                }
+                                
+                                // Store the refined eigenvector
+                                int idx = cluster[c];
+                                (*eigenvectors)[idx] = subspace_vectors[c];
+                            }
                         }
                     }
                 }
                 
-                // Orthogonalize within degenerate subspace
-                for (int c = 0; c < subspace_dim; c++) {
-                    for (int prev = 0; prev < c; prev++) {
-                        Complex overlap;
-                        cblas_zdotc_sub(N, subspace_vectors[prev].data(), 1, 
-                                      subspace_vectors[c].data(), 1, &overlap);
-                        
-                        Complex neg_overlap = -overlap;
-                        cblas_zaxpy(N, &neg_overlap, subspace_vectors[prev].data(), 1, 
-                                   subspace_vectors[c].data(), 1);
-                    }
-                    
-                    // Normalize
-                    double norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
-                    if (norm > tol) {
-                        Complex scale = Complex(1.0/norm, 0.0);
-                        cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
-                    }
-                }
-                
-                // Verify that vectors are accurate eigenvectors
-                for (int c = 0; c < subspace_dim; c++) {
-                    ComplexVector Hv(N);
-                    H(subspace_vectors[c].data(), Hv.data(), N);
-                    
-                    // Compute Rayleigh quotient
-                    Complex lambda;
-                    cblas_zdotc_sub(N, subspace_vectors[c].data(), 1, Hv.data(), 1, &lambda);
-                    
-                    // Store the refined eigenvector
-                    int idx = cluster[c];
-                    (*eigenvectors)[idx] = subspace_vectors[c];
-                }
+                // Wait for all cluster tasks to complete
+                #pragma omp taskwait
             }
         }
         
-        // Final verification of orthogonality
+        // Optional: Refine eigenvectors in parallel
+        #pragma omp parallel for schedule(dynamic)
         for (int i = 0; i < total_dim; i++) {
             // Normalize
             double norm = cblas_dznrm2(N, (*eigenvectors)[i].data(), 1);
             Complex scale = Complex(1.0/norm, 0.0);
             cblas_zscal(N, &scale, (*eigenvectors)[i].data(), 1);
+            
+            // Verify and improve accuracy if needed
+            if (i < std::min(20, total_dim)) {  // Only for most important eigenpairs
+                refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
+            }
         }
     }
 }
-
 
 // Full diagonalization using LAPACK for Hermitian matrices
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N,
