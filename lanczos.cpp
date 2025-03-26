@@ -12,12 +12,9 @@
 #include <ezarpack/arpack_solver.hpp>
 #include <ezarpack/storages/eigen.hpp>
 #include <ezarpack/version.hpp>
-#include <eigen3/Eigen/Dense>
-#include <eigen3/Eigen/Eigenvalues>
-#include <eigen3/Eigen/Sparse>
-#include <eigen3/Eigen/SparseQR>
-#include <eigen3/Eigen/SparseLU>
-#include <eigen3/Eigen/SparseCholesky>
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Sparse>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -1563,64 +1560,135 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     }
 }
 
-// Full diagonalization using LAPACK for Hermitian matrices
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N,
-                          std::vector<double>& eigenvalues, 
-                          std::vector<ComplexVector>* eigenvectors = nullptr) {
+// Full diagonalization of a sparse matrix using Eigen and/or ARPACK
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, 
+                         std::vector<double>& eigenvalues,
+                         std::vector<ComplexVector>* eigenvectors = nullptr,
+                         int num_eigenvalues = -1,            // Number of eigenvalues to compute (-1 for all)
+                         bool compute_smallest = true) {      // true for smallest, false for largest eigenvalues
+    // Determine how many eigenvalues to compute
+    int nev = (num_eigenvalues <= 0) ? N : std::min(N, num_eigenvalues);
     
-    // Construct the full matrix representation
-    std::vector<Complex> full_matrix(N * N, Complex(0.0, 0.0));
-    ComplexVector basis_vector(N, Complex(0.0, 0.0));
+    // Build the sparse matrix representation of H
+    Eigen::SparseMatrix<Complex> H_sparse(N, N);
+    std::vector<Eigen::Triplet<Complex>> triplets;
+    
+    // Estimate number of non-zeros per row
+    const int est_nnz_per_row = std::min(100, N/10);  // Adjust based on expected sparsity
+    triplets.reserve(N * est_nnz_per_row);
+    
+    // Apply H to each standard basis vector to extract matrix elements
+    ComplexVector basis(N, Complex(0.0, 0.0));
     ComplexVector result(N);
     
-    // Apply H to each standard basis vector to get columns of the matrix
+    std::cout << "Building sparse matrix representation..." << std::endl;
+    
     for (int j = 0; j < N; j++) {
-        // Create standard basis vector e_j
-        std::fill(basis_vector.begin(), basis_vector.end(), Complex(0.0, 0.0));
-        basis_vector[j] = Complex(1.0, 0.0);
+        // Set up j-th standard basis vector
+        basis[j] = Complex(1.0, 0.0);
         
-        // Apply H to e_j
-        H(basis_vector.data(), result.data(), N);
+        // Apply H to basis vector
+        H(basis.data(), result.data(), N);
         
-        // Store the result in the j-th column of the matrix (column major for LAPACK)
+        // Extract non-zero elements from the result
         for (int i = 0; i < N; i++) {
-            full_matrix[j*N + i] = result[i];
+            if (std::abs(result[i]) > 1e-12) {
+                triplets.push_back(Eigen::Triplet<Complex>(i, j, result[i]));
+            }
+        }
+        
+        // Reset basis vector
+        basis[j] = Complex(0.0, 0.0);
+        
+        // Show progress
+        if (j % std::max(1, N/10) == 0 && j > 0) {
+            std::cout << "  " << (j*100)/N << "% complete" << std::endl;
         }
     }
     
-    // Allocate array for eigenvalues
-    eigenvalues.resize(N);
+    std::cout << "Constructing sparse matrix..." << std::endl;
+    H_sparse.setFromTriplets(triplets.begin(), triplets.end());
+    H_sparse.makeCompressed();
     
-    // Prepare working space for eigenvectors if requested
-    std::vector<Complex> work_eigenvectors;
-    if (eigenvectors) {
-        work_eigenvectors = full_matrix; // Copy the matrix since LAPACK overwrites it
-    }
+    std::cout << "Matrix size: " << N << "x" << N << std::endl;
+    std::cout << "Non-zeros: " << H_sparse.nonZeros() << std::endl;
+    std::cout << "Computing " << nev << " eigenvalues" << std::endl;
     
-    // Call LAPACK eigensolver
-    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 
-                           eigenvectors ? 'V' : 'N', // 'V' to compute eigenvectors, 'N' for eigenvalues only
-                           'U',                      // Upper triangular part of the matrix is used
-                           N, 
-                           reinterpret_cast<lapack_complex_double*>(eigenvectors ? work_eigenvectors.data() : full_matrix.data()), 
-                           N, 
-                           eigenvalues.data());
-    
-    if (info != 0) {
-        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
-        return;
-    }
-    
-    // Convert eigenvectors if requested
-    if (eigenvectors) {
-        eigenvectors->resize(N);
+    // Determine which solver to use based on matrix size and number of eigenvalues
+    if (N <= 1000 && nev == N) {
+        // For smaller matrices and full spectrum, use direct solvers
+        std::cout << "Using direct solver (SelfAdjointEigenSolver)..." << std::endl;
+        
+        // Convert to dense matrix
+        Eigen::MatrixXcd H_dense = Eigen::MatrixXcd(H_sparse);
+        
+        // Use SelfAdjointEigenSolver for Hermitian matrices
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> eigensolver(H_dense);
+        
+        if (eigensolver.info() != Eigen::Success) {
+            std::cerr << "Eigenvalue computation failed!" << std::endl;
+            return;
+        }
+        
+        // Extract eigenvalues
+        eigenvalues.resize(N);
+        Eigen::VectorXd evals = eigensolver.eigenvalues();
         for (int i = 0; i < N; i++) {
-            (*eigenvectors)[i].resize(N);
-            for (int j = 0; j < N; j++) {
-                (*eigenvectors)[i][j] = work_eigenvectors[i*N + j];
+            eigenvalues[i] = evals(i);
+        }
+        
+        // Extract eigenvectors if requested
+        if (eigenvectors) {
+            eigenvectors->resize(N, ComplexVector(N));
+            for (int i = 0; i < N; i++) {
+                for (int j = 0; j < N; j++) {
+                    (*eigenvectors)[i][j] = eigensolver.eigenvectors().col(i)(j);
+                }
+            }
+        }
+    } else {
+        // Use ezARPACK for larger matrices or when computing partial spectrum
+        std::cout << "Using ezARPACK solver..." << std::endl;
+        
+        // Use the Hermitian solver for complex matrices
+        using solver_t = ezarpack::arpack_solver<ezarpack::Hermitian, ezarpack::eigen_storage>;
+        solver_t solver(N);
+        
+        // Define matrix-vector operation using sparse matrix
+        auto matrix_op = [&H_sparse](solver_t::vector_const_view_t in, 
+                                  solver_t::vector_view_t out) {
+            out = H_sparse * in;
+        };
+        
+        // Set parameters
+        using params_t = solver_t::params_t;
+        params_t params(nev, 
+                      compute_smallest ? params_t::Smallest : params_t::Largest,
+                      eigenvectors != nullptr);
+        
+        // Run diagonalization
+        solver(matrix_op, params);
+        
+        // Extract eigenvalues
+        auto const& evals = solver.eigenvalues();
+        eigenvalues.resize(nev);
+        for (int i = 0; i < nev; i++) {
+            eigenvalues[i] = evals(i);
+        }
+        
+        // Extract eigenvectors if requested
+        if (eigenvectors) {
+            auto const& evecs = solver.eigenvectors();
+            eigenvectors->resize(nev, ComplexVector(N));
+            for (int i = 0; i < nev; i++) {
+                for (int j = 0; j < N; j++) {
+                    (*eigenvectors)[i][j] = evecs(j, i);
+                }
             }
         }
     }
+    
+    std::cout << "Diagonalization complete." << std::endl;
 }
 
 // Diagonalization using ezARPACK
@@ -3167,10 +3235,10 @@ int main(){
     }, (1<<num_site), 1000, 1e-10, eigenvalues_lanczos);
 
     // Print the results
-    // std::cout << "Eigenvalues:" << std::endl;
-    // for (size_t i = 0; i < 20; i++) {
-    //     std::cout << "Eigenvalue " << i << " Chebyshev Filtered Lanczos: " << eigenvalues[i] << " Lanczos: " << eigenvalues_lanczos[i] << std::endl;
-    // }
+    std::cout << "Eigenvalues:" << std::endl;
+    for (size_t i = 0; i < 20; i++) {
+        std::cout << "Eigenvalue " << i << " Chebyshev Filtered Lanczos: " << eigenvalues[i] << " Lanczos: " << eigenvalues_lanczos[i] << std::endl;
+    }
     // Run full diagonalization for comparison
     // std::vector<double> full_eigenvalues;
     // full_diagonalization([&](const Complex* v, Complex* Hv, int N) {
