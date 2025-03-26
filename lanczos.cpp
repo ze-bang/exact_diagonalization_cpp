@@ -19,7 +19,7 @@
 #include <Eigen/SparseLU>
 #include <Eigen/SparseCholesky>
 #include <omp.h>
-
+#include <mpi.h>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -2385,21 +2385,44 @@ Complex FTLM(
     std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
     std::function<void(const Complex*, Complex*, int)> A, // Observable matrix-vector product
     int N,             // Dimension of Hilbert space
-    double beta,          // Inverse temperature (β = 1/kT)
+    double beta,       // Inverse temperature (β = 1/kT)
     int r_max = 20,    // Number of random vectors for sampling the trace
     int m_max = 100,   // Maximum Lanczos iterations per random vector
     double tol = 1e-10 // Tolerance
 ) {
-    // Initialize random number generator
-    std::mt19937 gen(std::random_device{}());
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Determine local range of random vectors for this process
+    int local_r_max = r_max / mpi_size;
+    int remainder = r_max % mpi_size;
+    
+    // Distribute remainder to ensure all random vectors are processed
+    int start_r = local_r_max * mpi_rank + std::min(mpi_rank, remainder);
+    if (mpi_rank < remainder) local_r_max++;
+    int end_r = start_r + local_r_max;
+    
+    // Initialize random number generator with process-specific seed
+    std::mt19937 gen(std::random_device{}() + 17 * mpi_rank);
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Accumulators for traces
-    Complex trace_A_exp_H = 0.0;
-    double trace_exp_H = 0.0;
+    // Local accumulators for traces
+    Complex local_trace_A_exp_H = 0.0;
+    double local_trace_exp_H = 0.0;
     
-    // For each random vector
-    for (int r = 0; r < r_max; r++) {
+    // Process local range of random vectors
+    for (int r = start_r; r < end_r; r++) {
         // Generate random starting vector
         ComplexVector v0(N);
         for (int i = 0; i < N; i++) {
@@ -2444,13 +2467,48 @@ Complex FTLM(
         // Calculate contributions to the thermal traces
         for (int i = 0; i < m; i++) {
             double exp_factor = std::exp(-beta * evals[i]);
-            trace_exp_H += exp_factor;
-            trace_A_exp_H += A_reduced[i][i] * exp_factor;
+            local_trace_exp_H += exp_factor;
+            local_trace_A_exp_H += A_reduced[i][i] * exp_factor;
+        }
+        
+        // Optional: Log progress
+        if (mpi_rank == 0 && local_r_max > 10 && (r - start_r) % (local_r_max/10) == 0) {
+            std::cout << "Process 0: Completed " << (r - start_r) << " of " << local_r_max 
+                      << " random vectors." << std::endl;
         }
     }
     
-    // Return thermal average <A> = Tr(A*e^(-βH))/Tr(e^(-βH))
-    return trace_A_exp_H / trace_exp_H;
+    // Prepare to reduce complex values by separating real and imaginary parts
+    double local_real = local_trace_A_exp_H.real();
+    double local_imag = local_trace_A_exp_H.imag();
+    double global_real = 0.0, global_imag = 0.0;
+    double global_trace_exp_H = 0.0;
+    
+    // Reduce results across all processes
+    MPI_Reduce(&local_real, &global_real, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_imag, &global_imag, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_trace_exp_H, &global_trace_exp_H, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Reconstruct the complex result
+    Complex global_trace_A_exp_H(global_real, global_imag);
+    
+    // Calculate final result on root process
+    Complex result;
+    if (mpi_rank == 0) {
+        result = global_trace_A_exp_H / global_trace_exp_H;
+    }
+    
+    // Broadcast result to all processes
+    double result_components[2] = {result.real(), result.imag()};
+    MPI_Bcast(result_components, 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    result = Complex(result_components[0], result_components[1]);
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        MPI_Finalize();
+    }
+    
+    return result;
 }
 
 // Calculate the dynamical correlation function S_AB(ω) using FTLM
@@ -2468,25 +2526,46 @@ std::vector<std::pair<double, Complex>> FTLM_dynamical(
     int r_max = 30,           // Number of random vectors for sampling
     int m_max = 100           // Maximum Lanczos iterations per random vector
 ) {
-    // Generate frequency grid
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Generate frequency grid (all processes need this)
     std::vector<double> omega_values(n_points);
     double delta_omega = (omega_max - omega_min) / (n_points - 1);
     for (int i = 0; i < n_points; i++) {
         omega_values[i] = omega_min + i * delta_omega;
     }
     
-    // Initialize result vector with zeros
-    std::vector<Complex> response(n_points, Complex(0.0, 0.0));
+    // Distribute random vectors among processes
+    int local_r_max = r_max / mpi_size;
+    int remainder = r_max % mpi_size;
     
-    // Initialize random number generator
-    std::mt19937 gen(std::random_device{}());
+    // Distribute remainder to ensure all random vectors are processed
+    int start_r = local_r_max * mpi_rank + std::min(mpi_rank, remainder);
+    if (mpi_rank < remainder) local_r_max++;
+    int end_r = start_r + local_r_max;
+    
+    // Initialize local result vector and partition function accumulator
+    std::vector<Complex> local_response(n_points, Complex(0.0, 0.0));
+    double local_Z = 0.0;
+    
+    // Initialize random number generator with process-specific seed
+    std::mt19937 gen(std::random_device{}() + 17 * mpi_rank); // Different seed for each process
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Accumulators for the partition function
-    double Z = 0.0;
-    
-    // For each random vector
-    for (int r = 0; r < r_max; r++) {
+    // Process local range of random vectors
+    for (int r = start_r; r < end_r; r++) {
         // Generate random starting vector
         ComplexVector v0(N);
         for (int i = 0; i < N; i++) {
@@ -2536,7 +2615,7 @@ std::vector<std::pair<double, Complex>> FTLM_dynamical(
         for (int n = 0; n < m; n++) {
             Z_r += std::exp(-beta * eigenvalues[n]);
         }
-        Z += Z_r;
+        local_Z += Z_r;
         
         // Apply operators A and B to eigenvectors
         std::vector<ComplexVector> A_eigenvectors(m, ComplexVector(N));
@@ -2571,21 +2650,75 @@ std::vector<std::pair<double, Complex>> FTLM_dynamical(
                     double omega = omega_values[i];
                     // Lorentzian: 1/π * η/((ω-ω_0)² + η²)
                     Complex lorentzian = Complex(eta / (M_PI * ((omega - omega_np)*(omega - omega_np) + eta*eta)), 0.0);
-                    response[i] += weight * matrix_element * lorentzian;
+                    local_response[i] += weight * matrix_element * lorentzian;
                 }
             }
         }
+        
+        // Optional: Log progress
+        if (local_r_max > 10 && (r - start_r) % (local_r_max/10) == 0) {
+            std::cout << "Process " << mpi_rank << ": Completed " << (r - start_r) 
+                      << " of " << local_r_max << " random vectors." << std::endl;
+        }
     }
     
-    // Normalize by partition function
+    // Create buffers to store reduced results
+    std::vector<Complex> global_response(n_points, Complex(0.0, 0.0));
+    double global_Z = 0.0;
+    
+    // MPI reduction requires separate real and imaginary parts
+    std::vector<double> local_real(n_points), local_imag(n_points);
+    std::vector<double> global_real(n_points), global_imag(n_points);
+    
+    // Split complex values into real and imaginary parts
     for (int i = 0; i < n_points; i++) {
-        response[i] /= Z;
+        local_real[i] = local_response[i].real();
+        local_imag[i] = local_response[i].imag();
     }
     
-    // Create result pair vector
+    // Reduce results across all processes
+    MPI_Reduce(local_real.data(), global_real.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_imag.data(), global_imag.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_Z, &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Combine real and imaginary parts back into complex vector
+    for (int i = 0; i < n_points; i++) {
+        global_response[i] = Complex(global_real[i], global_imag[i]);
+    }
+    
+    // Normalize by partition function (only on root process)
     std::vector<std::pair<double, Complex>> result(n_points);
+    if (mpi_rank == 0) {
+        for (int i = 0; i < n_points; i++) {
+            global_response[i] /= global_Z;
+            result[i] = std::make_pair(omega_values[i], global_response[i]);
+        }
+        
+        if (mpi_size > 1) {
+            std::cout << "MPI FTLM completed with " << mpi_size << " processes." << std::endl;
+        }
+    }
+    
+    // Broadcast results to all processes for consistency
+    // First broadcast the real and imaginary parts of the normalized response
     for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(omega_values[i], response[i]);
+        global_real[i] = (mpi_rank == 0) ? result[i].second.real() : 0.0;
+        global_imag[i] = (mpi_rank == 0) ? result[i].second.imag() : 0.0;
+    }
+    
+    MPI_Bcast(global_real.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(global_imag.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Reconstruct the result vector on non-root processes
+    if (mpi_rank != 0) {
+        for (int i = 0; i < n_points; i++) {
+            result[i] = std::make_pair(omega_values[i], Complex(global_real[i], global_imag[i]));
+        }
+    }
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        MPI_Finalize();
     }
     
     return result;
@@ -2601,16 +2734,40 @@ Complex LTLM(
     int M,              // Lanczos iterations per sample
     double tol = 1e-10  // Tolerance for convergence
 ) {
-    // Random number generator for random states
-    std::mt19937 gen(std::random_device{}());
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Distribute random samples across processes
+    int local_R = R / mpi_size;  // Samples per process
+    int remainder = R % mpi_size;
+    
+    // Give extra samples to the first 'remainder' processes
+    if (mpi_rank < remainder) local_R++;
+    
+    // Calculate starting index for this process
+    int start_idx = mpi_rank * (R / mpi_size) + std::min(mpi_rank, remainder);
+    
+    // Random number generator with process-specific seed
+    std::mt19937 gen(std::random_device{}() + 17 * mpi_rank);  // Different seed for each process
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Accumulators for numerator and denominator
-    Complex num(0.0, 0.0);
-    double denom = 0.0;
+    // Local accumulators for this process
+    Complex local_num(0.0, 0.0);
+    double local_denom = 0.0;
     
-    // For each random sample
-    for (int r = 0; r < R; r++) {
+    // Process local range of samples
+    for (int r = 0; r < local_R; r++) {
         // Generate random vector |r⟩
         ComplexVector r_vec(N);
         for (int i = 0; i < N; i++) {
@@ -2678,13 +2835,39 @@ Complex LTLM(
             exp_H_A_r += weight * r_A_psi;
         }
         
-        // Add to accumulators
-        num += exp_H_A_r;
-        denom += exp_H_r;
+        // Add to local accumulators
+        local_num += exp_H_A_r;
+        local_denom += exp_H_r;
     }
     
-    // Return thermal average ⟨A⟩ = Tr(e^{-βH}A)/Tr(e^{-βH})
-    return num / denom;
+    // Prepare to reduce complex values by separating real and imaginary parts
+    double local_real = local_num.real();
+    double local_imag = local_num.imag();
+    double global_real = 0.0, global_imag = 0.0;
+    double global_denom = 0.0;
+    
+    // Combine results from all processes using MPI reduction
+    MPI_Reduce(&local_real, &global_real, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_imag, &global_imag, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_denom, &global_denom, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Reconstruct the complex result on root process
+    Complex result;
+    if (mpi_rank == 0) {
+        result = Complex(global_real, global_imag) / global_denom;
+    }
+    
+    // Broadcast the result to all processes
+    double result_components[2] = {result.real(), result.imag()};
+    MPI_Bcast(result_components, 2, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    result = Complex(result_components[0], result_components[1]);
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        MPI_Finalize();
+    }
+    
+    return result;
 }
 
 // LTLM for dynamical correlation function at low temperatures
@@ -2703,25 +2886,49 @@ std::vector<std::pair<double, Complex>> LTLM_dynamical(
     int M,              // Lanczos iterations per sample
     double tol = 1e-10  // Tolerance for convergence
 ) {
-    // Generate frequency grid
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Generate frequency grid (all processes need this)
     std::vector<double> omega_values(n_points);
     double delta_omega = (omega_max - omega_min) / (n_points - 1);
     for (int i = 0; i < n_points; i++) {
         omega_values[i] = omega_min + i * delta_omega;
     }
     
-    // Initialize result vector
-    std::vector<Complex> S_AB(n_points, Complex(0.0, 0.0));
+    // Distribute random samples across processes
+    int local_R = R / mpi_size;  // Samples per process
+    int remainder = R % mpi_size;
     
-    // Initialize random number generator
-    std::mt19937 gen(std::random_device{}());
+    // Give extra samples to the first 'remainder' processes
+    if (mpi_rank < remainder) local_R++;
+    
+    // Calculate starting index for this process
+    int start_idx = mpi_rank * (R / mpi_size) + std::min(mpi_rank, remainder);
+    
+    // Initialize local result vector
+    std::vector<Complex> local_S_AB(n_points, Complex(0.0, 0.0));
+    
+    // Initialize random number generator with process-specific seed
+    std::mt19937 gen(std::random_device{}() + 17 * mpi_rank);  // Different seed for each process
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Accumulator for partition function
-    double Z = 0.0;
+    // Accumulator for local partition function
+    double local_Z = 0.0;
     
-    // For each random sample
-    for (int r = 0; r < R; r++) {
+    // Process local range of random samples
+    for (int r = 0; r < local_R; r++) {
         // Generate random vector |r⟩
         ComplexVector r_vec(N);
         for (int i = 0; i < N; i++) {
@@ -2769,7 +2976,7 @@ std::vector<std::pair<double, Complex>> LTLM_dynamical(
             cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
             Z_r += std::exp(-beta * eigvals[j]) * std::norm(r_psi_j);
         }
-        Z += Z_r;
+        local_Z += Z_r;
         
         // For each eigenstate |j⟩
         for (int j = 0; j < eigvals.size(); j++) {
@@ -2857,16 +3064,73 @@ std::vector<std::pair<double, Complex>> LTLM_dynamical(
                     double omega = omega_values[p];
                     // Lorentzian: η/π / [(ω-ω_ij)^2 + η^2]
                     double lorentz = eta / (M_PI * ((omega - omega_ij)*(omega - omega_ij) + eta*eta));
-                    S_AB[p] += contrib * Complex(lorentz, 0.0);
+                    local_S_AB[p] += contrib * Complex(lorentz, 0.0);
                 }
             }
         }
+        
+        // Optional: Log progress
+        if (local_R > 10 && r % (local_R/10) == 0) {
+            std::cout << "Process " << mpi_rank << ": Completed " << r 
+                      << " of " << local_R << " random vectors." << std::endl;
+        }
     }
     
-    // Normalize by partition function and prepare result
-    std::vector<std::pair<double, Complex>> result(n_points);
+    // MPI reduction of results requires splitting complex values into real and imaginary parts
+    std::vector<double> local_real(n_points), local_imag(n_points);
+    std::vector<double> global_real(n_points), global_imag(n_points);
+    
+    // Split complex values into real and imaginary parts
     for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(omega_values[i], S_AB[i] / Z);
+        local_real[i] = local_S_AB[i].real();
+        local_imag[i] = local_S_AB[i].imag();
+    }
+    
+    // Reduce all local results to get global result
+    MPI_Reduce(local_real.data(), global_real.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_imag.data(), global_imag.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Reduce partition function
+    double global_Z = 0.0;
+    MPI_Reduce(&local_Z, &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Prepare result (only on root process)
+    std::vector<std::pair<double, Complex>> result(n_points);
+    
+    if (mpi_rank == 0) {
+        // Normalize by partition function
+        for (int i = 0; i < n_points; i++) {
+            Complex global_value(global_real[i], global_imag[i]);
+            result[i] = std::make_pair(omega_values[i], global_value / global_Z);
+        }
+        
+        std::cout << "MPI LTLM completed with " << mpi_size << " processes." << std::endl;
+    }
+    
+    // Broadcast results to all processes for consistency
+    // First broadcast the real and imaginary parts of normalized values
+    std::vector<double> result_real(n_points), result_imag(n_points);
+    
+    if (mpi_rank == 0) {
+        for (int i = 0; i < n_points; i++) {
+            result_real[i] = result[i].second.real();
+            result_imag[i] = result[i].second.imag();
+        }
+    }
+    
+    MPI_Bcast(result_real.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(result_imag.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Reconstruct the result on all processes
+    if (mpi_rank != 0) {
+        for (int i = 0; i < n_points; i++) {
+            result[i] = std::make_pair(omega_values[i], Complex(result_real[i], result_imag[i]));
+        }
+    }
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        MPI_Finalize();
     }
     
     return result;
@@ -2887,25 +3151,47 @@ std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
     int M,              // Lanczos iterations per sample
     double tol = 1e-10  // Tolerance for convergence
 ) {
-    // Generate time grid
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
+    // Generate time grid (all processes need this)
     std::vector<double> time_values(n_points);
     double delta_t = (t_max - t_min) / (n_points - 1);
     for (int i = 0; i < n_points; i++) {
         time_values[i] = t_min + i * delta_t;
     }
     
-    // Initialize result
-    std::vector<Complex> C_AB(n_points, Complex(0.0, 0.0));
+    // Distribute random samples across processes
+    int local_R = R / mpi_size;  // Basic division of samples
+    int remainder = R % mpi_size;
     
-    // Random generator
-    std::mt19937 gen(std::random_device{}());
+    // Give extra samples to the first 'remainder' processes
+    if (mpi_rank < remainder) local_R++;
+    
+    // Calculate starting index for this process
+    int start_idx = mpi_rank * (R / mpi_size) + std::min(mpi_rank, remainder);
+    
+    // Initialize local result vector and partition function accumulator
+    std::vector<Complex> local_C_AB(n_points, Complex(0.0, 0.0));
+    double local_Z = 0.0;
+    
+    // Initialize random number generator with process-specific seed
+    std::mt19937 gen(std::random_device{}() + 17 * mpi_rank); // Different seed for each process
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Partition function accumulator
-    double Z = 0.0;
-    
-    // For each random sample
-    for (int r = 0; r < R; r++) {
+    // Process local range of random samples
+    for (int r = 0; r < local_R; r++) {
         // Generate random vector |r⟩
         ComplexVector r_vec(N);
         for (int i = 0; i < N; i++) {
@@ -2953,7 +3239,7 @@ std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
             cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
             Z_r += std::exp(-b * eigvals[j]) * std::norm(r_psi_j);
         }
-        Z += Z_r;
+        local_Z += Z_r;
         
         // For each eigenstate |j⟩
         for (int j = 0; j < eigvals.size(); j++) {
@@ -2996,21 +3282,77 @@ std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
                 cblas_zdotc_sub(N, phi_t.data(), 1, A_psi.data(), 1, &corr);
                 
                 // Add contribution
-                C_AB[t_idx] += weight * corr;
+                local_C_AB[t_idx] += weight * corr;
             }
+        }
+        
+        // Optional: Log progress
+        if (local_R > 10 && r % (local_R/10) == 0) {
+            std::cout << "Process " << mpi_rank << ": Completed " << r 
+                     << " of " << local_R << " random vectors." << std::endl;
         }
     }
     
-    // Normalize by partition function
-    std::vector<std::pair<double, Complex>> result(n_points);
+    // MPI reduction requires separate real and imaginary parts
+    std::vector<double> local_real(n_points), local_imag(n_points);
+    std::vector<double> global_real(n_points), global_imag(n_points);
+    double global_Z = 0.0;
+    
+    // Split complex values into real and imaginary parts
     for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(time_values[i], C_AB[i] / Z);
+        local_real[i] = local_C_AB[i].real();
+        local_imag[i] = local_C_AB[i].imag();
+    }
+    
+    // Reduce results across all processes
+    MPI_Reduce(local_real.data(), global_real.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(local_imag.data(), global_imag.data(), n_points, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_Z, &global_Z, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    
+    // Prepare result (only on root process)
+    std::vector<std::pair<double, Complex>> result(n_points);
+    
+    if (mpi_rank == 0) {
+        // Normalize by partition function
+        for (int i = 0; i < n_points; i++) {
+            Complex global_value(global_real[i], global_imag[i]);
+            result[i] = std::make_pair(time_values[i], global_value / global_Z);
+        }
+        
+        if (mpi_size > 1) {
+            std::cout << "MPI LTLM completed with " << mpi_size << " processes." << std::endl;
+        }
+    }
+    
+    // Broadcast results to all processes for consistency
+    std::vector<double> result_real(n_points), result_imag(n_points);
+    
+    if (mpi_rank == 0) {
+        for (int i = 0; i < n_points; i++) {
+            result_real[i] = result[i].second.real();
+            result_imag[i] = result[i].second.imag();
+        }
+    }
+    
+    MPI_Bcast(result_real.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(result_imag.data(), n_points, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Reconstruct the result on all processes
+    if (mpi_rank != 0) {
+        for (int i = 0; i < n_points; i++) {
+            result[i] = std::make_pair(time_values[i], Complex(result_real[i], result_imag[i]));
+        }
+    }
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        MPI_Finalize();
     }
     
     return result;
 }
 
-// Advanced FTLM with adaptive convergence strategy
+// Advanced FTLM with adaptive convergence strategy, MPI parallel version
 Complex FTLM_adaptive(
     std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
     std::function<void(const Complex*, Complex*, int)> A, // Observable matrix-vector product
@@ -3019,9 +3361,23 @@ Complex FTLM_adaptive(
     double conv_tol = 1e-4, // Convergence tolerance
     int r_start = 20,  // Starting number of random vectors
     int m_start = 100, // Starting max Lanczos iterations
-    int max_steps = 3,// Maximum number of refinement steps
+    int max_steps = 3, // Maximum number of refinement steps
     double tol = 1e-10 // Tolerance for Lanczos algorithm
 ) {
+    // Initialize MPI variables
+    int mpi_rank, mpi_size;
+    bool initialized = false;
+    
+    // Check if MPI is initialized
+    MPI_Initialized(&initialized);
+    if (!initialized) {
+        int provided;
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    
     // Keep track of results for different parameters
     struct FTLMResult {
         int r_val;
@@ -3035,8 +3391,10 @@ Complex FTLM_adaptive(
     Complex initial_result = FTLM(H, A, N, b, r_start, m_start, tol);
     results.push_back({r_start, m_start, initial_result, 0.0});
     
-    std::cout << "FTLM adaptive initial: r=" << r_start << ", m=" << m_start 
-              << ", result=" << initial_result << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "FTLM adaptive initial: r=" << r_start << ", m=" << m_start 
+                  << ", result=" << initial_result << std::endl;
+    }
     
     // Two separate parameters to vary independently
     int r_current = r_start;
@@ -3046,14 +3404,88 @@ Complex FTLM_adaptive(
     for (int step = 0; step < max_steps/2 && results.size() < max_steps; step++) {
         r_current = static_cast<int>(r_current * 1.5);
         
-        Complex r_result = FTLM(H, A, N, b, r_current, m_start, tol);
+        // MPI calculation with work distributed among processes
+        // Each process handles a subset of random vectors
+        int local_r = r_current / mpi_size;
+        int remainder = r_current % mpi_size;
+        
+        // Give extra work to lower rank processes to balance load
+        int my_r = local_r + (mpi_rank < remainder ? 1 : 0);
+        int start_r = mpi_rank * local_r + std::min(mpi_rank, remainder);
+        
+        // Each process runs FTLM with its local portion of random vectors
+        Complex local_numerator(0.0, 0.0);
+        double local_denominator = 0.0;
+        
+        // Define identity operator for denominator calculation
+        auto identity_op = [](const Complex* v, Complex* result, int size) {
+            std::copy(v, v + size, result);
+        };
+        
+        // Initialize random generator with rank-specific seed
+        unsigned int seed = std::random_device{}() + 100 * mpi_rank;
+        std::mt19937 gen(seed);
+        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        
+        // Process local random vectors
+        for (int r = 0; r < my_r; r++) {
+            // Generate random vector |r⟩
+            ComplexVector r_vec(N);
+            for (int i = 0; i < N; i++) {
+                r_vec[i] = Complex(dist(gen), dist(gen));
+            }
+            
+            // Normalize
+            double norm = cblas_dznrm2(N, r_vec.data(), 1);
+            Complex scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, r_vec.data(), 1);
+            
+            // Run Lanczos starting from this vector
+            std::vector<double> eigenvalues;
+            std::vector<ComplexVector> eigenvectors;
+            lanczos(H, N, m_start, tol, eigenvalues, &eigenvectors);
+            
+            // Calculate local contributions
+            for (int j = 0; j < eigenvalues.size(); j++) {
+                // Calculate |⟨r|ψ_j⟩|^2
+                Complex r_psi_j;
+                cblas_zdotc_sub(N, r_vec.data(), 1, eigenvectors[j].data(), 1, &r_psi_j);
+                double weight = std::exp(-b * eigenvalues[j]) * std::norm(r_psi_j);
+                
+                // Apply A to |ψ_j⟩
+                ComplexVector A_psi(N);
+                A(eigenvectors[j].data(), A_psi.data(), N);
+                
+                // Calculate ⟨ψ_j|A|ψ_j⟩
+                Complex matrix_element;
+                cblas_zdotc_sub(N, eigenvectors[j].data(), 1, A_psi.data(), 1, &matrix_element);
+                
+                // Add contribution
+                local_numerator += weight * matrix_element;
+                local_denominator += weight;
+            }
+        }
+        
+        // Reduce results across all processes
+        double local_real = local_numerator.real();
+        double local_imag = local_numerator.imag();
+        double global_real, global_imag, global_denominator;
+        
+        MPI_Allreduce(&local_real, &global_real, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_imag, &global_imag, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_denominator, &global_denominator, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        
+        Complex r_result = Complex(global_real, global_imag) / global_denominator;
+        
         double rel_diff = std::abs(r_result - results.back().result) / 
                           (std::abs(results.back().result) > 1e-10 ? std::abs(results.back().result) : 1.0);
         
         results.push_back({r_current, m_start, r_result, rel_diff});
         
-        std::cout << "FTLM r-refinement: r=" << r_current << ", m=" << m_start 
-                  << ", result=" << r_result << " (rel. change: " << rel_diff << ")" << std::endl;
+        if (mpi_rank == 0) {
+            std::cout << "FTLM r-refinement: r=" << r_current << ", m=" << m_start 
+                      << ", result=" << r_result << " (rel. change: " << rel_diff << ")" << std::endl;
+        }
         
         if (rel_diff < conv_tol/2) {
             break; // Converged on r parameter
@@ -3064,27 +3496,102 @@ Complex FTLM_adaptive(
     for (int step = 0; step < max_steps/2 && results.size() < max_steps; step++) {
         m_current = static_cast<int>(m_current * 1.3);
         
-        Complex m_result = FTLM(H, A, N, b, r_current, m_current, tol);
+        // Distribute the work for increased Lanczos iterations
+        int local_r = r_current / mpi_size;
+        int remainder = r_current % mpi_size;
+        
+        // Give extra work to lower rank processes
+        int my_r = local_r + (mpi_rank < remainder ? 1 : 0);
+        int start_r = mpi_rank * local_r + std::min(mpi_rank, remainder);
+        
+        // Each process runs with increased m value
+        Complex local_numerator(0.0, 0.0);
+        double local_denominator = 0.0;
+        
+        // Initialize random generator with rank-specific seed
+        unsigned int seed = std::random_device{}() + 100 * mpi_rank;
+        std::mt19937 gen(seed);
+        std::uniform_real_distribution<double> dist(-1.0, 1.0);
+        
+        // Process local random vectors
+        for (int r = 0; r < my_r; r++) {
+            // Generate random vector |r⟩
+            ComplexVector r_vec(N);
+            for (int i = 0; i < N; i++) {
+                r_vec[i] = Complex(dist(gen), dist(gen));
+            }
+            
+            // Normalize
+            double norm = cblas_dznrm2(N, r_vec.data(), 1);
+            Complex scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, r_vec.data(), 1);
+            
+            // Run Lanczos with increased iterations
+            std::vector<double> eigenvalues;
+            std::vector<ComplexVector> eigenvectors;
+            lanczos(H, N, m_current, tol, eigenvalues, &eigenvectors);
+            
+            // Calculate local contributions
+            for (int j = 0; j < eigenvalues.size(); j++) {
+                // Calculate |⟨r|ψ_j⟩|^2
+                Complex r_psi_j;
+                cblas_zdotc_sub(N, r_vec.data(), 1, eigenvectors[j].data(), 1, &r_psi_j);
+                double weight = std::exp(-b * eigenvalues[j]) * std::norm(r_psi_j);
+                
+                // Apply A to |ψ_j⟩
+                ComplexVector A_psi(N);
+                A(eigenvectors[j].data(), A_psi.data(), N);
+                
+                // Calculate ⟨ψ_j|A|ψ_j⟩
+                Complex matrix_element;
+                cblas_zdotc_sub(N, eigenvectors[j].data(), 1, A_psi.data(), 1, &matrix_element);
+                
+                // Add contribution
+                local_numerator += weight * matrix_element;
+                local_denominator += weight;
+            }
+        }
+        
+        // Reduce results across all processes
+        double local_real = local_numerator.real();
+        double local_imag = local_numerator.imag();
+        double global_real, global_imag, global_denominator;
+        
+        MPI_Allreduce(&local_real, &global_real, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_imag, &global_imag, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&local_denominator, &global_denominator, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        
+        Complex m_result = Complex(global_real, global_imag) / global_denominator;
+        
         double rel_diff = std::abs(m_result - results.back().result) / 
                           (std::abs(results.back().result) > 1e-10 ? std::abs(results.back().result) : 1.0);
         
         results.push_back({r_current, m_current, m_result, rel_diff});
         
-        std::cout << "FTLM m-refinement: r=" << r_current << ", m=" << m_current 
-                  << ", result=" << m_result << " (rel. change: " << rel_diff << ")" << std::endl;
+        if (mpi_rank == 0) {
+            std::cout << "FTLM m-refinement: r=" << r_current << ", m=" << m_current 
+                      << ", result=" << m_result << " (rel. change: " << rel_diff << ")" << std::endl;
+        }
         
         if (rel_diff < conv_tol/2) {
             break; // Converged on m parameter
         }
     }
     
-    // Check if we've converged
-    if (results.back().rel_change < conv_tol) {
-        std::cout << "FTLM adaptive converged with r=" << results.back().r_val 
-                  << ", m=" << results.back().m_val << std::endl;
-    } else {
-        std::cout << "FTLM adaptive did not fully converge. Using best result with r=" 
-                  << results.back().r_val << ", m=" << results.back().m_val << std::endl;
+    // Check if we've converged (only rank 0 prints)
+    if (mpi_rank == 0) {
+        if (results.back().rel_change < conv_tol) {
+            std::cout << "FTLM adaptive converged with r=" << results.back().r_val 
+                      << ", m=" << results.back().m_val << std::endl;
+        } else {
+            std::cout << "FTLM adaptive did not fully converge. Using best result with r=" 
+                      << results.back().r_val << ", m=" << results.back().m_val << std::endl;
+        }
+    }
+    
+    // Don't finalize MPI if we didn't initialize it
+    if (!initialized) {
+        // MPI_Finalize(); // Don't finalize here as other functions might need MPI
     }
     
     return results.back().result;
