@@ -19,34 +19,6 @@ using Matrix = std::vector<std::vector<Complex>>;
  * through bit flip operations and scalar multiplications
  */
 class Operator {
-private:
-    std::vector<TransformFunction> transforms_;
-    int n_bits_; // Number of bits in the basis representation
-    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
-    mutable bool matrixBuilt_ = false;
-
-    // Build the sparse matrix from transforms if needed
-    void buildSparseMatrix() const {
-        if (matrixBuilt_) return;
-        
-        int dim = 1 << n_bits_;
-        sparseMatrix_.resize(dim, dim);
-        
-        // Use triplets to efficiently build the sparse matrix
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        
-        for (int i = 0; i < dim; ++i) {
-            for (const auto& transform : transforms_) {
-                auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {
-                    triplets.emplace_back(j, i, scalar);
-                }
-            }
-        }
-        
-        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
-        matrixBuilt_ = true;
-    }
 public:
     // Function type for transforming basis states
     using TransformFunction = std::function<std::pair<int, Complex>(int)>;
@@ -241,6 +213,34 @@ public:
             lineCount++;
         }
         std::cout << "File read complete." << std::endl;    
+    }
+private:
+    std::vector<TransformFunction> transforms_;
+    int n_bits_; // Number of bits in the basis representation
+    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
+    mutable bool matrixBuilt_ = false;
+
+    // Build the sparse matrix from transforms if needed
+    void buildSparseMatrix() const {
+        if (matrixBuilt_) return;
+        
+        int dim = 1 << n_bits_;
+        sparseMatrix_.resize(dim, dim);
+        
+        // Use triplets to efficiently build the sparse matrix
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        
+        for (int i = 0; i < dim; ++i) {
+            for (const auto& transform : transforms_) {
+                auto [j, scalar] = transform(i);
+                if (j >= 0 && j < dim) {
+                    triplets.emplace_back(j, i, scalar);
+                }
+            }
+        }
+        
+        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
+        matrixBuilt_ = true;
     }
 };
     // Load operator definition from an InterAll.def file
