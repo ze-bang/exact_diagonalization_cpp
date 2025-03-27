@@ -682,7 +682,6 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H,
                                                                           block_vectors.begin() + i), 
                                                   gen, dist);
     }
-
     
     // Initialize Lanczos vectors and coefficients for block Lanczos
     std::vector<ComplexVector> basis_vectors;
@@ -711,6 +710,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         std::vector<std::vector<Complex>> curr_alpha(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
         
         // Apply H to each vector in the current block
+        #pragma omp parallel for schedule(dynamic) proc_bind(close)
         for (int b = 0; b < block_size; b++) {
             H(curr_block[b].data(), work_block[b].data(), N);
         }
