@@ -14,7 +14,9 @@
 #include <ezarpack/version.hpp>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
-
+#include <stack>
+#include <fstream>
+#include <set>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -587,8 +589,6 @@ ChebysehvFilterParams estimate_filter_parameters(
     
     // 5. Recommend Lanczos iterations - typically 2-3× the number of desired eigenvalues
     int lanczos_iter = std::min(N, std::max(2 * num_eigenvalues, 30));
-    std::cout << "Estimated spectral bounds: [" << a << ", " << b << "]" << std::endl;
-    std::cout << "Estimated filter degree: " << filter_degree << std::endl;
     return {a, b, filter_degree, lanczos_iter};
 }
 
@@ -1469,156 +1469,50 @@ void shift_invert_lanczos(
         }
     }
     
+    // Sort eigenvalues by distance from shift
+    std::vector<int> indices(n_eigenvalues);
+    for (int i = 0; i < n_eigenvalues; i++) {
+        indices[i] = i;
+    }
+    
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+        return std::abs(eigenvalues[a] - shift) < std::abs(eigenvalues[b] - shift);
+    });
+    
+    // Reorder eigenvalues
+    std::vector<double> sorted_evals(n_eigenvalues);
+    for (int i = 0; i < n_eigenvalues; i++) {
+        sorted_evals[i] = eigenvalues[indices[i]];
+    }
+    eigenvalues = sorted_evals;
+    
+    // If eigenvectors requested, transform back to original basis
+    if (eigenvectors) {
+        eigenvectors->resize(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        for (int i = 0; i < n_eigenvalues; i++) {
+            int idx = indices[i];
+            
+            // Combine Lanczos basis vectors to get eigenvector in original basis
+            for (int j = 0; j < m; j++) {
+                Complex coef(evecs[idx*m + j], 0.0);
+                cblas_zaxpy(N, &coef, basis_vectors[j].data(), 1, (*eigenvectors)[i].data(), 1);
+            }
+            
+            // Normalize the eigenvector
+            double evec_norm = cblas_dznrm2(N, (*eigenvectors)[i].data(), 1);
+            Complex scale = Complex(1.0/evec_norm, 0.0);
+            cblas_zscal(N, &scale, (*eigenvectors)[i].data(), 1);
+        }
+        
+        // Optionally refine eigenvectors
+        for (int i = 0; i < n_eigenvalues; i++) {
+            refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
+        }
+    }
 }
 
 
-// Find the full spectrum of a Hamiltonian by dividing the spectrum into sections
-// and applying shift-invert Lanczos to each section
-std::pair<std::vector<double>, std::vector<ComplexVector>> full_spectrum_lanczos(
-    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                        // Dimension of Hilbert space
-    int eigenvalues_per_shift,    // Number of eigenvalues to compute per shift
-    int num_shifts = -1,          // Number of shifts to use (auto-determined if -1)
-    double overlap = 0.2,         // Overlap between adjacent sections as fraction
-    bool compute_eigenvectors = false,  // Whether to compute eigenvectors
-    double tol = 1e-10            // Tolerance for convergence
-) {
-    // First estimate spectral bounds using a quick standard Lanczos
-    std::vector<double> sample_eigenvalues;
-    int sample_iter = std::min(100, N/2);
-    lanczos(H, N, sample_iter, sample_iter, tol, sample_eigenvalues);
-    
-    // Sort eigenvalues to find min and max
-    std::sort(sample_eigenvalues.begin(), sample_eigenvalues.end());
-    double min_eig = sample_eigenvalues.front();
-    double max_eig = sample_eigenvalues.back();
-    
-    // Add some margin to the spectral bounds
-    double margin = 0.1 * (max_eig - min_eig);
-    double spectrum_min = min_eig - margin;
-    double spectrum_max = max_eig + margin;
-    
-    std::cout << "Estimated spectrum bounds: [" << spectrum_min << ", " << spectrum_max << "]" << std::endl;
-    
-    // Determine number of shifts if not specified
-    if (num_shifts <= 0) {
-        // Rough estimate: aim to cover full spectrum with reasonable overlap
-        double effective_coverage = eigenvalues_per_shift * (1.0 - overlap);
-        num_shifts = std::max(1, static_cast<int>(std::ceil(N / effective_coverage)));
-        num_shifts = std::min(num_shifts, 20); // Cap to a reasonable number
-    }
-    
-    std::cout << "Using " << num_shifts << " shifts to compute " 
-              << eigenvalues_per_shift << " eigenvalues per shift" << std::endl;
-    
-    // Calculate shift positions across the spectrum
-    std::vector<double> shifts(num_shifts);
-    double shift_step = (spectrum_max - spectrum_min) / (num_shifts > 1 ? num_shifts - 1 : 1);
-    
-    for (int i = 0; i < num_shifts; i++) {
-        shifts[i] = spectrum_min + i * shift_step;
-    }
-    
-    // Apply shift-invert Lanczos to each region
-    std::vector<std::pair<double, int>> all_eigenvalues; // (eigenvalue, source_shift_index)
-    std::vector<std::vector<ComplexVector>> all_eigenvectors;
-    
-    if (compute_eigenvectors) {
-        all_eigenvectors.resize(num_shifts);
-    }
-    
-    for (int i = 0; i < num_shifts; i++) {
-        std::cout << "Computing eigenvalues around shift " << i+1 << "/" << num_shifts 
-                  << " (σ = " << shifts[i] << ")" << std::endl;
-        
-        std::vector<double> local_eigenvalues;
-        std::vector<ComplexVector>* local_eigenvectors = compute_eigenvectors ? &all_eigenvectors[i] : nullptr;
-        
-        // Apply shift-invert Lanczos to this region
-        shift_invert_lanczos(H, N, 2*eigenvalues_per_shift, shifts[i], eigenvalues_per_shift, 
-                            tol, local_eigenvalues, local_eigenvectors);
-        
-        // Store results with shift index for later deduplication
-        for (double eval : local_eigenvalues) {
-            all_eigenvalues.push_back(std::make_pair(eval, i));
-        }
-    }
-    
-    // Sort all eigenvalues
-    std::sort(all_eigenvalues.begin(), all_eigenvalues.end(), 
-             [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
-                 return a.first < b.first;
-             });
-    
-    // Remove duplicates (eigenvalues that are too close to each other)
-    std::vector<std::pair<double, int>> unique_eigenvalues;
-    double dup_tol = tol * 100; // Tolerance for duplicate detection
-    
-    if (!all_eigenvalues.empty()) {
-        unique_eigenvalues.push_back(all_eigenvalues[0]);
-        
-        for (size_t i = 1; i < all_eigenvalues.size(); i++) {
-            if (std::abs(all_eigenvalues[i].first - unique_eigenvalues.back().first) > dup_tol) {
-                unique_eigenvalues.push_back(all_eigenvalues[i]);
-            }
-        }
-    }
-    
-    std::cout << "Found " << unique_eigenvalues.size() << " unique eigenvalues after removing duplicates" << std::endl;
-    
-    // Prepare final results
-    std::vector<double> final_eigenvalues(unique_eigenvalues.size());
-    std::vector<ComplexVector> final_eigenvectors;
-    
-    for (size_t i = 0; i < unique_eigenvalues.size(); i++) {
-        final_eigenvalues[i] = unique_eigenvalues[i].first;
-    }
-    
-    // If eigenvectors are requested, collect them in the correct order
-    if (compute_eigenvectors) {
-        final_eigenvectors.resize(unique_eigenvalues.size());
-        
-        for (size_t i = 0; i < unique_eigenvalues.size(); i++) {
-            int shift_idx = unique_eigenvalues[i].second;
-            double eigenval = unique_eigenvalues[i].first;
-            
-            // Find the matching eigenvalue in the original shift results
-            int j = 0;
-            std::vector<double> local_eigenvalues;
-            shift_invert_lanczos(H, N, 2*eigenvalues_per_shift, shifts[shift_idx], eigenvalues_per_shift, 
-                                tol, local_eigenvalues);
-                                
-            for (j = 0; j < local_eigenvalues.size(); j++) {
-                if (std::abs(local_eigenvalues[j] - eigenval) < dup_tol) {
-                    break;
-                }
-            }
-            
-            if (j < all_eigenvectors[shift_idx].size()) {
-                final_eigenvectors[i] = all_eigenvectors[shift_idx][j];
-            } else {
-                // If we can't find matching eigenvector, compute it using refinement
-                ComplexVector evec(N, Complex(0.0, 0.0));
-                // Initialize with random values
-                std::mt19937 gen(std::random_device{}());
-                std::uniform_real_distribution<double> dist(-1.0, 1.0);
-                for (int k = 0; k < N; k++) {
-                    evec[k] = Complex(dist(gen), dist(gen));
-                }
-                // Normalize
-                double norm = cblas_dznrm2(N, evec.data(), 1);
-                Complex scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, evec.data(), 1);
-                
-                // Refine the eigenvector
-                refine_eigenvector_with_cg(H, evec, eigenval, N, tol);
-                final_eigenvectors[i] = evec;
-            }
-        }
-    }
-    
-    return std::make_pair(final_eigenvalues, final_eigenvectors);
-}
 
 // Calculate thermodynamic quantities directly from eigenvalues
 struct ThermodynamicData {
@@ -1651,7 +1545,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     for (int i = 0; i < num_points; i++) {
         results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
     }
-    
+    double k_B = 0.08620689655;
     // For each temperature point
     for (int i = 0; i < num_points; i++) {
         double T = results.temperatures[i];
@@ -1681,7 +1575,7 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
         double free_energy = -T * std::log(Z);
         
         // Calculate specific heat C_v = β² * (<E²> - <E>²)
-        double specific_heat = beta * beta * (avg_energy_squared - avg_energy * avg_energy);
+        double specific_heat = k_B * beta * beta * (avg_energy_squared - avg_energy * avg_energy);
         
         // Calculate entropy S = (E - F) / T
         double entropy = (avg_energy - free_energy) / T;
@@ -2552,6 +2446,82 @@ struct ThermodynamicResults {
     std::vector<double> free_energy;  // Free energy F
 };
 
+// Calculate thermodynamic quantities using Low-Temperature Lanczos Method (LTLM)
+ThermodynamicResults calculate_thermodynamics_LTLM(
+    std::function<void(const Complex*, Complex*, int)> H, 
+    int N,                    // Dimension of Hilbert space
+    double T_min = 0.01,     // Minimum temperature
+    double T_max = 10.0,     // Maximum temperature
+    int num_points = 100,    // Number of temperature points
+    int R = 20,              // Number of random samples
+    int M = 100,             // Lanczos iterations per sample
+    double tol = 1e-10       // Tolerance for Lanczos algorithm
+) {
+    // Initialize results structure
+    ThermodynamicResults results;
+    results.temperatures.resize(num_points);
+    results.energy.resize(num_points);
+    results.specific_heat.resize(num_points);
+    results.entropy.resize(num_points);
+    results.free_energy.resize(num_points);
+    
+    // Generate logarithmically spaced temperature points
+    const double log_T_min = std::log(T_min);
+    const double log_T_max = std::log(T_max);
+    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
+    
+    for (int i = 0; i < num_points; i++) {
+        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
+    }
+    
+    // Define identity operator for calculating partition function
+    auto identity_op = [](const Complex* v, Complex* result, int size) {
+        std::copy(v, v + size, result);
+    };
+    
+    // For each temperature point
+    for (int i = 0; i < num_points; i++) {
+        double T = results.temperatures[i];
+        double beta = 1.0 / T;
+        
+        std::cout << "Processing T = " << T << " (point " << (i+1) << "/" << num_points << ")" << std::endl;
+        
+        // Calculate <H> using LTLM
+        Complex avg_energy = LTLM(H, H, N, beta, R, M, tol);
+        results.energy[i] = avg_energy.real();
+        
+        // Calculate <H²> for specific heat
+        auto H_squared = [&H, N](const Complex* v, Complex* result, int size) {
+            // Apply H twice
+            std::vector<Complex> temp(size);
+            H(v, temp.data(), size);
+            H(temp.data(), result, size);
+        };
+        
+        Complex avg_energy_squared = LTLM(H, H_squared, N, beta, R, M, tol);
+        
+        // Calculate specific heat: C_v = β²(<H²> - <H>²)
+        double var_energy = avg_energy_squared.real() - avg_energy.real() * avg_energy.real();
+        results.specific_heat[i] = beta * beta * var_energy;
+        
+        // Calculate partition function Z = Tr[e^(-βH)]
+        Complex Z_complex = LTLM(H, identity_op, N, beta, R, M, tol) * Complex(N, 0.0);
+        double Z = Z_complex.real();
+        
+        // Calculate free energy F = -T * ln(Z)
+        results.free_energy[i] = -T * std::log(Z);
+        
+        // Calculate entropy S = (E - F) / T
+        results.entropy[i] = (results.energy[i] - results.free_energy[i]) / T;
+        
+        std::cout << "  E = " << results.energy[i] 
+                  << ", C_v = " << results.specific_heat[i]
+                  << ", S = " << results.entropy[i] << std::endl;
+    }
+    
+    return results;
+}
+
 ThermodynamicResults calculate_thermodynamics(
     std::function<void(const Complex*, Complex*, int)> H, 
     int N,                    // Dimension of Hilbert space
@@ -3049,97 +3019,314 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
     return result;
 }
 
-
-int main(){
-    int num_site = 16;
+#include <chrono>
+int main() {
+    // Load the operator from ED_test directory
+    int num_site = 15;  // Assuming 8 sites based on previous code
     Operator op(num_site);
     op.loadFromFile("./ED_test/Trans.def");
     op.loadFromInterAllFile("./ED_test/InterAll.def");
+    
+    // Create Hamiltonian function
+    auto H = [&op](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result = op.apply(vec);
+        std::copy(result.begin(), result.end(), Hv);
+    };
+    
+    // Hilbert space dimension
+    int N = 1 << num_site;  // 2^num_site
+    
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+    // Calculate full spectrum using full diagonalization
+    std::cout << "Starting full diagonalization..." << std::endl;
     std::vector<double> eigenvalues;
-    // std::vector<ComplexVector> eigenvectors;
-    lanczos([&](const Complex* v, Complex* Hv, int N) {
-        std::vector<Complex> vec(v, v + N);
-        std::vector<Complex> result(N, Complex(0.0, 0.0));
-        result = op.apply(vec);
-        std::copy(result.begin(), result.end(), Hv);
-    }, (1<<num_site), 1000, 20, 1e-10, eigenvalues);
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
+    full_diagonalization(H, N, eigenvalues);
 
-    std::vector<double> eigenvalues_lanczos;
-    shift_invert_lanczos([&](const Complex* v, Complex* Hv, int N) {
-        std::vector<Complex> vec(v, v + N);
-        std::vector<Complex> result(N, Complex(0.0, 0.0));
-        result = op.apply(vec);
-        std::copy(result.begin(), result.end(), Hv);
-    }, (1<<num_site), 1000, 20, 1.8, 1e-10, eigenvalues_lanczos);
 
-    // Print the results
-    std::cout << "Eigenvalues:" << std::endl;
-    for (size_t i = 0; i < 20; i++) {
-        std::cout << "Eigenvalue " << i << " Chebyshev Filtered Lanczos: " << eigenvalues[i] << " Lanczos: " << eigenvalues_lanczos[i] << std::endl;
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+    
+    // Save eigenvalues to file
+    std::ofstream eigenvalue_file("ED_test_full_spectrum.dat");
+    if (eigenvalue_file.is_open()) {
+        for (const auto& eigenvalue : eigenvalues) {
+            eigenvalue_file << eigenvalue << std::endl;
+        }
+        eigenvalue_file.close();
+        std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
     }
-    // Run full diagonalization for comparison
-    // std::vector<double> full_eigenvalues;
-    // full_diagonalization([&](const Complex* v, Complex* Hv, int N) {
-    //     std::vector<Complex> vec(v, v + N);
-    //     std::vector<Complex> result(N, Complex(0.0, 0.0));
-    //     result = op.apply(vec);
-    //     std::copy(result.begin(), result.end(), Hv);
-    // }, 1<<num_site, full_eigenvalues);
-
-    // // Sort both sets of eigenvalues for comparison
-    // std::sort(eigenvalues.begin(), eigenvalues.end());
-    // std::sort(full_eigenvalues.begin(), full_eigenvalues.end());
-
-    // // Compare and print results
-    // std::cout << "\nComparison between Lanczos and Full Diagonalization:" << std::endl;
-    // std::cout << "Index | Lanczos        | Full          | Difference" << std::endl;
-    // std::cout << "------------------------------------------------------" << std::endl;
-
-    // int num_to_compare = std::min(eigenvalues.size(), full_eigenvalues.size());
-    // num_to_compare = std::min(num_to_compare, 20);  // Limit to first 20 eigenvalues
-
-    // for (int i = 0; i < num_to_compare; i++) {
-    //     double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
-    //     std::cout << std::setw(5) << i << " | " 
-    //               << std::setw(14) << std::fixed << std::setprecision(10) << eigenvalues[i] << " | "
-    //               << std::setw(14) << std::fixed << std::setprecision(10) << full_eigenvalues[i] << " | "
-    //               << std::setw(10) << std::scientific << std::setprecision(3) << diff << std::endl;
-    // }
-
-    // // Calculate and print overall accuracy statistics
-    // if (num_to_compare > 0) {
-    //     double max_diff = 0.0;
-    //     double sum_diff = 0.0;
-    //     for (int i = 0; i < num_to_compare; i++) {
-    //         double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
-    //         max_diff = std::max(max_diff, diff);
-    //         sum_diff += diff;
-    //     }
-    //     double avg_diff = sum_diff / num_to_compare;
-        
-    //     std::cout << "\nAccuracy statistics:" << std::endl;
-    //     std::cout << "Maximum difference: " << std::scientific << std::setprecision(3) << max_diff << std::endl;
-    //     std::cout << "Average difference: " << std::scientific << std::setprecision(3) << avg_diff << std::endl;
-        
-    //     // Special focus on ground state and first excited state
-    //     if (full_eigenvalues.size() > 0 && eigenvalues.size() > 0) {
-    //         double ground_diff = std::abs(eigenvalues[0] - full_eigenvalues[0]);
-    //         std::cout << "Ground state error: " << std::scientific << std::setprecision(3) << ground_diff << std::endl;
-            
-    //         if (full_eigenvalues.size() > 1 && eigenvalues.size() > 1) {
-    //             double excited_diff = std::abs(eigenvalues[1] - full_eigenvalues[1]);
-    //             std::cout << "First excited state error: " << std::scientific << std::setprecision(3) << excited_diff << std::endl;
-    //         }
-    //     }
-    // }
-
+    
+    // Calculate thermodynamics from spectrum
+    std::cout << "Calculating thermodynamic properties..." << std::endl;
+    double T_min = 0.001;
+    double T_max = 10.0;
+    int num_points = 2000;
+    
+    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+        eigenvalues, T_min, T_max, num_points
+    );
+    
+    // Save thermodynamic data
+    std::ofstream thermo_file("ED_test_thermodynamics_full.dat");
+    if (thermo_file.is_open()) {
+        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+            thermo_file << std::fixed << std::setprecision(6)
+                      << thermo.temperatures[i] << " "
+                      << thermo.energy[i] << " "
+                      << thermo.specific_heat[i] << " "
+                      << thermo.entropy[i] << " "
+                      << thermo.free_energy[i] << std::endl;
+        }
+        thermo_file.close();
+        std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
+    }
+    
+    // Print some statistics about the spectrum
+    std::sort(eigenvalues.begin(), eigenvalues.end());
+    std::cout << "Spectrum statistics:" << std::endl;
+    std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
+    std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
+    std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
+    
     return 0;
 }
+
+// int main() {
+//     // Load the operator from ED_test directory
+//     int num_site = 8;  // Assuming 8 sites based on previous code
+//     Operator op(num_site);
+//     op.loadFromFile("./ED_test/Trans.def");
+//     op.loadFromInterAllFile("./ED_test/InterAll.def");
+    
+//     // Create Hamiltonian function for thermodynamic calculations
+//     auto H = [&op](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     };
+    
+//     // Hilbert space dimension
+//     int N = 1 << num_site;  // 2^num_site
+    
+//     std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+//     // High temperature range using FTLM (T >= 0.1)
+//     double T_max_high = 10.0;
+//     double T_min_high = 0.1;
+//     int num_points_high = 50;
+    
+//     std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
+//     auto start_high = std::chrono::high_resolution_clock::now();
+    
+//     ThermodynamicResults high_temp_results = calculate_thermodynamics(
+//         H, N, T_min_high, T_max_high, num_points_high, 30, 100, 1e-10
+//     );
+    
+//     auto end_high = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed_high = end_high - start_high;
+//     std::cout << "FTLM completed in " << elapsed_high.count() << " seconds" << std::endl;
+    
+//     // Save high temperature results
+//     output_thermodynamic_data(high_temp_results, "ED_test_high_temp_thermo_FTLM.dat");
+    
+//     // Low temperature range using LTLM (T < 0.1)
+//     double T_max_low = 0.1;
+//     double T_min_low = 0.01;
+//     int num_points_low = 30;
+    
+//     std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
+//     auto start_low = std::chrono::high_resolution_clock::now();
+    
+//     ThermodynamicResults low_temp_results = calculate_thermodynamics_LTLM(
+//         H, N, T_min_low, T_max_low, num_points_low, 30, 100, 1e-10
+//     );
+    
+//     auto end_low = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed_low = end_low - start_low;
+//     std::cout << "LTLM completed in " << elapsed_low.count() << " seconds" << std::endl;
+    
+//     // Save low temperature results
+//     output_thermodynamic_data(low_temp_results, "ED_test_low_temp_thermo_LTLM.dat");
+    
+//     // Combine results for plotting
+//     ThermodynamicResults combined_results;
+//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
+//                                         low_temp_results.temperatures.begin(), 
+//                                         low_temp_results.temperatures.end());
+//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
+//                                         high_temp_results.temperatures.begin(), 
+//                                         high_temp_results.temperatures.end());
+                                        
+//     combined_results.energy.insert(combined_results.energy.end(), 
+//                                 low_temp_results.energy.begin(), 
+//                                 low_temp_results.energy.end());
+//     combined_results.energy.insert(combined_results.energy.end(), 
+//                                 high_temp_results.energy.begin(), 
+//                                 high_temp_results.energy.end());
+                                
+//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+//                                         low_temp_results.specific_heat.begin(), 
+//                                         low_temp_results.specific_heat.end());
+//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+//                                         high_temp_results.specific_heat.begin(), 
+//                                         high_temp_results.specific_heat.end());
+                                        
+//     combined_results.entropy.insert(combined_results.entropy.end(), 
+//                                 low_temp_results.entropy.begin(), 
+//                                 low_temp_results.entropy.end());
+//     combined_results.entropy.insert(combined_results.entropy.end(), 
+//                                 high_temp_results.entropy.begin(), 
+//                                 high_temp_results.entropy.end());
+                                
+//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
+//                                     low_temp_results.free_energy.begin(), 
+//                                     low_temp_results.free_energy.end());
+//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
+//                                     high_temp_results.free_energy.begin(), 
+//                                     high_temp_results.free_energy.end());
+    
+//     // Save combined results
+//     output_thermodynamic_data(combined_results, "ED_test_combined_thermo.dat");
+    
+//     std::cout << "Thermodynamic calculations completed successfully!" << std::endl;
+//     std::cout << "Results saved to:" << std::endl;
+//     std::cout << "  ED_test_high_temp_thermo_FTLM.dat" << std::endl;
+//     std::cout << "  ED_test_low_temp_thermo_LTLM.dat" << std::endl;
+//     std::cout << "  ED_test_combined_thermo.dat" << std::endl;
+    
+//     return 0;
+// }
+
+
+
+
+// int main(){
+//     int num_site = 8;
+//     Operator op(num_site);
+//     op.loadFromFile("./ED_test/Trans.def");
+//     op.loadFromInterAllFile("./ED_test/InterAll.def");
+//     std::vector<double> eigenvalues;
+//     // std::vector<ComplexVector> eigenvectors;
+//     lanczos([&](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result(N, Complex(0.0, 0.0));
+//         result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     }, (1<<num_site), 1000, 1000, 1e-10, eigenvalues);
+
+//     // Write all eigenvalues to a file
+
+
+//     std::vector<double> eigenvalues_lanczos;
+//     // shift_invert_lanczos([&](const Complex* v, Complex* Hv, int N) {
+//     //     std::vector<Complex> vec(v, v + N);
+//     //     std::vector<Complex> result(N, Complex(0.0, 0.0));
+//     //     result = op.apply(vec);
+//     //     std::copy(result.begin(), result.end(), Hv);
+//     // }, (1<<num_site), 1000, 0, 20, 1e-10, eigenvalues_lanczos);
+
+//     eigenvalues_lanczos = full_spectrum_lanczos([&](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result(N, Complex(0.0, 0.0));
+//         result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     }, (1<<num_site), 100);
+
+//     std::ofstream eigenvalues_file("lanczos_eigenvalues.txt");
+//     if (eigenvalues_file.is_open()) {
+//         for (const auto& eigenvalue : eigenvalues) {
+//             eigenvalues_file << eigenvalue << std::endl;
+//         }
+//         eigenvalues_file.close();
+//     } else {
+//         std::cerr << "Unable to open file for writing eigenvalues." << std::endl;
+//     }
+//     std::ofstream eigenvalues_lanczos_file("lanczos_eigenvalues_lanczos.txt");
+//     if (eigenvalues_lanczos_file.is_open()) {
+//         for (const auto& eigenvalue : eigenvalues_lanczos) {
+//             eigenvalues_lanczos_file << eigenvalue << std::endl;
+//         }
+//         eigenvalues_lanczos_file.close();
+//     } else {
+//         std::cerr << "Unable to open file for writing eigenvalues." << std::endl;
+//     }
+
+//     // Print the results
+//     std::cout << "Eigenvalues:" << std::endl;
+//     for (size_t i = 0; i < 20; i++) {
+//         std::cout << "Eigenvalue " << i << " Chebyshev Filtered Lanczos: " << eigenvalues[i] << " Lanczos: " << eigenvalues_lanczos[i] << std::endl;
+//     }
+//     // Run full diagonalization for comparison
+//     std::vector<double> full_eigenvalues;
+//     full_diagonalization([&](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result(N, Complex(0.0, 0.0));
+//         result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     }, 1<<num_site, full_eigenvalues);
+
+//     // Sort both sets of eigenvalues for comparison
+//     std::sort(eigenvalues.begin(), eigenvalues.end());
+//     std::sort(full_eigenvalues.begin(), full_eigenvalues.end());
+
+//     // Compare and print results
+//     std::cout << "\nComparison between Lanczos and Full Diagonalization:" << std::endl;
+//     std::cout << "Index | Lanczos        | Full          | Difference" << std::endl;
+//     std::cout << "------------------------------------------------------" << std::endl;
+
+//     int num_to_compare = std::min(eigenvalues.size(), full_eigenvalues.size());
+//     num_to_compare = std::min(num_to_compare, 20);  // Limit to first 20 eigenvalues
+
+//     for (int i = 0; i < num_to_compare; i++) {
+//         double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
+//         std::cout << std::setw(5) << i << " | " 
+//                   << std::setw(14) << std::fixed << std::setprecision(10) << eigenvalues[i] << " | "
+//                   << std::setw(14) << std::fixed << std::setprecision(10) << full_eigenvalues[i] << " | "
+//                   << std::setw(10) << std::scientific << std::setprecision(3) << diff << std::endl;
+//     }
+
+//     // Calculate and print overall accuracy statistics
+//     if (num_to_compare > 0) {
+//         double max_diff = 0.0;
+//         double sum_diff = 0.0;
+//         for (int i = 0; i < num_to_compare; i++) {
+//             double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
+//             max_diff = std::max(max_diff, diff);
+//             sum_diff += diff;
+//         }
+//         double avg_diff = sum_diff / num_to_compare;
+        
+//         std::cout << "\nAccuracy statistics:" << std::endl;
+//         std::cout << "Maximum difference: " << std::scientific << std::setprecision(3) << max_diff << std::endl;
+//         std::cout << "Average difference: " << std::scientific << std::setprecision(3) << avg_diff << std::endl;
+        
+//         // Special focus on ground state and first excited state
+//         if (full_eigenvalues.size() > 0 && eigenvalues.size() > 0) {
+//             double ground_diff = std::abs(eigenvalues[0] - full_eigenvalues[0]);
+//             std::cout << "Ground state error: " << std::scientific << std::setprecision(3) << ground_diff << std::endl;
+            
+//             if (full_eigenvalues.size() > 1 && eigenvalues.size() > 1) {
+//                 double excited_diff = std::abs(eigenvalues[1] - full_eigenvalues[1]);
+//                 std::cout << "First excited state error: " << std::scientific << std::setprecision(3) << excited_diff << std::endl;
+//             }
+//         }
+//     }
+
+//     return 0;
+// }
 
 
 // int main(){
 //     // Matrix size (not too large to keep computation reasonable)
-//     const int N = 500; 
+//     const int N = 1000; 
 
 //     // Generate a random Hermitian matrix
 //     std::vector<std::vector<Complex>> randomMatrix(N, std::vector<Complex>(N));
@@ -3168,15 +3355,48 @@ int main(){
 //     // Test all three methods
 //     std::cout << "Testing with " << N << "x" << N << " random Hermitian matrix\n";
 
-    // // Regular Lanczos
-    // std::vector<double> lanczosEigenvalues;
-    // std::vector<ComplexVector> lanczosEigenvectors;
-    // block_lanczos(matVecMult, N, N/2, 1e-10, lanczosEigenvalues, &lanczosEigenvectors);
+//     // Regular Lanczos
+//     std::vector<double> lanczosEigenvalues;
+//     std::vector<ComplexVector> lanczosEigenvectors;
+//     chebyshev_filtered_lanczos(matVecMult, N, N, N, 1e-10, lanczosEigenvalues);
 
 //     // Lanczos with CG refinement
 //     std::vector<double> lanczosCGEigenvalues;
 //     std::vector<ComplexVector> lanczosCGEigenvectors;
-//     chebyshev_filtered_lanczos(matVecMult, N, N/2, 1e-10, lanczosCGEigenvalues, &lanczosCGEigenvectors);
+//     // chebyshev_filtered_lanczos(matVecMult, N, N/2, 1e-10, lanczosCGEigenvalues, &lanczosCGEigenvectors);
+
+//     lanczosCGEigenvalues = full_spectrum_lanczos(matVecMult, N, 100, N/2);
+
+//     // Write eigenvalues to file for comparison
+//     std::ofstream outfile("eigenvalues_comparison.txt");
+//     if (outfile.is_open()) {
+//         outfile << "# Index   Lanczos         LanczosCG\n";
+//         int max_vals = std::min(lanczosEigenvalues.size(), lanczosCGEigenvalues.size());
+        
+//         for (int i = 0; i < max_vals; i++) {
+//             outfile << std::setw(5) << i << "  " 
+//                     << std::setprecision(12) << std::fixed << lanczosEigenvalues[i] << "  "
+//                     << std::setprecision(12) << std::fixed << lanczosCGEigenvalues[i] << "\n";
+//         }
+//         outfile.close();
+//         std::cout << "Eigenvalues written to eigenvalues_comparison.txt\n";
+//     }
+
+//     // Compute statistics on eigenvalue differences
+//     double max_diff = 0.0;
+//     double sum_diff = 0.0;
+//     int min_size = std::min(lanczosEigenvalues.size(), lanczosCGEigenvalues.size());
+
+//     for (int i = 0; i < min_size; i++) {
+//         double diff = std::abs(lanczosEigenvalues[i] - lanczosCGEigenvalues[i]);
+//         max_diff = std::max(max_diff, diff);
+//         sum_diff += diff;
+//     }
+
+//     double avg_diff = sum_diff / min_size;
+//     std::cout << "Eigenvalue difference statistics:\n";
+//     std::cout << "  Maximum difference: " << std::scientific << max_diff << "\n";
+//     std::cout << "  Average difference: " << std::scientific << avg_diff << "\n";
 
 //     // Direct diagonalization
 //     std::vector<Complex> flatMatrix(N * N);
