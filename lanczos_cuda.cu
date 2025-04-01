@@ -472,74 +472,161 @@ void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, i
 
 
 int main(){
-    // Matrix size (not too large to keep computation reasonable)
-    const int N = 500; 
+    int num_site = 16;
+    Operator op(num_site);
+    op.loadFromFile("./ED_test/Trans.def");
+    op.loadFromInterAllFile("./ED_test/InterAll.def");
+    std::vector<double> eigenvalues;
+    // std::vector<ComplexVector> eigenvectors;
+    lanczos_cuda([&](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result(N, Complex(0.0, 0.0));
+        result = op.apply(vec);
+        std::copy(result.begin(), result.end(), Hv);
+    }, (1<<num_site), 1000, 1e-10, eigenvalues);
 
-    // Generate a random Hermitian matrix
-    std::vector<std::vector<Complex>> randomMatrix(N, std::vector<Complex>(N));
-    std::mt19937 gen(42); // Fixed seed for reproducibility
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<double> eigenvalues_lanczos;
+    lanczos_cuda([&](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result(N, Complex(0.0, 0.0));
+        result = op.apply(vec);
+        std::copy(result.begin(), result.end(), Hv);
+    }, (1<<num_site), 1000, 1e-10, eigenvalues_lanczos);
 
-    // Fill with random values and make it Hermitian
-    for (int i = 0; i < N; i++) {
-        randomMatrix[i][i] = Complex(dist(gen), 0.0); // Real diagonal
-        for (int j = i+1; j < N; j++) {
-            randomMatrix[i][j] = Complex(dist(gen), dist(gen));
-            randomMatrix[j][i] = std::conj(randomMatrix[i][j]);
-        }
-    }
+    // Print the results
+    // std::cout << "Eigenvalues:" << std::endl;
+    // for (size_t i = 0; i < 20; i++) {
+    //     std::cout << "Eigenvalue " << i << " Chebyshev Filtered Lanczos: " << eigenvalues[i] << " Lanczos: " << eigenvalues_lanczos[i] << std::endl;
+    // }
+    // Run full diagonalization for comparison
+    // std::vector<double> full_eigenvalues;
+    // full_diagonalization([&](const Complex* v, Complex* Hv, int N) {
+    //     std::vector<Complex> vec(v, v + N);
+    //     std::vector<Complex> result(N, Complex(0.0, 0.0));
+    //     result = op.apply(vec);
+    //     std::copy(result.begin(), result.end(), Hv);
+    // }, 1<<num_site, full_eigenvalues);
 
-    // Define matrix-vector multiplication function
-    auto matVecMult = [&](const Complex* v, Complex* result, int size) {
-        std::fill(result, result + size, Complex(0.0, 0.0));
-        for (int i = 0; i < size; i++) {
-            for (int j = 0; j < size; j++) {
-                result[i] += randomMatrix[i][j] * v[j];
-            }
-        }
-    };
+    // // Sort both sets of eigenvalues for comparison
+    // std::sort(eigenvalues.begin(), eigenvalues.end());
+    // std::sort(full_eigenvalues.begin(), full_eigenvalues.end());
 
-    // Test all three methods
-    std::cout << "Testing with " << N << "x" << N << " random Hermitian matrix\n";
+    // // Compare and print results
+    // std::cout << "\nComparison between Lanczos and Full Diagonalization:" << std::endl;
+    // std::cout << "Index | Lanczos        | Full          | Difference" << std::endl;
+    // std::cout << "------------------------------------------------------" << std::endl;
 
-    // Regular Lanczos
-    std::vector<double> lanczosEigenvalues;
-    std::vector<ComplexVector> lanczosEigenvectors;
-    lanczos_cuda(matVecMult, N, N/2, 1e-10, lanczosEigenvalues, &lanczosEigenvectors);
+    // int num_to_compare = std::min(eigenvalues.size(), full_eigenvalues.size());
+    // num_to_compare = std::min(num_to_compare, 20);  // Limit to first 20 eigenvalues
 
-    // Lanczos with CG refinement
-    std::vector<double> lanczosCGEigenvalues;
-    std::vector<ComplexVector> lanczosCGEigenvectors;
-    lanczos_cuda(matVecMult, N, N/2, 1e-10, lanczosCGEigenvalues, &lanczosCGEigenvectors);
+    // for (int i = 0; i < num_to_compare; i++) {
+    //     double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
+    //     std::cout << std::setw(5) << i << " | " 
+    //               << std::setw(14) << std::fixed << std::setprecision(10) << eigenvalues[i] << " | "
+    //               << std::setw(14) << std::fixed << std::setprecision(10) << full_eigenvalues[i] << " | "
+    //               << std::setw(10) << std::scientific << std::setprecision(3) << diff << std::endl;
+    // }
 
-    // Direct diagonalization
-    std::vector<Complex> flatMatrix(N * N);
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < N; j++) {
-            flatMatrix[j*N + i] = randomMatrix[i][j];
-        }
-    }
+    // // Calculate and print overall accuracy statistics
+    // if (num_to_compare > 0) {
+    //     double max_diff = 0.0;
+    //     double sum_diff = 0.0;
+    //     for (int i = 0; i < num_to_compare; i++) {
+    //         double diff = std::abs(eigenvalues[i] - full_eigenvalues[i]);
+    //         max_diff = std::max(max_diff, diff);
+    //         sum_diff += diff;
+    //     }
+    //     double avg_diff = sum_diff / num_to_compare;
+        
+    //     std::cout << "\nAccuracy statistics:" << std::endl;
+    //     std::cout << "Maximum difference: " << std::scientific << std::setprecision(3) << max_diff << std::endl;
+    //     std::cout << "Average difference: " << std::scientific << std::setprecision(3) << avg_diff << std::endl;
+        
+    //     // Special focus on ground state and first excited state
+    //     if (full_eigenvalues.size() > 0 && eigenvalues.size() > 0) {
+    //         double ground_diff = std::abs(eigenvalues[0] - full_eigenvalues[0]);
+    //         std::cout << "Ground state error: " << std::scientific << std::setprecision(3) << ground_diff << std::endl;
+            
+    //         if (full_eigenvalues.size() > 1 && eigenvalues.size() > 1) {
+    //             double excited_diff = std::abs(eigenvalues[1] - full_eigenvalues[1]);
+    //             std::cout << "First excited state error: " << std::scientific << std::setprecision(3) << excited_diff << std::endl;
+    //         }
+    //     }
+    // }
 
-    std::vector<double> directEigenvalues(N);
-    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N, 
-                          reinterpret_cast<lapack_complex_double*>(flatMatrix.data()), 
-                          N, directEigenvalues.data());
-
-    if (info == 0) {
-        // Compare results
-        std::cout << "\nEigenvalue comparison:\n";
-        std::cout << "Index | Direct  | Lanczos | Diff    | Lanczos+CG | Diff\n";
-        std::cout << "--------------------------------------------------------\n";
-        int numToShow = std::min(10, N/2);
-        for (int i = 0; i < numToShow; i++) {
-            std::cout << std::setw(5) << i << " | "
-                    << std::fixed << std::setprecision(6)
-                    << std::setw(8) << directEigenvalues[i] << " | "
-                    << std::setw(7) << lanczosEigenvalues[i] << " | "
-                    << std::setw(7) << std::abs(directEigenvalues[i] - lanczosEigenvalues[i]) << " | "
-                    << std::setw(10) << lanczosCGEigenvalues[i] << " | "
-                    << std::setw(7) << std::abs(directEigenvalues[i] - lanczosCGEigenvalues[i]) << "\n";
-        }
-    }
-
+    return 0;
 }
+
+
+// int main(){
+//     // Matrix size (not too large to keep computation reasonable)
+//     const int N = 500; 
+
+//     // Generate a random Hermitian matrix
+//     std::vector<std::vector<Complex>> randomMatrix(N, std::vector<Complex>(N));
+//     std::mt19937 gen(42); // Fixed seed for reproducibility
+//     std::uniform_real_distribution<double> dist(-1.0, 1.0);
+
+//     // Fill with random values and make it Hermitian
+//     for (int i = 0; i < N; i++) {
+//         randomMatrix[i][i] = Complex(dist(gen), 0.0); // Real diagonal
+//         for (int j = i+1; j < N; j++) {
+//             randomMatrix[i][j] = Complex(dist(gen), dist(gen));
+//             randomMatrix[j][i] = std::conj(randomMatrix[i][j]);
+//         }
+//     }
+
+//     // Define matrix-vector multiplication function
+//     auto matVecMult = [&](const Complex* v, Complex* result, int size) {
+//         std::fill(result, result + size, Complex(0.0, 0.0));
+//         for (int i = 0; i < size; i++) {
+//             for (int j = 0; j < size; j++) {
+//                 result[i] += randomMatrix[i][j] * v[j];
+//             }
+//         }
+//     };
+
+//     // Test all three methods
+//     std::cout << "Testing with " << N << "x" << N << " random Hermitian matrix\n";
+
+//     // Regular Lanczos
+//     std::vector<double> lanczosEigenvalues;
+//     std::vector<ComplexVector> lanczosEigenvectors;
+//     lanczos_cuda(matVecMult, N, N/2, 1e-10, lanczosEigenvalues, &lanczosEigenvectors);
+
+//     // Lanczos with CG refinement
+//     std::vector<double> lanczosCGEigenvalues;
+//     std::vector<ComplexVector> lanczosCGEigenvectors;
+//     lanczos_cuda(matVecMult, N, N/2, 1e-10, lanczosCGEigenvalues, &lanczosCGEigenvectors);
+
+//     // Direct diagonalization
+//     std::vector<Complex> flatMatrix(N * N);
+//     for (int i = 0; i < N; i++) {
+//         for (int j = 0; j < N; j++) {
+//             flatMatrix[j*N + i] = randomMatrix[i][j];
+//         }
+//     }
+
+//     std::vector<double> directEigenvalues(N);
+//     int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N, 
+//                           reinterpret_cast<lapack_complex_double*>(flatMatrix.data()), 
+//                           N, directEigenvalues.data());
+
+//     if (info == 0) {
+//         // Compare results
+//         std::cout << "\nEigenvalue comparison:\n";
+//         std::cout << "Index | Direct  | Lanczos | Diff    | Lanczos+CG | Diff\n";
+//         std::cout << "--------------------------------------------------------\n";
+//         int numToShow = std::min(10, N/2);
+//         for (int i = 0; i < numToShow; i++) {
+//             std::cout << std::setw(5) << i << " | "
+//                     << std::fixed << std::setprecision(6)
+//                     << std::setw(8) << directEigenvalues[i] << " | "
+//                     << std::setw(7) << lanczosEigenvalues[i] << " | "
+//                     << std::setw(7) << std::abs(directEigenvalues[i] - lanczosEigenvalues[i]) << " | "
+//                     << std::setw(10) << lanczosCGEigenvalues[i] << " | "
+//                     << std::setw(7) << std::abs(directEigenvalues[i] - lanczosCGEigenvalues[i]) << "\n";
+//         }
+//     }
+
+// }
