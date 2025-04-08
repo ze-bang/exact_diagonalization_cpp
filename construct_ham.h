@@ -415,3 +415,383 @@ private:
     }
 };
 
+/**
+ * Creates a graph showing commutation relations between automorphisms
+ * Vertices are automorphisms, edges indicate that the two automorphisms commute
+ */
+class AutomorphismCommutationGraph {
+public:
+    // Constructor
+    AutomorphismCommutationGraph(const std::vector<std::vector<int>>& automorphisms) 
+        : automorphisms_(automorphisms) {
+        buildGraph();
+    }
+    
+    // Build the graph of commuting automorphisms
+    void buildGraph() {
+        int n = automorphisms_.size();
+        adjacency_matrix_.resize(n, std::vector<bool>(n, false));
+        
+        // Check each pair of automorphisms
+        for (int i = 0; i < n; ++i) {
+            // An automorphism always commutes with itself
+            adjacency_matrix_[i][i] = true;
+            
+            for (int j = i+1; j < n; ++j) {
+                if (commute(automorphisms_[i], automorphisms_[j])) {
+                    adjacency_matrix_[i][j] = true;
+                    adjacency_matrix_[j][i] = true;
+                }
+            }
+        }
+    }
+    
+    // Export to DOT format for visualization with Graphviz
+    void exportToDOT(const std::string& filename) {
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file for writing: " + filename);
+        }
+        
+        file << "graph AutomorphismCommutationGraph {\n";
+        file << "  node [shape=circle style=filled fillcolor=lightgreen];\n";
+        
+        // Add edges
+        for (size_t i = 0; i < automorphisms_.size(); ++i) {
+            for (size_t j = i+1; j < automorphisms_.size(); ++j) {
+                if (adjacency_matrix_[i][j]) {
+                    file << "  \"";
+                    printAutomorphism(file, automorphisms_[i]);
+                    file << "\" -- \"";
+                    printAutomorphism(file, automorphisms_[j]);
+                    file << "\";\n";
+                }
+            }
+        }
+        
+        // Add isolated vertices if any
+        for (size_t i = 0; i < automorphisms_.size(); ++i) {
+            bool hasEdge = false;
+            for (size_t j = 0; j < automorphisms_.size(); ++j) {
+                if (i != j && adjacency_matrix_[i][j]) {
+                    hasEdge = true;
+                    break;
+                }
+            }
+            
+            if (!hasEdge) {
+                file << "  \"";
+                printAutomorphism(file, automorphisms_[i]);
+                file << "\";\n";
+            }
+        }
+        
+        file << "}\n";
+        file.close();
+        
+        std::cout << "Automorphism commutation graph exported to " << filename << std::endl;
+        std::cout << "Visualize with: dot -Tpng " << filename << " -o automorphism_graph.png" << std::endl;
+    }
+    
+    // Print the adjacency matrix
+    void printAdjacencyMatrix() const {
+        std::cout << "Automorphism Commutation Matrix:" << std::endl;
+        for (size_t i = 0; i < adjacency_matrix_.size(); ++i) {
+            for (size_t j = 0; j < adjacency_matrix_.size(); ++j) {
+                std::cout << (adjacency_matrix_[i][j] ? "1 " : "0 ");
+            }
+            std::cout << std::endl;
+        }
+    }
+
+private:
+    std::vector<std::vector<int>> automorphisms_;
+    std::vector<std::vector<bool>> adjacency_matrix_;
+    
+    // Check if two automorphisms commute
+    bool commute(const std::vector<int>& a, const std::vector<int>& b) const {
+        int n = a.size();
+        
+        // Compute a○b
+        std::vector<int> ab(n);
+        for (int i = 0; i < n; ++i) {
+            ab[i] = a[b[i]];
+        }
+        
+        // Compute b○a
+        std::vector<int> ba(n);
+        for (int i = 0; i < n; ++i) {
+            ba[i] = b[a[i]];
+        }
+        
+        // Check if a○b = b○a
+        return ab == ba;
+    }
+    
+    // Helper function to print an automorphism to a stream
+    void printAutomorphism(std::ofstream& file, const std::vector<int>& auto_perm) const {
+        for (size_t k = 0; k < auto_perm.size(); ++k) {
+            file << auto_perm[k];
+            if (k < auto_perm.size() - 1) {
+                file << ",";
+            }
+        }
+    }
+};
+
+/**
+ * Finds the maximum clique in a graph using a recursive backtracking algorithm
+ * A clique is a subset of vertices where every two vertices are connected by an edge
+ */
+class MaximumCliqueFinder {
+public:
+    MaximumCliqueFinder(const std::vector<std::vector<bool>>& adjacency_matrix) 
+        : adjacency_matrix_(adjacency_matrix) {
+        max_clique_size_ = 0;
+    }
+    
+    // Find the maximum clique
+    std::vector<int> findMaximumClique() {
+        int n = adjacency_matrix_.size();
+        std::vector<int> current;
+        std::vector<int> remaining;
+        max_clique_.clear();
+        max_clique_size_ = 0;
+        
+        // Start with all vertices as candidates
+        for (int i = 0; i < n; ++i) {
+            remaining.push_back(i);
+        }
+        
+        findClique(current, remaining);
+        return max_clique_;
+    }
+    
+    // Print the maximum clique for an automorphism graph
+    void printMaximumCliqueForAutomorphisms(const std::vector<std::vector<int>>& automorphisms) {
+        std::vector<int> clique_indices = findMaximumClique();
+        
+        std::cout << "Maximum clique size: " << clique_indices.size() << std::endl;
+        std::cout << "Maximum clique (indices): ";
+        for (int idx : clique_indices) {
+            std::cout << idx << " ";
+        }
+        std::cout << std::endl;
+        
+        std::cout << "Corresponding automorphisms: " << std::endl;
+        for (int idx : clique_indices) {
+            std::cout << "  ";
+            for (int v : automorphisms[idx]) {
+                std::cout << v << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+private:
+    const std::vector<std::vector<bool>>& adjacency_matrix_;
+    std::vector<int> max_clique_;
+    int max_clique_size_;
+    
+    // Recursive function to find maximal cliques
+    void findClique(std::vector<int>& current, std::vector<int>& remaining) {
+        // If no more candidates, we have a maximal clique
+        if (remaining.empty()) {
+            if (current.size() > max_clique_size_) {
+                max_clique_ = current;
+                max_clique_size_ = current.size();
+            }
+            return;
+        }
+        
+        // If even adding all remaining vertices won't beat the current max, stop
+        if (current.size() + remaining.size() <= max_clique_size_) {
+            return;
+        }
+        
+        // Copy remaining for iteration safety
+        std::vector<int> remaining_copy = remaining;
+        
+        for (int v : remaining_copy) {
+            // Create new candidate set of vertices adjacent to v
+            std::vector<int> new_remaining;
+            for (int u : remaining) {
+                if (u != v && adjacency_matrix_[v][u]) {
+                    new_remaining.push_back(u);
+                }
+            }
+            
+            // Add v to current clique and recurse
+            current.push_back(v);
+            findClique(current, new_remaining);
+            current.pop_back();
+            
+            // Remove v from remaining
+            remaining.erase(std::remove(remaining.begin(), remaining.end(), v), remaining.end());
+        }
+    }
+};
+
+/**
+ * Finds the minimal set of automorphism generators that can produce all automorphisms in a clique
+ * through composition
+ */
+class AutomorphismGeneratorFinder {
+public:
+    AutomorphismGeneratorFinder(const std::vector<std::vector<int>>& automorphisms)
+        : automorphisms_(automorphisms) {}
+    
+    // Find the minimal set of generators for the given clique indices
+    std::vector<int> findMinimalGenerators(const std::vector<int>& clique_indices) {
+        std::vector<int> generators;
+        std::vector<std::vector<int>> clique_automorphisms;
+        
+        // Extract the automorphisms in the clique
+        for (int idx : clique_indices) {
+            clique_automorphisms.push_back(automorphisms_[idx]);
+        }
+        
+        std::vector<bool> included(clique_indices.size(), false);
+        std::vector<int> current_generators;
+        
+        findMinimalGeneratorsRecursive(clique_automorphisms, included, current_generators, 0, generators);
+        
+        // Convert back to original indices
+        std::vector<int> result;
+        for (int gen : generators) {
+            result.push_back(clique_indices[gen]);
+        }
+        
+        return result;
+    }
+    
+    // Print the minimal generators for a clique
+    void printMinimalGenerators(const std::vector<int>& clique_indices) {
+        std::vector<int> generator_indices = findMinimalGenerators(clique_indices);
+        
+        std::cout << "Minimal generator set size: " << generator_indices.size() << std::endl;
+        std::cout << "Generator automorphisms: " << std::endl;
+        
+        for (int idx : generator_indices) {
+            std::cout << "  ";
+            for (int v : automorphisms_[idx]) {
+                std::cout << v << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
+private:
+    const std::vector<std::vector<int>>& automorphisms_;
+    
+    // Recursive function to find minimal generators
+    void findMinimalGeneratorsRecursive(
+        const std::vector<std::vector<int>>& clique_autos, 
+        std::vector<bool>& included,
+        std::vector<int>& current_gens,
+        int start_idx,
+        std::vector<int>& best_gens) {
+        
+        // Check if current generator set generates all automorphisms
+        if (canGenerateAll(clique_autos, current_gens)) {
+            // Update best solution if current is better
+            if (best_gens.empty() || current_gens.size() < best_gens.size()) {
+                best_gens = current_gens;
+            }
+            return;
+        }
+        
+        // If we've tried all automorphisms, return
+        if (start_idx >= clique_autos.size()) {
+            return;
+        }
+        
+        // Skip this automorphism
+        findMinimalGeneratorsRecursive(clique_autos, included, current_gens, start_idx + 1, best_gens);
+        
+        // Include this automorphism
+        if (!included[start_idx]) {
+            included[start_idx] = true;
+            current_gens.push_back(start_idx);
+            
+            findMinimalGeneratorsRecursive(clique_autos, included, current_gens, start_idx + 1, best_gens);
+            
+            // Backtrack
+            current_gens.pop_back();
+            included[start_idx] = false;
+        }
+    }
+    
+    // Check if generator set can produce all automorphisms in the clique
+    bool canGenerateAll(const std::vector<std::vector<int>>& clique_autos, const std::vector<int>& gen_indices) {
+        if (gen_indices.empty()) return clique_autos.size() <= 1;
+        
+        // Get the generator automorphisms
+        std::vector<std::vector<int>> generators;
+        for (int idx : gen_indices) {
+            generators.push_back(clique_autos[idx]);
+        }
+        
+        // Generate all possible automorphisms from the generators
+        std::set<std::vector<int>> generated = generateClosure(generators);
+        
+        // Check if all clique automorphisms are in the generated set
+        for (const auto& auto_perm : clique_autos) {
+            if (generated.find(auto_perm) == generated.end()) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    // Generate all automorphisms that can be created from the given generators
+    std::set<std::vector<int>> generateClosure(const std::vector<std::vector<int>>& generators) {
+        std::set<std::vector<int>> result;
+        
+        // Add identity permutation
+        std::vector<int> identity(generators[0].size());
+        for (size_t i = 0; i < identity.size(); ++i) {
+            identity[i] = i;
+        }
+        result.insert(identity);
+        
+        // Add all generators
+        for (const auto& gen : generators) {
+            result.insert(gen);
+        }
+        
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            int start_size = result.size();
+            
+            // Try composing each generator with each element in result
+            std::vector<std::vector<int>> current_elements(result.begin(), result.end());
+            
+            for (const auto& gen : generators) {
+                for (const auto& elem : current_elements) {
+                    // Compose gen ○ elem
+                    std::vector<int> composed = compose(gen, elem);
+                    
+                    // Add the new element if not already present
+                    if (result.find(composed) == result.end()) {
+                        result.insert(composed);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    // Compose two automorphisms: a(b(x))
+    std::vector<int> compose(const std::vector<int>& a, const std::vector<int>& b) {
+        std::vector<int> result(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            result[i] = a[b[i]];
+        }
+        return result;
+    }
+};
+
