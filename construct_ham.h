@@ -243,6 +243,175 @@ private:
         matrixBuilt_ = true;
     }
 };
-    // Load operator definition from an InterAll.def file
+
+
+/**
+ * Creates a graphical representation of interactions between quantum sites
+ * based on the interall.def file
+ */
+class InteractionGraph {
+    // Add accessor method to InteractionGraph to get the adjacency matrix
+public:
+    // Constructor
+    InteractionGraph(int n_sites) : n_sites_(n_sites) {
+        adjacency_matrix_.resize(n_sites, std::vector<bool>(n_sites, false));
+    }
+
+    // Parse the interall.def file to build the interaction graph
+    void buildFromFile(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + filename);
+        }
+        std::cout << "Building interaction graph from: " << filename << std::endl;
+        std::string line;
+        
+        // Skip header
+        std::getline(file, line);
+        
+        // Read number of lines
+        std::getline(file, line);
+        std::istringstream iss(line);
+        int numLines;
+        std::string m;
+        iss >> m >> numLines;
+        
+        // Skip format lines
+        for (int i = 0; i < 3; ++i) {
+            std::getline(file, line);
+        }
+        
+        // Process each interaction
+        int lineCount = 0;
+        while (std::getline(file, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            int Op1, indx1, Op2, indx2;
+            double E, F;
+            
+            if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
+                continue;
+            }
+            
+            // Add edge between the sites
+            if (indx1 >= 0 && indx1 < n_sites_ && indx2 >= 0 && indx2 < n_sites_) {
+                adjacency_matrix_[indx1][indx2] = true;
+                adjacency_matrix_[indx2][indx1] = true;  // Undirected graph
+            }
+            
+            lineCount++;
+        }
+        std::cout << "Interaction graph built successfully." << std::endl;
+    }
+
+    // Export to DOT format for visualization with Graphviz
+    void exportToDOT(const std::string& filename) {
+        std::ofstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file for writing: " + filename);
+        }
+        
+        file << "graph InteractionNetwork {\n";
+        file << "  node [shape=circle style=filled fillcolor=lightblue];\n";
+        
+        // Add edges
+        for (int i = 0; i < n_sites_; ++i) {
+            for (int j = i+1; j < n_sites_; ++j) {
+                if (adjacency_matrix_[i][j]) {
+                    file << "  " << i << " -- " << j << ";\n";
+                }
+            }
+        }
+        
+        file << "}\n";
+        file.close();
+        
+        std::cout << "Graph exported to " << filename << std::endl;
+        std::cout << "Visualize with: dot -Tpng " << filename << " -o graph.png" << std::endl;
+    }
+
+    // Print the adjacency matrix
+    void printAdjacencyMatrix() const {
+        std::cout << "Interaction Adjacency Matrix:" << std::endl;
+        for (int i = 0; i < n_sites_; ++i) {
+            for (int j = 0; j < n_sites_; ++j) {
+                std::cout << (adjacency_matrix_[i][j] ? "1 " : "0 ");
+            }
+            std::cout << std::endl;
+        }
+    }
+
+    const std::vector<std::vector<bool>>& getAdjacencyMatrix() const {
+        return adjacency_matrix_;
+    }
+
+private:
+    int n_sites_;
+    std::vector<std::vector<bool>> adjacency_matrix_;
+};
+
+/**
+ * Finds all automorphisms of the interaction graph
+ * An automorphism is a permutation of vertices that preserves adjacency relationships
+ */
+class GraphAutomorphismFinder {
+public:
+    GraphAutomorphismFinder(const InteractionGraph& graph, int n_sites) 
+        : adjacency_matrix_(graph.getAdjacencyMatrix()), n_sites_(n_sites) {}
     
-// Example of how to use the Operator class
+    // Get all automorphisms (permutations that preserve graph structure)
+    std::vector<std::vector<int>> findAllAutomorphisms() {
+        std::vector<std::vector<int>> automorphisms;
+        std::vector<int> perm(n_sites_);
+        
+        // Initialize the first permutation as identity
+        for (int i = 0; i < n_sites_; i++) {
+            perm[i] = i;
+        }
+        
+        // Generate all permutations and check if they're automorphisms
+        do {
+            if (isAutomorphism(perm)) {
+                automorphisms.push_back(perm);
+            }
+        } while (std::next_permutation(perm.begin(), perm.end()));
+        
+        return automorphisms;
+    }
+    
+    // Print the automorphisms in a readable format
+    void printAutomorphisms(const std::vector<std::vector<int>>& automorphisms) const {
+        std::cout << "Found " << automorphisms.size() << " automorphisms:" << std::endl;
+        for (size_t i = 0; i < automorphisms.size(); ++i) {
+            std::cout << "Automorphism " << (i+1) << ": ";
+            for (int v : automorphisms[i]) {
+                std::cout << v << " ";
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+private:
+    const std::vector<std::vector<bool>>& adjacency_matrix_;
+    int n_sites_;
+    
+    // Check if a permutation is an automorphism
+    bool isAutomorphism(const std::vector<int>& perm) const {
+        // For each pair of vertices (i,j), check if adjacency is preserved
+        for (int i = 0; i < n_sites_; ++i) {
+            for (int j = 0; j < n_sites_; ++j) {
+                // original adjacency between i and j
+                bool orig_adj = adjacency_matrix_[i][j];
+                
+                // adjacency between mapped vertices perm[i] and perm[j]
+                bool mapped_adj = adjacency_matrix_[perm[i]][perm[j]];
+                
+                // If adjacency relation isn't preserved, this isn't an automorphism
+                if (orig_adj != mapped_adj) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+

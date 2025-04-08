@@ -3047,7 +3047,7 @@ int main() {
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
     full_diagonalization(H, N, eigenvalues);
-
+    // lanczos(H, N, 2e4, 2e4, 1e-10, eigenvalues);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
