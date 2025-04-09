@@ -246,6 +246,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 // tol: Tolerance for convergence and detecting invariant subspaces
 // eigenvalues: Output vector to store the eigenvalues
 // eigenvectors: Output matrix to store the eigenvectors (optional)
+#include <chrono>
 void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
              double tol, std::vector<double>& eigenvalues, 
              std::vector<ComplexVector>* eigenvectors = nullptr) {
@@ -264,6 +265,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
             v_current[i] = Complex(real, imag);
         }
     }
+
+    std::cout << "Lanczos: Initial vector generated" << std::endl;
     
     // Normalize the starting vector
     double norm = cblas_dznrm2(N, v_current.data(), 1);
@@ -285,9 +288,27 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     
     max_iter = std::min(N, max_iter);
     
+    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Lanczos: Iterating..." << std::endl;   
+    
+    std::chrono::high_resolution_clock::time_point start, end;
+
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
+        start = std::chrono::high_resolution_clock::now();
         // w = H*v_j
+        if (j > 0){
+            std::cout << "Iteration " << j + 1 << " of " << max_iter;
+            if (j > 0) {
+                auto iteration_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                auto remaining_time = (max_iter - j - 1) * iteration_time;
+                std::cout << " | Estimated time remaining: " 
+                          << remaining_time;
+            }
+            std::cout << std::endl;
+        }
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -379,11 +400,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
+        end = std::chrono::high_resolution_clock::now();
     }
     
     // Construct and solve tridiagonal matrix
     int m = alpha.size();
     
+    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
+
     // Allocate arrays for LAPACKE
     std::vector<double> diag = alpha;    // Copy of diagonal elements
     std::vector<double> offdiag(m-1);    // Off-diagonal elements
@@ -392,6 +416,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
+
+    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
     // Save only the first exct eigenvalues, or all of them if m < exct
     int n_eigenvalues = std::min(exct, m);
@@ -3020,6 +3046,86 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
 }
 
 #include <chrono>
+int main(int argc, char* argv[]) {
+    // Load the operator from ED_test directory
+    int num_site = 16;  // Assuming 8 sites based on previous code
+    Operator op(num_site);
+    std::string dir = argv[1];
+    op.loadFromFile(dir + "/Trans.def");
+    op.loadFromInterAllFile(dir + "/InterAll.def");
+    
+    // Create Hamiltonian function
+    auto H = [&op](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result = op.apply(vec);
+        std::copy(result.begin(), result.end(), Hv);
+    };
+    
+    // Hilbert space dimension
+    int N = 1 << num_site;  // 2^num_site
+    
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+    // Calculate full spectrum using full diagonalization
+    std::cout << "Starting full diagonalization..." << std::endl;
+    std::vector<double> eigenvalues;
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
+    // full_diagonalization(H, N, eigenvalues);
+    lanczos(H, N, N, N, 1e-10, eigenvalues);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+    
+    // Save eigenvalues to file
+    std::ofstream eigenvalue_file("ED_test_full_spectrum.dat");
+    if (eigenvalue_file.is_open()) {
+        for (const auto& eigenvalue : eigenvalues) {
+            eigenvalue_file << eigenvalue << std::endl;
+        }
+        eigenvalue_file.close();
+        std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
+    }
+    
+    // Calculate thermodynamics from spectrum
+    std::cout << "Calculating thermodynamic properties..." << std::endl;
+    double T_min = 0.001;
+    double T_max = 10.0;
+    int num_points = 2000;
+    
+    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+        eigenvalues, T_min, T_max, num_points
+    );
+    
+    // Save thermodynamic data
+    std::ofstream thermo_file("ED_test_thermodynamics_full.dat");
+    if (thermo_file.is_open()) {
+        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+            thermo_file << std::fixed << std::setprecision(6)
+                      << thermo.temperatures[i] << " "
+                      << thermo.energy[i] << " "
+                      << thermo.specific_heat[i] << " "
+                      << thermo.entropy[i] << " "
+                      << thermo.free_energy[i] << std::endl;
+        }
+        thermo_file.close();
+        std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
+    }
+    
+    // Print some statistics about the spectrum
+    std::sort(eigenvalues.begin(), eigenvalues.end());
+    std::cout << "Spectrum statistics:" << std::endl;
+    std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
+    std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
+    std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
+    
+    return 0;
+}
+
 // int main() {
 //     // Load the operator from ED_test directory
 //     int num_site = 15;  // Assuming 8 sites based on previous code
@@ -3099,117 +3205,117 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
 //     return 0;
 // }
 
-int main() {
-    // Load the operator from ED_test directory
-    int num_site = 8;  // Assuming 8 sites based on previous code
-    Operator op(num_site);
-    op.loadFromFile("./ED_test/Trans.def");
-    op.loadFromInterAllFile("./ED_test/InterAll.def");
+// int main() {
+//     // Load the operator from ED_test directory
+//     int num_site = 8;  // Assuming 8 sites based on previous code
+//     Operator op(num_site);
+//     op.loadFromFile("./ED_test/Trans.def");
+//     op.loadFromInterAllFile("./ED_test/InterAll.def");
     
-    // Create Hamiltonian function for thermodynamic calculations
-    auto H = [&op](const Complex* v, Complex* Hv, int N) {
-        std::vector<Complex> vec(v, v + N);
-        std::vector<Complex> result = op.apply(vec);
-        std::copy(result.begin(), result.end(), Hv);
-    };
+//     // Create Hamiltonian function for thermodynamic calculations
+//     auto H = [&op](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     };
     
-    // Hilbert space dimension
-    int N = 1 << num_site;  // 2^num_site
+//     // Hilbert space dimension
+//     int N = 1 << num_site;  // 2^num_site
     
-    std::cout << "Hilbert space dimension: " << N << std::endl;
+//     std::cout << "Hilbert space dimension: " << N << std::endl;
     
-    // High temperature range using FTLM (T >= 0.1)
-    double T_max_high = 10.0;
-    double T_min_high = 0.01;
-    int num_points_high = 100;
+//     // High temperature range using FTLM (T >= 0.1)
+//     double T_max_high = 10.0;
+//     double T_min_high = 0.01;
+//     int num_points_high = 100;
     
-    std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
-    auto start_high = std::chrono::high_resolution_clock::now();
+//     std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
+//     auto start_high = std::chrono::high_resolution_clock::now();
     
-    ThermodynamicResults high_temp_results = calculate_thermodynamics(
-        H, N, T_min_high, T_max_high, num_points_high, 30, 100, 1e-10
-    );
+//     ThermodynamicResults high_temp_results = calculate_thermodynamics(
+//         H, N, T_min_high, T_max_high, num_points_high, 30, 100, 1e-10
+//     );
     
-    auto end_high = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_high = end_high - start_high;
-    std::cout << "FTLM completed in " << elapsed_high.count() << " seconds" << std::endl;
+//     auto end_high = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed_high = end_high - start_high;
+//     std::cout << "FTLM completed in " << elapsed_high.count() << " seconds" << std::endl;
     
-    // Save high temperature results
-    output_thermodynamic_data(high_temp_results, "ED_test_high_temp_thermo_FTLM.dat");
+//     // Save high temperature results
+//     output_thermodynamic_data(high_temp_results, "ED_test_high_temp_thermo_FTLM.dat");
     
-    // Low temperature range using LTLM (T < 0.1)
-    double T_max_low = 0.1;
-    double T_min_low = 0.01;
-    int num_points_low = 0;
+//     // Low temperature range using LTLM (T < 0.1)
+//     double T_max_low = 0.1;
+//     double T_min_low = 0.01;
+//     int num_points_low = 0;
     
-    std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
-    auto start_low = std::chrono::high_resolution_clock::now();
+//     std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
+//     auto start_low = std::chrono::high_resolution_clock::now();
     
-    ThermodynamicResults low_temp_results = calculate_thermodynamics_LTLM(
-        H, N, T_min_low, T_max_low, num_points_low, 30, 100, 1e-10
-    );
+//     ThermodynamicResults low_temp_results = calculate_thermodynamics_LTLM(
+//         H, N, T_min_low, T_max_low, num_points_low, 30, 100, 1e-10
+//     );
     
-    auto end_low = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed_low = end_low - start_low;
-    std::cout << "LTLM completed in " << elapsed_low.count() << " seconds" << std::endl;
+//     auto end_low = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed_low = end_low - start_low;
+//     std::cout << "LTLM completed in " << elapsed_low.count() << " seconds" << std::endl;
     
-    // Save low temperature results
-    output_thermodynamic_data(low_temp_results, "ED_test_low_temp_thermo_LTLM.dat");
+//     // Save low temperature results
+//     output_thermodynamic_data(low_temp_results, "ED_test_low_temp_thermo_LTLM.dat");
     
-    // Combine results for plotting
-    ThermodynamicResults combined_results;
-    combined_results.temperatures.insert(combined_results.temperatures.end(), 
-                                        low_temp_results.temperatures.begin(), 
-                                        low_temp_results.temperatures.end());
-    combined_results.temperatures.insert(combined_results.temperatures.end(), 
-                                        high_temp_results.temperatures.begin(), 
-                                        high_temp_results.temperatures.end());
+//     // Combine results for plotting
+//     ThermodynamicResults combined_results;
+//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
+//                                         low_temp_results.temperatures.begin(), 
+//                                         low_temp_results.temperatures.end());
+//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
+//                                         high_temp_results.temperatures.begin(), 
+//                                         high_temp_results.temperatures.end());
                                         
-    combined_results.energy.insert(combined_results.energy.end(), 
-                                low_temp_results.energy.begin(), 
-                                low_temp_results.energy.end());
-    combined_results.energy.insert(combined_results.energy.end(), 
-                                high_temp_results.energy.begin(), 
-                                high_temp_results.energy.end());
+//     combined_results.energy.insert(combined_results.energy.end(), 
+//                                 low_temp_results.energy.begin(), 
+//                                 low_temp_results.energy.end());
+//     combined_results.energy.insert(combined_results.energy.end(), 
+//                                 high_temp_results.energy.begin(), 
+//                                 high_temp_results.energy.end());
                                 
-    combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
-                                        low_temp_results.specific_heat.begin(), 
-                                        low_temp_results.specific_heat.end());
-    combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
-                                        high_temp_results.specific_heat.begin(), 
-                                        high_temp_results.specific_heat.end());
+//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+//                                         low_temp_results.specific_heat.begin(), 
+//                                         low_temp_results.specific_heat.end());
+//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+//                                         high_temp_results.specific_heat.begin(), 
+//                                         high_temp_results.specific_heat.end());
                                         
-    combined_results.entropy.insert(combined_results.entropy.end(), 
-                                low_temp_results.entropy.begin(), 
-                                low_temp_results.entropy.end());
-    combined_results.entropy.insert(combined_results.entropy.end(), 
-                                high_temp_results.entropy.begin(), 
-                                high_temp_results.entropy.end());
+//     combined_results.entropy.insert(combined_results.entropy.end(), 
+//                                 low_temp_results.entropy.begin(), 
+//                                 low_temp_results.entropy.end());
+//     combined_results.entropy.insert(combined_results.entropy.end(), 
+//                                 high_temp_results.entropy.begin(), 
+//                                 high_temp_results.entropy.end());
                                 
-    combined_results.free_energy.insert(combined_results.free_energy.end(), 
-                                    low_temp_results.free_energy.begin(), 
-                                    low_temp_results.free_energy.end());
-    combined_results.free_energy.insert(combined_results.free_energy.end(), 
-                                    high_temp_results.free_energy.begin(), 
-                                    high_temp_results.free_energy.end());
+//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
+//                                     low_temp_results.free_energy.begin(), 
+//                                     low_temp_results.free_energy.end());
+//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
+//                                     high_temp_results.free_energy.begin(), 
+//                                     high_temp_results.free_energy.end());
     
-    // Save combined results
-    output_thermodynamic_data(combined_results, "ED_test_combined_thermo.dat");
+//     // Save combined results
+//     output_thermodynamic_data(combined_results, "ED_test_combined_thermo.dat");
     
-    std::cout << "Thermodynamic calculations completed successfully!" << std::endl;
-    std::cout << "Results saved to:" << std::endl;
-    std::cout << "  ED_test_high_temp_thermo_FTLM.dat" << std::endl;
-    std::cout << "  ED_test_low_temp_thermo_LTLM.dat" << std::endl;
-    std::cout << "  ED_test_combined_thermo.dat" << std::endl;
+//     std::cout << "Thermodynamic calculations completed successfully!" << std::endl;
+//     std::cout << "Results saved to:" << std::endl;
+//     std::cout << "  ED_test_high_temp_thermo_FTLM.dat" << std::endl;
+//     std::cout << "  ED_test_low_temp_thermo_LTLM.dat" << std::endl;
+//     std::cout << "  ED_test_combined_thermo.dat" << std::endl;
     
-    return 0;
-}
+//     return 0;
+// }
 
 
 
 
 // int main(){
-//     int num_site = 8;
+//     int num_site = 16;
 //     Operator op(num_site);
 //     op.loadFromFile("./ED_test/Trans.def");
 //     op.loadFromInterAllFile("./ED_test/InterAll.def");
