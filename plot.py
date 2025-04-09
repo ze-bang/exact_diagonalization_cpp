@@ -48,3 +48,4 @@ plt.savefig('/home/pc_linux/exact_diagonalization_cpp/specific_heat_plot.png', d
 
 # Show the plot
 plt.show()
+

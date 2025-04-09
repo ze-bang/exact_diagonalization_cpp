@@ -293,15 +293,21 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
     
-    auto start = std::chrono::high_resolution_clock::now();
-    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::high_resolution_clock::time_point start, end;
 
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
-        auto start = std::chrono::high_resolution_clock::now();
+        start = std::chrono::high_resolution_clock::now();
         // w = H*v_j
         if (j > 0){
-            std::cout << "Iteration " << j << " estimated time remaining: " << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << " seconds" << std::endl;
+            std::cout << "Iteration " << j + 1 << " of " << max_iter;
+            if (j > 0) {
+                auto iteration_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+                auto remaining_time = (max_iter - j - 1) * iteration_time;
+                std::cout << " | Estimated time remaining: " 
+                          << remaining_time;
+            }
+            std::cout << std::endl;
         }
         H(v_current.data(), w.data(), N);
         
@@ -321,24 +327,24 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
         // Full reorthogonalization (twice for numerical stability)
-        for (int iter = 0; iter < 2; iter++) {
-            #pragma omp parallel
-            {
-                ComplexVector private_w(N, Complex(0.0, 0.0));
+        // for (int iter = 0; iter < 2; iter++) {
+        //     #pragma omp parallel
+        //     {
+        //         ComplexVector private_w(N, Complex(0.0, 0.0));
                 
-                #pragma omp for nowait
-                for (size_t k = 0; k <= j; k++) {
-                    Complex overlap;
-                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
-                    Complex neg_overlap = -overlap;
+        //         #pragma omp for nowait
+        //         for (size_t k = 0; k <= j; k++) {
+        //             Complex overlap;
+        //             cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
+        //             Complex neg_overlap = -overlap;
                     
-                    #pragma omp critical
-                    {
-                        cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
-                    }
-                }
-            }
-        }
+        //             #pragma omp critical
+        //             {
+        //                 cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
+        //             }
+        //         }
+        //     }
+        // }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
@@ -394,12 +400,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
-        auto end = std::chrono::high_resolution_clock::now();
+        end = std::chrono::high_resolution_clock::now();
     }
     
     // Construct and solve tridiagonal matrix
     int m = alpha.size();
     
+    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
+
     // Allocate arrays for LAPACKE
     std::vector<double> diag = alpha;    // Copy of diagonal elements
     std::vector<double> offdiag(m-1);    // Off-diagonal elements
@@ -408,6 +416,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
+
+    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
     // Save only the first exct eigenvalues, or all of them if m < exct
     int n_eigenvalues = std::min(exct, m);
@@ -3036,12 +3046,13 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
 }
 
 #include <chrono>
-int main() {
+int main(int argc, char* argv[]) {
     // Load the operator from ED_test directory
     int num_site = 16;  // Assuming 8 sites based on previous code
     Operator op(num_site);
-    op.loadFromFile("./ED_test/Trans.def");
-    op.loadFromInterAllFile("./ED_test/InterAll.def");
+    std::string dir = argv[1];
+    op.loadFromFile(dir + "/Trans.def");
+    op.loadFromInterAllFile(dir + "/InterAll.def");
     
     // Create Hamiltonian function
     auto H = [&op](const Complex* v, Complex* Hv, int N) {
