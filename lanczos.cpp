@@ -246,6 +246,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 // tol: Tolerance for convergence and detecting invariant subspaces
 // eigenvalues: Output vector to store the eigenvalues
 // eigenvectors: Output matrix to store the eigenvectors (optional)
+#include <chrono>
 void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
              double tol, std::vector<double>& eigenvalues, 
              std::vector<ComplexVector>* eigenvectors = nullptr) {
@@ -264,6 +265,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
             v_current[i] = Complex(real, imag);
         }
     }
+
+    std::cout << "Lanczos: Initial vector generated" << std::endl;
     
     // Normalize the starting vector
     double norm = cblas_dznrm2(N, v_current.data(), 1);
@@ -285,9 +288,21 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     
     max_iter = std::min(N, max_iter);
     
+    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Lanczos: Iterating..." << std::endl;   
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    auto end = std::chrono::high_resolution_clock::now();
+
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
+        auto start = std::chrono::high_resolution_clock::now();
         // w = H*v_j
+        if (j > 0){
+            std::cout << "Iteration " << j << " estimated time remaining: " << std::chrono::duration_cast<std::chrono::seconds>(end - start).count() << " seconds" << std::endl;
+        }
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -379,6 +394,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
+        auto end = std::chrono::high_resolution_clock::now();
     }
     
     // Construct and solve tridiagonal matrix
@@ -3022,7 +3038,7 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
 #include <chrono>
 int main() {
     // Load the operator from ED_test directory
-    int num_site = 15;  // Assuming 8 sites based on previous code
+    int num_site = 16;  // Assuming 8 sites based on previous code
     Operator op(num_site);
     op.loadFromFile("./ED_test/Trans.def");
     op.loadFromInterAllFile("./ED_test/InterAll.def");
@@ -3046,8 +3062,8 @@ int main() {
     auto start = std::chrono::high_resolution_clock::now();
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
-    full_diagonalization(H, N, eigenvalues);
-    // lanczos(H, N, 2e4, 2e4, 1e-10, eigenvalues);
+    // full_diagonalization(H, N, eigenvalues);
+    lanczos(H, N, N, N, 1e-10, eigenvalues);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
@@ -3209,7 +3225,7 @@ int main() {
 
 
 // int main(){
-//     int num_site = 8;
+//     int num_site = 16;
 //     Operator op(num_site);
 //     op.loadFromFile("./ED_test/Trans.def");
 //     op.loadFromInterAllFile("./ED_test/InterAll.def");

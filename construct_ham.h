@@ -8,7 +8,7 @@
 #include <sstream>
 #include <Eigen/Sparse>
 #include <Eigen/Dense>
-
+#include <set>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -794,4 +794,179 @@ private:
         return result;
     }
 };
+
+/**
+ * Decomposes automorphisms in a clique as powers of their minimal generators
+ */
+class AutomorphismDecomposer {
+public:
+    AutomorphismDecomposer(const std::vector<std::vector<int>>& automorphisms)
+        : automorphisms_(automorphisms) {}
+    
+    // Decompose each automorphism in the clique into generator powers
+    std::vector<std::vector<int>> decomposeClique(
+        const std::vector<int>& clique_indices,
+        const std::vector<int>& generator_indices) {
+        
+        std::vector<std::vector<int>> result;
+        std::vector<std::vector<int>> clique_autos;
+        std::vector<std::vector<int>> generators;
+        
+        // Extract the automorphisms in the clique
+        for (int idx : clique_indices) {
+            clique_autos.push_back(automorphisms_[idx]);
+        }
+        
+        // Extract the generator automorphisms
+        for (int idx : generator_indices) {
+            generators.push_back(automorphisms_[clique_indices[idx]]);
+        }
+        
+        // Find the order of each generator
+        std::vector<int> generator_orders = findGeneratorOrders(generators);
+        
+        // For each automorphism in the clique
+        for (const auto& auto_perm : clique_autos) {
+            // Find powers of generators that produce this automorphism
+            std::vector<int> powers = findGeneratorPowers(auto_perm, generators, generator_orders);
+            result.push_back(powers);
+        }
+        
+        return result;
+    }
+    
+    // Print the decomposition
+    void printDecomposition(
+        const std::vector<int>& clique_indices,
+        const std::vector<int>& generator_indices) {
+        
+        std::vector<std::vector<int>> decomposition = 
+            decomposeClique(clique_indices, generator_indices);
+        
+        std::cout << "Automorphism decomposition in terms of generator powers:" << std::endl;
+        for (size_t i = 0; i < clique_indices.size(); ++i) {
+            std::cout << "Automorphism " << clique_indices[i] << ": [";
+            for (size_t j = 0; j < decomposition[i].size(); ++j) {
+                std::cout << decomposition[i][j];
+                if (j < decomposition[i].size() - 1) {
+                    std::cout << ", ";
+                }
+            }
+            std::cout << "]" << std::endl;
+        }
+    }
+    
+private:
+    const std::vector<std::vector<int>>& automorphisms_;
+    
+    // Find the order of each generator
+    std::vector<int> findGeneratorOrders(const std::vector<std::vector<int>>& generators) {
+        std::vector<int> orders;
+        
+        for (const auto& gen : generators) {
+            std::vector<int> current = gen;
+            int order = 1;
+            
+            while (!isIdentity(current)) {
+                current = compose(gen, current);
+                order++;
+            }
+            
+            orders.push_back(order);
+        }
+        
+        return orders;
+    }
+    
+    bool isIdentity(const std::vector<int>& perm) {
+        for (size_t i = 0; i < perm.size(); ++i) {
+            if (perm[i] != i) return false;
+        }
+        return true;
+    }
+    
+    std::vector<int> findGeneratorPowers(
+        const std::vector<int>& target,
+        const std::vector<std::vector<int>>& generators,
+        const std::vector<int>& generator_orders) {
+        
+        std::vector<int> current_powers(generators.size(), 0);
+        std::vector<int> best_powers;
+        
+        if (tryAllPowerCombinations(target, generators, generator_orders, current_powers, 0, best_powers)) {
+            return best_powers;
+        }
+        
+        return std::vector<int>(generators.size(), 0);
+    }
+    
+    bool tryAllPowerCombinations(
+        const std::vector<int>& target,
+        const std::vector<std::vector<int>>& generators,
+        const std::vector<int>& generator_orders,
+        std::vector<int>& current_powers,
+        int gen_idx,
+        std::vector<int>& best_powers) {
+        
+        if (gen_idx >= generators.size()) {
+            std::vector<int> result = applyGeneratorPowers(generators, current_powers);
+            if (result == target) {
+                best_powers = current_powers;
+                return true;
+            }
+            return false;
+        }
+        
+        for (int power = 0; power < generator_orders[gen_idx]; ++power) {
+            current_powers[gen_idx] = power;
+            if (tryAllPowerCombinations(target, generators, generator_orders, current_powers, gen_idx + 1, best_powers)) {
+                return true;
+            }
+        }
+        
+        return false;
+    }
+    
+    std::vector<int> applyGeneratorPowers(
+        const std::vector<std::vector<int>>& generators,
+        const std::vector<int>& powers) {
+        
+        std::vector<int> result(generators[0].size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            result[i] = i;
+        }
+        
+        for (size_t g = 0; g < generators.size(); ++g) {
+            std::vector<int> gen_power = powerOf(generators[g], powers[g]);
+            result = compose(gen_power, result);
+        }
+        
+        return result;
+    }
+    
+    std::vector<int> powerOf(const std::vector<int>& auto_perm, int power) {
+        if (power == 0) {
+            std::vector<int> identity(auto_perm.size());
+            for (size_t i = 0; i < identity.size(); ++i) {
+                identity[i] = i;
+            }
+            return identity;
+        }
+        
+        std::vector<int> result = auto_perm;
+        for (int i = 1; i < power; ++i) {
+            result = compose(auto_perm, result);
+        }
+        return result;
+    }
+    
+    std::vector<int> compose(const std::vector<int>& a, const std::vector<int>& b) {
+        std::vector<int> result(a.size());
+        for (size_t i = 0; i < a.size(); ++i) {
+            result[i] = a[b[i]];
+        }
+        return result;
+    }
+};
+
 
