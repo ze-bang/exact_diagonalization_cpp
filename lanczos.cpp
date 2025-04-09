@@ -1813,7 +1813,7 @@ std::vector<std::pair<double, Complex>> FTLM_dynamical(
     int n_points,             // Number of frequency points
     double eta,               // Broadening parameter (half-width of Lorentzian)
     int r_max = 30,           // Number of random vectors for sampling
-    int m_max = 100           // Maximum Lanczos iterations per random vector
+    int m_max = 1000           // Maximum Lanczos iterations per random vector
 ) {
     // Generate frequency grid
     std::vector<double> omega_values(n_points);
@@ -1944,8 +1944,8 @@ Complex LTLM(
     std::function<void(const Complex*, Complex*, int)> A, // Observable operator
     int N,              // Dimension of Hilbert space
     double beta,        // Inverse temperature (β = 1/kT)
-    int R,              // Number of random samples
-    int M,              // Lanczos iterations per sample
+    int R=30,              // Number of random samples
+    int M=1000,              // Lanczos iterations per sample
     double tol = 1e-10  // Tolerance for convergence
 ) {
     // Random number generator for random states
@@ -3020,93 +3020,14 @@ std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
 }
 
 #include <chrono>
-int main() {
-    // Load the operator from ED_test directory
-    int num_site = 15;  // Assuming 8 sites based on previous code
-    Operator op(num_site);
-    op.loadFromFile("./ED_test/Trans.def");
-    op.loadFromInterAllFile("./ED_test/InterAll.def");
-    
-    // Create Hamiltonian function
-    auto H = [&op](const Complex* v, Complex* Hv, int N) {
-        std::vector<Complex> vec(v, v + N);
-        std::vector<Complex> result = op.apply(vec);
-        std::copy(result.begin(), result.end(), Hv);
-    };
-    
-    // Hilbert space dimension
-    int N = 1 << num_site;  // 2^num_site
-    
-    std::cout << "Hilbert space dimension: " << N << std::endl;
-    
-    // Calculate full spectrum using full diagonalization
-    std::cout << "Starting full diagonalization..." << std::endl;
-    std::vector<double> eigenvalues;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
-    full_diagonalization(H, N, eigenvalues);
-
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
-    
-    // Save eigenvalues to file
-    std::ofstream eigenvalue_file("ED_test_full_spectrum.dat");
-    if (eigenvalue_file.is_open()) {
-        for (const auto& eigenvalue : eigenvalues) {
-            eigenvalue_file << eigenvalue << std::endl;
-        }
-        eigenvalue_file.close();
-        std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
-    }
-    
-    // Calculate thermodynamics from spectrum
-    std::cout << "Calculating thermodynamic properties..." << std::endl;
-    double T_min = 0.001;
-    double T_max = 10.0;
-    int num_points = 2000;
-    
-    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
-        eigenvalues, T_min, T_max, num_points
-    );
-    
-    // Save thermodynamic data
-    std::ofstream thermo_file("ED_test_thermodynamics_full.dat");
-    if (thermo_file.is_open()) {
-        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
-            thermo_file << std::fixed << std::setprecision(6)
-                      << thermo.temperatures[i] << " "
-                      << thermo.energy[i] << " "
-                      << thermo.specific_heat[i] << " "
-                      << thermo.entropy[i] << " "
-                      << thermo.free_energy[i] << std::endl;
-        }
-        thermo_file.close();
-        std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
-    }
-    
-    // Print some statistics about the spectrum
-    std::sort(eigenvalues.begin(), eigenvalues.end());
-    std::cout << "Spectrum statistics:" << std::endl;
-    std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
-    std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
-    std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
-    
-    return 0;
-}
-
 // int main() {
 //     // Load the operator from ED_test directory
-//     int num_site = 8;  // Assuming 8 sites based on previous code
+//     int num_site = 15;  // Assuming 8 sites based on previous code
 //     Operator op(num_site);
 //     op.loadFromFile("./ED_test/Trans.def");
 //     op.loadFromInterAllFile("./ED_test/InterAll.def");
     
-//     // Create Hamiltonian function for thermodynamic calculations
+//     // Create Hamiltonian function
 //     auto H = [&op](const Complex* v, Complex* Hv, int N) {
 //         std::vector<Complex> vec(v, v + N);
 //         std::vector<Complex> result = op.apply(vec);
@@ -3118,92 +3039,171 @@ int main() {
     
 //     std::cout << "Hilbert space dimension: " << N << std::endl;
     
-//     // High temperature range using FTLM (T >= 0.1)
-//     double T_max_high = 10.0;
-//     double T_min_high = 0.1;
-//     int num_points_high = 50;
+//     // Calculate full spectrum using full diagonalization
+//     std::cout << "Starting full diagonalization..." << std::endl;
+//     std::vector<double> eigenvalues;
     
-//     std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
-//     auto start_high = std::chrono::high_resolution_clock::now();
+//     auto start = std::chrono::high_resolution_clock::now();
     
-//     ThermodynamicResults high_temp_results = calculate_thermodynamics(
-//         H, N, T_min_high, T_max_high, num_points_high, 30, 100, 1e-10
+//     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
+//     full_diagonalization(H, N, eigenvalues);
+
+
+//     auto end = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed = end - start;
+//     std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+    
+//     // Save eigenvalues to file
+//     std::ofstream eigenvalue_file("ED_test_full_spectrum.dat");
+//     if (eigenvalue_file.is_open()) {
+//         for (const auto& eigenvalue : eigenvalues) {
+//             eigenvalue_file << eigenvalue << std::endl;
+//         }
+//         eigenvalue_file.close();
+//         std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
+//     }
+    
+//     // Calculate thermodynamics from spectrum
+//     std::cout << "Calculating thermodynamic properties..." << std::endl;
+//     double T_min = 0.001;
+//     double T_max = 10.0;
+//     int num_points = 2000;
+    
+//     ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+//         eigenvalues, T_min, T_max, num_points
 //     );
     
-//     auto end_high = std::chrono::high_resolution_clock::now();
-//     std::chrono::duration<double> elapsed_high = end_high - start_high;
-//     std::cout << "FTLM completed in " << elapsed_high.count() << " seconds" << std::endl;
+//     // Save thermodynamic data
+//     std::ofstream thermo_file("ED_test_thermodynamics_full.dat");
+//     if (thermo_file.is_open()) {
+//         thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+//         for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+//             thermo_file << std::fixed << std::setprecision(6)
+//                       << thermo.temperatures[i] << " "
+//                       << thermo.energy[i] << " "
+//                       << thermo.specific_heat[i] << " "
+//                       << thermo.entropy[i] << " "
+//                       << thermo.free_energy[i] << std::endl;
+//         }
+//         thermo_file.close();
+//         std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
+//     }
     
-//     // Save high temperature results
-//     output_thermodynamic_data(high_temp_results, "ED_test_high_temp_thermo_FTLM.dat");
-    
-//     // Low temperature range using LTLM (T < 0.1)
-//     double T_max_low = 0.1;
-//     double T_min_low = 0.01;
-//     int num_points_low = 30;
-    
-//     std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
-//     auto start_low = std::chrono::high_resolution_clock::now();
-    
-//     ThermodynamicResults low_temp_results = calculate_thermodynamics_LTLM(
-//         H, N, T_min_low, T_max_low, num_points_low, 30, 100, 1e-10
-//     );
-    
-//     auto end_low = std::chrono::high_resolution_clock::now();
-//     std::chrono::duration<double> elapsed_low = end_low - start_low;
-//     std::cout << "LTLM completed in " << elapsed_low.count() << " seconds" << std::endl;
-    
-//     // Save low temperature results
-//     output_thermodynamic_data(low_temp_results, "ED_test_low_temp_thermo_LTLM.dat");
-    
-//     // Combine results for plotting
-//     ThermodynamicResults combined_results;
-//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
-//                                         low_temp_results.temperatures.begin(), 
-//                                         low_temp_results.temperatures.end());
-//     combined_results.temperatures.insert(combined_results.temperatures.end(), 
-//                                         high_temp_results.temperatures.begin(), 
-//                                         high_temp_results.temperatures.end());
-                                        
-//     combined_results.energy.insert(combined_results.energy.end(), 
-//                                 low_temp_results.energy.begin(), 
-//                                 low_temp_results.energy.end());
-//     combined_results.energy.insert(combined_results.energy.end(), 
-//                                 high_temp_results.energy.begin(), 
-//                                 high_temp_results.energy.end());
-                                
-//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
-//                                         low_temp_results.specific_heat.begin(), 
-//                                         low_temp_results.specific_heat.end());
-//     combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
-//                                         high_temp_results.specific_heat.begin(), 
-//                                         high_temp_results.specific_heat.end());
-                                        
-//     combined_results.entropy.insert(combined_results.entropy.end(), 
-//                                 low_temp_results.entropy.begin(), 
-//                                 low_temp_results.entropy.end());
-//     combined_results.entropy.insert(combined_results.entropy.end(), 
-//                                 high_temp_results.entropy.begin(), 
-//                                 high_temp_results.entropy.end());
-                                
-//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
-//                                     low_temp_results.free_energy.begin(), 
-//                                     low_temp_results.free_energy.end());
-//     combined_results.free_energy.insert(combined_results.free_energy.end(), 
-//                                     high_temp_results.free_energy.begin(), 
-//                                     high_temp_results.free_energy.end());
-    
-//     // Save combined results
-//     output_thermodynamic_data(combined_results, "ED_test_combined_thermo.dat");
-    
-//     std::cout << "Thermodynamic calculations completed successfully!" << std::endl;
-//     std::cout << "Results saved to:" << std::endl;
-//     std::cout << "  ED_test_high_temp_thermo_FTLM.dat" << std::endl;
-//     std::cout << "  ED_test_low_temp_thermo_LTLM.dat" << std::endl;
-//     std::cout << "  ED_test_combined_thermo.dat" << std::endl;
+//     // Print some statistics about the spectrum
+//     std::sort(eigenvalues.begin(), eigenvalues.end());
+//     std::cout << "Spectrum statistics:" << std::endl;
+//     std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
+//     std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
+//     std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
     
 //     return 0;
 // }
+
+int main() {
+    // Load the operator from ED_test directory
+    int num_site = 8;  // Assuming 8 sites based on previous code
+    Operator op(num_site);
+    op.loadFromFile("./ED_test/Trans.def");
+    op.loadFromInterAllFile("./ED_test/InterAll.def");
+    
+    // Create Hamiltonian function for thermodynamic calculations
+    auto H = [&op](const Complex* v, Complex* Hv, int N) {
+        std::vector<Complex> vec(v, v + N);
+        std::vector<Complex> result = op.apply(vec);
+        std::copy(result.begin(), result.end(), Hv);
+    };
+    
+    // Hilbert space dimension
+    int N = 1 << num_site;  // 2^num_site
+    
+    std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+    // High temperature range using FTLM (T >= 0.1)
+    double T_max_high = 10.0;
+    double T_min_high = 0.01;
+    int num_points_high = 100;
+    
+    std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
+    auto start_high = std::chrono::high_resolution_clock::now();
+    
+    ThermodynamicResults high_temp_results = calculate_thermodynamics(
+        H, N, T_min_high, T_max_high, num_points_high, 30, 100, 1e-10
+    );
+    
+    auto end_high = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_high = end_high - start_high;
+    std::cout << "FTLM completed in " << elapsed_high.count() << " seconds" << std::endl;
+    
+    // Save high temperature results
+    output_thermodynamic_data(high_temp_results, "ED_test_high_temp_thermo_FTLM.dat");
+    
+    // Low temperature range using LTLM (T < 0.1)
+    double T_max_low = 0.1;
+    double T_min_low = 0.01;
+    int num_points_low = 0;
+    
+    std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
+    auto start_low = std::chrono::high_resolution_clock::now();
+    
+    ThermodynamicResults low_temp_results = calculate_thermodynamics_LTLM(
+        H, N, T_min_low, T_max_low, num_points_low, 30, 100, 1e-10
+    );
+    
+    auto end_low = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed_low = end_low - start_low;
+    std::cout << "LTLM completed in " << elapsed_low.count() << " seconds" << std::endl;
+    
+    // Save low temperature results
+    output_thermodynamic_data(low_temp_results, "ED_test_low_temp_thermo_LTLM.dat");
+    
+    // Combine results for plotting
+    ThermodynamicResults combined_results;
+    combined_results.temperatures.insert(combined_results.temperatures.end(), 
+                                        low_temp_results.temperatures.begin(), 
+                                        low_temp_results.temperatures.end());
+    combined_results.temperatures.insert(combined_results.temperatures.end(), 
+                                        high_temp_results.temperatures.begin(), 
+                                        high_temp_results.temperatures.end());
+                                        
+    combined_results.energy.insert(combined_results.energy.end(), 
+                                low_temp_results.energy.begin(), 
+                                low_temp_results.energy.end());
+    combined_results.energy.insert(combined_results.energy.end(), 
+                                high_temp_results.energy.begin(), 
+                                high_temp_results.energy.end());
+                                
+    combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+                                        low_temp_results.specific_heat.begin(), 
+                                        low_temp_results.specific_heat.end());
+    combined_results.specific_heat.insert(combined_results.specific_heat.end(), 
+                                        high_temp_results.specific_heat.begin(), 
+                                        high_temp_results.specific_heat.end());
+                                        
+    combined_results.entropy.insert(combined_results.entropy.end(), 
+                                low_temp_results.entropy.begin(), 
+                                low_temp_results.entropy.end());
+    combined_results.entropy.insert(combined_results.entropy.end(), 
+                                high_temp_results.entropy.begin(), 
+                                high_temp_results.entropy.end());
+                                
+    combined_results.free_energy.insert(combined_results.free_energy.end(), 
+                                    low_temp_results.free_energy.begin(), 
+                                    low_temp_results.free_energy.end());
+    combined_results.free_energy.insert(combined_results.free_energy.end(), 
+                                    high_temp_results.free_energy.begin(), 
+                                    high_temp_results.free_energy.end());
+    
+    // Save combined results
+    output_thermodynamic_data(combined_results, "ED_test_combined_thermo.dat");
+    
+    std::cout << "Thermodynamic calculations completed successfully!" << std::endl;
+    std::cout << "Results saved to:" << std::endl;
+    std::cout << "  ED_test_high_temp_thermo_FTLM.dat" << std::endl;
+    std::cout << "  ED_test_low_temp_thermo_LTLM.dat" << std::endl;
+    std::cout << "  ED_test_combined_thermo.dat" << std::endl;
+    
+    return 0;
+}
 
 
 
