@@ -316,24 +316,24 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
         // Full reorthogonalization (twice for numerical stability)
-        // for (int iter = 0; iter < 2; iter++) {
-        //     #pragma omp parallel
-        //     {
-        //         ComplexVector private_w(N, Complex(0.0, 0.0));
+        for (int iter = 0; iter < 2; iter++) {
+            #pragma omp parallel
+            {
+                ComplexVector private_w(N, Complex(0.0, 0.0));
                 
-        //         #pragma omp for nowait
-        //         for (size_t k = 0; k <= j; k++) {
-        //             Complex overlap;
-        //             cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
-        //             Complex neg_overlap = -overlap;
+                #pragma omp for nowait
+                for (size_t k = 0; k <= j; k++) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, basis_vectors[k].data(), 1, w.data(), 1, &overlap);
+                    Complex neg_overlap = -overlap;
                     
-        //             #pragma omp critical
-        //             {
-        //                 cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
-        //             }
-        //         }
-        //     }
-        // }
+                    #pragma omp critical
+                    {
+                        cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, w.data(), 1);
+                    }
+                }
+            }
+        }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
@@ -1856,7 +1856,7 @@ std::vector<std::pair<double, Complex>> FTLM_dynamical(
     int n_points,             // Number of frequency points
     double eta,               // Broadening parameter (half-width of Lorentzian)
     int r_max = 30,           // Number of random vectors for sampling
-    int m_max = 100           // Maximum Lanczos iterations per random vector
+    int m_max = 1000           // Maximum Lanczos iterations per random vector
 ) {
     // Generate frequency grid
     std::vector<double> omega_values(n_points);
@@ -1987,8 +1987,8 @@ Complex LTLM(
     std::function<void(const Complex*, Complex*, int)> A, // Observable operator
     int N,              // Dimension of Hilbert space
     double beta,        // Inverse temperature (β = 1/kT)
-    int R,              // Number of random samples
-    int M,              // Lanczos iterations per sample
+    int R=30,              // Number of random samples
+    int M=1000,              // Lanczos iterations per sample
     double tol = 1e-10  // Tolerance for convergence
 ) {
     // Random number generator for random states
@@ -3162,6 +3162,85 @@ int main(int argc, char* argv[]) {
 
 // int main() {
 //     // Load the operator from ED_test directory
+//     int num_site = 15;  // Assuming 8 sites based on previous code
+//     Operator op(num_site);
+//     op.loadFromFile("./ED_test/Trans.def");
+//     op.loadFromInterAllFile("./ED_test/InterAll.def");
+    
+//     // Create Hamiltonian function
+//     auto H = [&op](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     };
+    
+//     // Hilbert space dimension
+//     int N = 1 << num_site;  // 2^num_site
+    
+//     std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+//     // Calculate full spectrum using full diagonalization
+//     std::cout << "Starting full diagonalization..." << std::endl;
+//     std::vector<double> eigenvalues;
+    
+//     auto start = std::chrono::high_resolution_clock::now();
+    
+//     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
+//     full_diagonalization(H, N, eigenvalues);
+
+
+//     auto end = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed = end - start;
+//     std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+    
+//     // Save eigenvalues to file
+//     std::ofstream eigenvalue_file("ED_test_full_spectrum.dat");
+//     if (eigenvalue_file.is_open()) {
+//         for (const auto& eigenvalue : eigenvalues) {
+//             eigenvalue_file << eigenvalue << std::endl;
+//         }
+//         eigenvalue_file.close();
+//         std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
+//     }
+    
+//     // Calculate thermodynamics from spectrum
+//     std::cout << "Calculating thermodynamic properties..." << std::endl;
+//     double T_min = 0.001;
+//     double T_max = 10.0;
+//     int num_points = 2000;
+    
+//     ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+//         eigenvalues, T_min, T_max, num_points
+//     );
+    
+//     // Save thermodynamic data
+//     std::ofstream thermo_file("ED_test_thermodynamics_full.dat");
+//     if (thermo_file.is_open()) {
+//         thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+//         for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+//             thermo_file << std::fixed << std::setprecision(6)
+//                       << thermo.temperatures[i] << " "
+//                       << thermo.energy[i] << " "
+//                       << thermo.specific_heat[i] << " "
+//                       << thermo.entropy[i] << " "
+//                       << thermo.free_energy[i] << std::endl;
+//         }
+//         thermo_file.close();
+//         std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
+//     }
+    
+//     // Print some statistics about the spectrum
+//     std::sort(eigenvalues.begin(), eigenvalues.end());
+//     std::cout << "Spectrum statistics:" << std::endl;
+//     std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
+//     std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
+//     std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
+    
+//     return 0;
+// }
+
+// int main() {
+//     // Load the operator from ED_test directory
 //     int num_site = 8;  // Assuming 8 sites based on previous code
 //     Operator op(num_site);
 //     op.loadFromFile("./ED_test/Trans.def");
@@ -3181,8 +3260,8 @@ int main(int argc, char* argv[]) {
     
 //     // High temperature range using FTLM (T >= 0.1)
 //     double T_max_high = 10.0;
-//     double T_min_high = 0.1;
-//     int num_points_high = 50;
+//     double T_min_high = 0.01;
+//     int num_points_high = 100;
     
 //     std::cout << "Calculating high temperature thermodynamics with FTLM..." << std::endl;
 //     auto start_high = std::chrono::high_resolution_clock::now();
@@ -3201,7 +3280,7 @@ int main(int argc, char* argv[]) {
 //     // Low temperature range using LTLM (T < 0.1)
 //     double T_max_low = 0.1;
 //     double T_min_low = 0.01;
-//     int num_points_low = 30;
+//     int num_points_low = 0;
     
 //     std::cout << "Calculating low temperature thermodynamics with LTLM..." << std::endl;
 //     auto start_low = std::chrono::high_resolution_clock::now();
