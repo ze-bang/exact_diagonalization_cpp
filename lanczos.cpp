@@ -248,7 +248,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 // eigenvectors: Output matrix to store the eigenvectors (optional)
 #include <chrono>
 void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
-             double tol, std::vector<double>& eigenvalues, 
+             double tol, std::vector<double>& eigenvalues, std::string dir = "",
              std::vector<ComplexVector>* eigenvectors = nullptr) {
     
     // Initialize random starting vector
@@ -273,9 +273,20 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
-    // Initialize Lanczos vectors and coefficients
-    std::vector<ComplexVector> basis_vectors;
-    basis_vectors.push_back(v_current);
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir+"lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+
+    // Write the first basis vector to file
+    std::string basis_file = temp_dir + "/basis_0.bin";
+    std::ofstream outfile(basis_file, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
+    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -293,7 +304,19 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
     
-
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
         // w = H*v_j
@@ -316,23 +339,25 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
-    
-        #pragma omp parallel for
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i];
-        }
         beta.push_back(norm);
         
-        // Normalize v_next
-        scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, v_next.data(), 1);
-        
-        // Store basis vector
-        if (eigenvectors){
-            if (j < max_iter - 1) {
-                basis_vectors.push_back(v_next);
-            }
+        // v_{j+1} = w / beta_{j+1}
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
         }
+        
+        // Store basis vector to file
+        if (j < max_iter - 1) {
+            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
+            std::ofstream outfile(next_basis_file, std::ios::binary);
+            if (!outfile) {
+                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                return;
+            }
+            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
+            outfile.close();
+        }
+        
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
@@ -361,7 +386,6 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     
     // Workspace parameters
     char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
-    char range = 'A';                      // Compute all eigenvalues
     int info;
     
     if (eigenvectors) {
@@ -377,6 +401,8 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        // Clean up temporary files before returning
+        system(("rm -rf " + temp_dir).c_str());
         return;
     }
     
@@ -420,8 +446,9 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
                 
                 // Transform: evec = sum_k z(k,idx) * basis_vectors[k]
                 for (int k = 0; k < m; k++) {
+                    ComplexVector basis_k = read_basis_vector(k, N);
                     Complex coeff(evecs[k*m + idx], 0.0);
-                    cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, evec.data(), 1);
+                    cblas_zaxpy(N, &coeff, basis_k.data(), 1, evec.data(), 1);
                 }
                 
                 // Normalize
@@ -439,8 +466,9 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
                 for (int c = 0; c < subspace_dim; c++) {
                     int idx = cluster[c];
                     for (int k = 0; k < m; k++) {
+                        ComplexVector basis_k = read_basis_vector(k, N);
                         Complex coeff(evecs[k*m + idx], 0.0);
-                        cblas_zaxpy(N, &coeff, basis_vectors[k].data(), 1, subspace_vectors[c].data(), 1);
+                        cblas_zaxpy(N, &coeff, basis_k.data(), 1, subspace_vectors[c].data(), 1);
                     }
                 }
                 
@@ -479,12 +507,15 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
             refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
         }
     }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
 }
 
 
 // Lanczos algorithm implementation with basis vectors stored on disk
 void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
-             double tol, std::vector<double>& eigenvalues, 
+             double tol, std::vector<double>& eigenvalues, std::string dir = "",
              std::vector<ComplexVector>* eigenvectors = nullptr) {
     
     // Initialize random starting vector
@@ -510,7 +541,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
     // Create a directory for temporary basis vector files
-    std::string temp_dir = "lanczos_basis_vectors";
+    std::string temp_dir = dir+"lanczos_basis_vectors";
     std::string cmd = "mkdir -p " + temp_dir;
     system(cmd.c_str());
 
@@ -3316,7 +3347,7 @@ int main(int argc, char* argv[]) {
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
     // full_diagonalization(H, N, eigenvalues);
-    lanczos(H, N, N, N, 1e-10, eigenvalues);
+    lanczos_no_ortho(H, N, N, N, 1e-10, eigenvalues, dir);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
