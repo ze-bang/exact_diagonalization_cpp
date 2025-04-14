@@ -293,22 +293,11 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
     
-    std::chrono::high_resolution_clock::time_point start, end;
 
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
-        start = std::chrono::high_resolution_clock::now();
         // w = H*v_j
-        if (j > 0){
-            std::cout << "Iteration " << j + 1 << " of " << max_iter;
-            if (j > 0) {
-                auto iteration_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-                auto remaining_time = (max_iter - j - 1) * iteration_time;
-                std::cout << " | Estimated time remaining: " 
-                          << remaining_time;
-            }
-            std::cout << std::endl;
-        }
+        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
         H(v_current.data(), w.data(), N);
         
         // w = w - beta_j * v_{j-1}
@@ -350,42 +339,45 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         norm = cblas_dznrm2(N, w.data(), 1);
         
         // Check for invariant subspace
-        if (norm < tol) {
-            // Generate a random vector orthogonal to basis
-            v_next = generateRandomVector(N, gen, dist);
+        // if (norm < tol) {
+        //     // Generate a random vector orthogonal to basis
+        //     v_next = generateRandomVector(N, gen, dist);
             
-            // Orthogonalize against all basis vectors
-            for (int iter = 0; iter < 2; iter++) {
-                #pragma omp parallel
-                {
-                    #pragma omp for nowait
-                    for (size_t k = 0; k < basis_vectors.size(); k++) {
-                        Complex overlap;
-                        cblas_zdotc_sub(N, basis_vectors[k].data(), 1, v_next.data(), 1, &overlap);
-                        Complex neg_overlap = -overlap;
+        //     // Orthogonalize against all basis vectors
+        //     for (int iter = 0; iter < 2; iter++) {
+        //         #pragma omp parallel
+        //         {
+        //             #pragma omp for nowait
+        //             for (size_t k = 0; k < basis_vectors.size(); k++) {
+        //                 Complex overlap;
+        //                 cblas_zdotc_sub(N, basis_vectors[k].data(), 1, v_next.data(), 1, &overlap);
+        //                 Complex neg_overlap = -overlap;
                         
-                        #pragma omp critical
-                        {
-                            cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, v_next.data(), 1);
-                        }
-                    }
-                }
-            }
+        //                 #pragma omp critical
+        //                 {
+        //                     cblas_zaxpy(N, &neg_overlap, basis_vectors[k].data(), 1, v_next.data(), 1);
+        //                 }
+        //             }
+        //         }
+        //     }
             
-            // Update the norm
-            norm = cblas_dznrm2(N, v_next.data(), 1);
+        //     // Update the norm
+        //     norm = cblas_dznrm2(N, v_next.data(), 1);
             
-            // If still too small, we've reached an invariant subspace
-            if (norm < tol) {
-                break;
-            }
-        } else {
-            #pragma omp parallel for
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i];
-            }
+        //     // If still too small, we've reached an invariant subspace
+        //     if (norm < tol) {
+        //         break;
+        //     }
+        // } else {
+        //     #pragma omp parallel for
+        //     for (int i = 0; i < N; i++) {
+        //         v_next[i] = w[i];
+        //     }
+        // }
+        #pragma omp parallel for
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i];
         }
-        
         beta.push_back(norm);
         
         // Normalize v_next
@@ -393,14 +385,14 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         cblas_zscal(N, &scale_factor, v_next.data(), 1);
         
         // Store basis vector
-        if (j < max_iter - 1) {
-            basis_vectors.push_back(v_next);
+        if (eigenvectors){
+            if (j < max_iter - 1) {
+                basis_vectors.push_back(v_next);
+            }
         }
-        
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
-        end = std::chrono::high_resolution_clock::now();
     }
     
     // Construct and solve tridiagonal matrix
@@ -1553,7 +1545,8 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     const std::vector<double>& eigenvalues,
     double T_min = 0.01,
     double T_max = 10.0,
-    int num_points = 100
+    int num_points = 100,
+    double k_B = 1.0  // Set to 1.0 for natural units, or use 8.6173e-5 for eV/K
 ) {
     // Initialize results structure
     ThermodynamicData results;
@@ -1563,6 +1556,9 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     results.entropy.resize(num_points);
     results.free_energy.resize(num_points);
     
+    // Find ground state energy for normalization
+    double E_0 = eigenvalues.empty() ? 0.0 : *std::min_element(eigenvalues.begin(), eigenvalues.end());
+    
     // Generate logarithmically spaced temperature points
     const double log_T_min = std::log(T_min);
     const double log_T_max = std::log(T_max);
@@ -1571,40 +1567,61 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     for (int i = 0; i < num_points; i++) {
         results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
     }
-    double k_B = 0.08620689655;
+    
     // For each temperature point
     for (int i = 0; i < num_points; i++) {
         double T = results.temperatures[i];
         double beta = 1.0 / T;
         
-        // Calculate partition function Z = ∑_i exp(-βE_i)
-        double Z = 0.0;
-        for (double E : eigenvalues) {
-            Z += std::exp(-beta * E);
+        if (eigenvalues.empty()) {
+            results.energy[i] = 0.0;
+            results.specific_heat[i] = 0.0;
+            results.free_energy[i] = 0.0;
+            results.entropy[i] = 0.0;
+            continue;
         }
         
-        // Calculate average energy <E> = ∑_i E_i * exp(-βE_i) / Z
+        // Calculate log(Z) using log-sum-exp trick to avoid overflow
+        double max_exp = -beta * (eigenvalues[0] - E_0);
+        for (size_t j = 1; j < eigenvalues.size(); j++) {
+            max_exp = std::max(max_exp, -beta * (eigenvalues[j] - E_0));
+        }
+        
+        // Calculate partition function in log space
+        std::vector<double> exp_terms(eigenvalues.size());
+        for (size_t j = 0; j < eigenvalues.size(); j++) {
+            exp_terms[j] = -beta * (eigenvalues[j] - E_0) - max_exp;
+        }
+        
+        double sum_exp = 0.0;
+        for (double term : exp_terms) {
+            sum_exp += std::exp(term);
+        }
+        double log_Z = max_exp + std::log(sum_exp) - beta * E_0;
+        
+        // Calculate energy using logarithmic weights
         double avg_energy = 0.0;
-        for (double E : eigenvalues) {
-            avg_energy += E * std::exp(-beta * E);
+        double Z = std::exp(log_Z);
+        for (size_t j = 0; j < eigenvalues.size(); j++) {
+            double weight = std::exp(-beta * eigenvalues[j]) / Z;
+            avg_energy += eigenvalues[j] * weight;
         }
-        avg_energy /= Z;
         
-        // Calculate average energy squared <E²> = ∑_i E_i² * exp(-βE_i) / Z
+        // Calculate energy squared directly
         double avg_energy_squared = 0.0;
-        for (double E : eigenvalues) {
-            avg_energy_squared += E * E * std::exp(-beta * E);
+        for (size_t j = 0; j < eigenvalues.size(); j++) {
+            double weight = std::exp(-beta * eigenvalues[j]) / Z;
+            avg_energy_squared += eigenvalues[j] * eigenvalues[j] * weight;
         }
-        avg_energy_squared /= Z;
         
-        // Calculate free energy F = -T * ln(Z)
-        double free_energy = -T * std::log(Z);
+        // Calculate free energy
+        double free_energy = -T * log_Z;
         
-        // Calculate specific heat C_v = β² * (<E²> - <E>²)
+        // Calculate specific heat
         double specific_heat = k_B * beta * beta * (avg_energy_squared - avg_energy * avg_energy);
         
-        // Calculate entropy S = (E - F) / T
-        double entropy = (avg_energy - free_energy) / T;
+        // Calculate entropy
+        double entropy = k_B * (beta * avg_energy - free_energy / T);
         
         // Store results
         results.energy[i] = avg_energy;
@@ -3090,6 +3107,23 @@ int main(int argc, char* argv[]) {
         std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
     }
     
+    // Load eigenvalues from file instead of full diagonalization
+    // std::cout << "Reading eigenvalues from ED_test_full_spectrum.dat..." << std::endl;
+    // std::ifstream eigenvalue_input("ED_test_full_spectrum.dat");
+    // eigenvalues.clear();
+
+    // if (eigenvalue_input.is_open()) {
+    //     double value;
+    //     while (eigenvalue_input >> value) {
+    //         eigenvalues.push_back(value);
+    //     }
+    //     eigenvalue_input.close();
+    //     std::cout << "Read " << eigenvalues.size() << " eigenvalues from file" << std::endl;
+    // } else {
+    //     std::cerr << "Failed to open ED_test_full_spectrum.dat" << std::endl;
+    //     return 1;
+    // }
+
     // Calculate thermodynamics from spectrum
     std::cout << "Calculating thermodynamic properties..." << std::endl;
     double T_min = 0.001;
