@@ -138,21 +138,48 @@ ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_d
     return v;
 }
 
-void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
-             double tol, std::vector<double>& eigenvalues, 
-             std::vector<ComplexVector>* eigenvectors = nullptr) {
+void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+                 double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                 bool eigenvectors = false) {
     
     // Initialize CUDA
     initCUDA();
-
+    
     // Initialize random starting vector
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    ComplexVector v_current = generateRandomVector(N, gen, dist);
+    ComplexVector v_current(N);
     
-    // Initialize Lanczos vectors and coefficients
-    std::vector<ComplexVector> basis_vectors;
-    basis_vectors.push_back(v_current);
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        #pragma omp critical
+        {
+            v_current[i] = Complex(dist(gen), dist(gen));
+        }
+    }
+
+    std::cout << "Lanczos CUDA: Initial vector generated" << std::endl;
+    
+    // Normalize the starting vector
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir + "/lanczos_cuda_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+
+    // Write the first basis vector to file
+    std::string basis_file = temp_dir + "/basis_0.bin";
+    std::ofstream outfile(basis_file, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+        cleanupCUDA();
+        return;
+    }
+    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
+    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -165,24 +192,47 @@ void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, i
     
     max_iter = std::min(N, max_iter);
     
+    std::cout << "Begin Lanczos CUDA iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Lanczos CUDA: Iterating..." << std::endl;
+    
     // GPU memory allocation for vectors
     DeviceMemory<cuDoubleComplex> d_v_current(N);
     DeviceMemory<cuDoubleComplex> d_v_prev(N);
     DeviceMemory<cuDoubleComplex> d_v_next(N);
     DeviceMemory<cuDoubleComplex> d_w(N);
     
-    d_v_current.copyToDevice(reinterpret_cast<cuDoubleComplex*>(v_current.data()), N);
-    d_v_prev.copyToDevice(reinterpret_cast<cuDoubleComplex*>(v_prev.data()), N);
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
+        std::string basis_file = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ifstream infile(basis_file, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << basis_file << " for reading" << std::endl;
+            return ComplexVector(N);
+        }
+        ComplexVector v(N);
+        infile.read(reinterpret_cast<char*>(v.data()), N * sizeof(Complex));
+        infile.close();
+        return v;
+    };
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
-        // Copy current vector to host for matrix-vector product
-        d_v_current.copyToHost(reinterpret_cast<cuDoubleComplex*>(v_current.data()), N);
+        // Load vectors from disk if necessary
+        if (j > 0) {
+            v_prev = read_basis_vector(j-1, N);
+            v_current = read_basis_vector(j, N);
+        }
+        
+        // Copy vectors to device
+        d_v_current.copyToDevice(reinterpret_cast<cuDoubleComplex*>(v_current.data()), N);
+        d_v_prev.copyToDevice(reinterpret_cast<cuDoubleComplex*>(v_prev.data()), N);
         
         // w = H*v_j (using provided CPU function)
         H(v_current.data(), w.data(), N);
         
-        // Copy result back to device
+        // Copy result to device
         d_w.copyToDevice(reinterpret_cast<cuDoubleComplex*>(w.data()), N);
         
         // w = w - beta_j * v_{j-1}
@@ -197,108 +247,82 @@ void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, i
         alpha.push_back(cuCreal(dot_product));  // α should be real for Hermitian operators
         
         // w = w - alpha_j * v_j
-        cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha[j], 0.0);
+        cuDoubleComplex neg_alpha = make_cuDoubleComplex(-alpha.back(), 0.0);
         cublasCheckError(cublasZaxpy(cublasHandle, N, &neg_alpha, d_v_current.get(), 1, d_w.get(), 1));
         
-        // Full reorthogonalization (twice for numerical stability)
-        for (int iter = 0; iter < 2; iter++) {
-            for (size_t k = 0; k <= j; k++) {
-                // Get basis vector k
-                DeviceMemory<cuDoubleComplex> d_basis_k(N);
-                d_basis_k.copyToDevice(reinterpret_cast<cuDoubleComplex*>(basis_vectors[k].data()), N);
-                
-                // Compute overlap
-                cuDoubleComplex overlap;
-                cublasCheckError(cublasZdotc(cublasHandle, N, d_basis_k.get(), 1, d_w.get(), 1, &overlap));
-                
-                // Orthogonalize
-                cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(overlap), -cuCimag(overlap));
-                cublasCheckError(cublasZaxpy(cublasHandle, N, &neg_overlap, d_basis_k.get(), 1, d_w.get(), 1));
-            }
-        }
-        
-        // beta_{j+1} = ||w||
+        // Calculate ||w||
         double norm;
         cublasCheckError(cublasDznrm2(cublasHandle, N, d_w.get(), 1, &norm));
         
         // Check for invariant subspace
         if (norm < tol) {
-            // Generate a random vector orthogonal to basis
-            v_next = generateRandomVector(N, gen, dist);
-            d_v_next.copyToDevice(reinterpret_cast<cuDoubleComplex*>(v_next.data()), N);
-            
-            // Orthogonalize against all basis vectors
-            for (int iter = 0; iter < 2; iter++) {
-                for (size_t k = 0; k < basis_vectors.size(); k++) {
-                    DeviceMemory<cuDoubleComplex> d_basis_k(N);
-                    d_basis_k.copyToDevice(reinterpret_cast<cuDoubleComplex*>(basis_vectors[k].data()), N);
-                    
-                    cuDoubleComplex overlap;
-                    cublasCheckError(cublasZdotc(cublasHandle, N, d_basis_k.get(), 1, d_v_next.get(), 1, &overlap));
-                    
-                    cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(overlap), -cuCimag(overlap));
-                    cublasCheckError(cublasZaxpy(cublasHandle, N, &neg_overlap, d_basis_k.get(), 1, d_v_next.get(), 1));
-                }
-            }
-            
-            // Update the norm
-            cublasCheckError(cublasDznrm2(cublasHandle, N, d_v_next.get(), 1, &norm));
-            
-            // If still too small, we've reached an invariant subspace
-            if (norm < tol) {
-                break;
-            }
-        } else {
-            // Copy w to v_next
-            cudaCheckError(cudaMemcpy(d_v_next.get(), d_w.get(), N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
+            std::cout << "Lanczos CUDA: Found invariant subspace at iteration " << j << std::endl;
+            break;
         }
         
         beta.push_back(norm);
         
-        // Normalize v_next
-        cuDoubleComplex scale_factor = make_cuDoubleComplex(1.0/norm, 0.0);
-        cublasCheckError(cublasZscal(cublasHandle, N, &scale_factor, d_v_next.get(), 1));
+        // Normalize w to get v_{j+1}
+        cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
+        cublasCheckError(cublasZscal(cublasHandle, N, &scale, d_w.get(), 1));
         
-        // Copy v_next back to host for storage in basis_vectors
-        d_v_next.copyToHost(reinterpret_cast<cuDoubleComplex*>(v_next.data()), N);
+        // Copy v_{j+1} back to host
+        d_w.copyToHost(reinterpret_cast<cuDoubleComplex*>(v_next.data()), N);
         
-        // Store basis vector
+        // Write v_{j+1} to disk if needed for next iteration
         if (j < max_iter - 1) {
-            basis_vectors.push_back(v_next);
+            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
+            std::ofstream outfile(next_basis_file, std::ios::binary);
+            if (!outfile) {
+                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                cleanupCUDA();
+                system(("rm -rf " + temp_dir).c_str());
+                return;
+            }
+            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
+            outfile.close();
         }
-        
-        // Update for next iteration
-        cudaCheckError(cudaMemcpy(d_v_prev.get(), d_v_current.get(), N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
-        cudaCheckError(cudaMemcpy(d_v_current.get(), d_v_next.get(), N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToDevice));
     }
     
     // Construct and solve tridiagonal matrix
     int m = alpha.size();
     
-    // Allocate arrays for cuSOLVER
-    DeviceMemory<double> d_diag(m);
-    DeviceMemory<double> d_offdiag(m-1);
-    d_diag.copyToDevice(alpha.data(), m);
+    std::cout << "Lanczos CUDA: Constructing tridiagonal matrix" << std::endl;
+
+    // Allocate arrays for LAPACKE
+    std::vector<double> diag = alpha;    // Copy of diagonal elements
+    std::vector<double> offdiag(m-1);    // Off-diagonal elements
     
-    std::vector<double> offdiag(m-1);
+    #pragma omp parallel for
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
-    d_offdiag.copyToDevice(offdiag.data(), m-1);
+
+    std::cout << "Lanczos CUDA: Solving tridiagonal matrix" << std::endl;
     
-    // Create output arrays for eigenvalues
+    // Save only the first exct eigenvalues, or all of them if m < exct
+    int n_eigenvalues = std::min(exct, m);
+    
+    // Device memory for eigenvalue computation
+    DeviceMemory<double> d_diag(m);
+    DeviceMemory<double> d_offdiag(m-1);
     DeviceMemory<double> d_evals(m);
     DeviceMemory<double> d_evecs;
     
+    d_diag.copyToDevice(diag.data(), m);
+    d_offdiag.copyToDevice(offdiag.data(), m-1);
+    
+    // Workspace parameters
+    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
+    
     // Query working space requirements
     int lwork = 0;
-    char jobz = eigenvectors ? 'V' : 'N';
     cusolverEigMode_t jobz_cusolver = eigenvectors ? CUSOLVER_EIG_MODE_VECTOR : CUSOLVER_EIG_MODE_NOVECTOR;
     
-    // Convert tridiagonal to full symmetric matrix for use with Dsyevd
+    // Convert to full symmetric matrix for cuSOLVER
     std::vector<double> symMatrix(m * m, 0.0);
     for (int i = 0; i < m; i++) {
-        symMatrix[i * m + i] = alpha[i]; // Diagonal
+        symMatrix[i * m + i] = diag[i]; // Diagonal
         if (i < m - 1) {
             symMatrix[i * m + (i+1)] = offdiag[i]; // Upper diagonal
             symMatrix[(i+1) * m + i] = offdiag[i]; // Lower diagonal
@@ -309,6 +333,7 @@ void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, i
     DeviceMemory<double> d_symMatrix(m * m);
     d_symMatrix.copyToDevice(symMatrix.data(), m * m);
     
+    // Allocate info variable
     int* d_info;
     cudaCheckError(cudaMalloc(&d_info, sizeof(int)));
     
@@ -325,149 +350,111 @@ void lanczos_cuda(std::function<void(const Complex*, Complex*, int)> H, int N, i
         cusolverHandle, jobz_cusolver, CUBLAS_FILL_MODE_LOWER, m, 
         d_symMatrix.get(), m, d_evals.get(), d_work.get(), lwork, d_info));
     
-    // Extract eigenvectors from the full matrix solution if needed
-    if (eigenvectors) {
-        DeviceMemory<double> d_temp_evecs(m * m);
-        cudaCheckError(cudaMemcpy(d_temp_evecs.get(), d_symMatrix.get(), m * m * sizeof(double), cudaMemcpyDeviceToDevice));
-        d_evecs.allocate(m * m);
-        cudaCheckError(cudaMemcpy(d_evecs.get(), d_temp_evecs.get(), m * m * sizeof(double), cudaMemcpyDeviceToDevice));
-    }
-
-    
-    // Allocate memory for eigenvectors if needed
-    if (eigenvectors) {
-        d_evecs.allocate(m*m);
-    }
-    
     // Check for errors
     int info;
     cudaCheckError(cudaMemcpy(&info, d_info, sizeof(int), cudaMemcpyDeviceToHost));
-    
-    if (info != 0) {
-        std::cerr << "cusolverDnDstevd failed with error code " << info << std::endl;
-        cudaFree(d_info);
-        return;
-    }
     cudaFree(d_info);
     
-    // Copy eigenvalues to host
-    eigenvalues.resize(m);
-    d_evals.copyToHost(eigenvalues.data(), m);
+    if (info != 0) {
+        std::cerr << "cusolverDnDsyevd failed with error code " << info << std::endl;
+        cleanupCUDA();
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
     
-    // If eigenvectors requested, transform back to original basis
+    // Copy eigenvalues to host
+    eigenvalues.resize(n_eigenvalues);
+    d_evals.copyToHost(eigenvalues.data(), n_eigenvalues);
+    
+    // Write eigenvalues and eigenvectors to files
+    std::string evec_dir = dir + "/lanczos_cuda_eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+    
+    // Save eigenvalues to a single file
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Transform eigenvectors if requested
     if (eigenvectors) {
-        // Bring eigenvectors back to host
-        std::vector<double> evecs(m*m);
-        d_evecs.copyToHost(evecs.data(), m*m);
+        std::cout << "Lanczos CUDA: Transforming eigenvectors back to original basis" << std::endl;
         
-        // Identify clusters of degenerate eigenvalues
-        const double degen_tol = 1e-10;
-        std::vector<std::vector<int>> degen_clusters;
-        
-        for (int i = 0; i < m; i++) {
-            bool added_to_cluster = false;
-            for (auto& cluster : degen_clusters) {
-                if (std::abs(eigenvalues[i] - eigenvalues[cluster[0]]) < degen_tol) {
-                    cluster.push_back(i);
-                    added_to_cluster = true;
-                    break;
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int start_idx = 0; start_idx < n_eigenvalues; start_idx += batch_size) {
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
+            int batch_n = end_idx - start_idx;
+            
+            std::vector<ComplexVector> batch_evecs(batch_n, ComplexVector(N));
+            
+            // Extract Lanczos basis eigenvectors
+            std::vector<double> lanczos_evecs(m * batch_n);
+            for (int i = 0; i < batch_n; i++) {
+                for (int j = 0; j < m; j++) {
+                    lanczos_evecs[i*m + j] = static_cast<double>(d_symMatrix.get()[j*m + (start_idx + i)]);
                 }
             }
-            if (!added_to_cluster) {
-                degen_clusters.push_back({i});
-            }
-        }
-        
-        // Transform to original basis and handle degeneracy
-        eigenvectors->clear();
-        eigenvectors->resize(m, ComplexVector(N, Complex(0.0, 0.0)));
-        
-        // Process each cluster - this can be done in parallel with CUDA streams
-        for (size_t cl = 0; cl < degen_clusters.size(); cl++) {
-            const auto& cluster = degen_clusters[cl];
             
-            if (cluster.size() == 1) {
-                // Non-degenerate case - standard treatment
-                int idx = cluster[0];
-                ComplexVector evec(N, Complex(0.0, 0.0));
+            // Transform to original basis in parallel
+            #pragma omp parallel for
+            for (int i = 0; i < batch_n; i++) {
+                ComplexVector& evec = batch_evecs[i];
+                std::fill(evec.begin(), evec.end(), Complex(0.0, 0.0));
                 
-                // Transform on GPU: evec = sum_k z(k,idx) * basis_vectors[k]
                 DeviceMemory<cuDoubleComplex> d_evec(N);
                 cudaCheckError(cudaMemset(d_evec.get(), 0, N * sizeof(cuDoubleComplex)));
                 
-                for (int k = 0; k < m; k++) {
-                    DeviceMemory<cuDoubleComplex> d_basis_k(N);
-                    d_basis_k.copyToDevice(reinterpret_cast<cuDoubleComplex*>(basis_vectors[k].data()), N);
+                for (int j = 0; j < m; j++) {
+                    double coef = lanczos_evecs[i*m + j];
+                    ComplexVector basis_j = read_basis_vector(j, N);
                     
-                    cuDoubleComplex coeff = make_cuDoubleComplex(evecs[k*m + idx], 0.0);
-                    cublasCheckError(cublasZaxpy(cublasHandle, N, &coeff, d_basis_k.get(), 1, d_evec.get(), 1));
+                    DeviceMemory<cuDoubleComplex> d_basis_j(N);
+                    d_basis_j.copyToDevice(reinterpret_cast<cuDoubleComplex*>(basis_j.data()), N);
+                    
+                    cuDoubleComplex cuda_coef = make_cuDoubleComplex(coef, 0.0);
+                    cublasCheckError(cublasZaxpy(cublasHandle, N, &cuda_coef, d_basis_j.get(), 1, d_evec.get(), 1));
                 }
                 
                 // Normalize
                 double norm;
                 cublasCheckError(cublasDznrm2(cublasHandle, N, d_evec.get(), 1, &norm));
-                cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
-                cublasCheckError(cublasZscal(cublasHandle, N, &scale, d_evec.get(), 1));
-                
-                // Copy result back to host
-                d_evec.copyToHost(reinterpret_cast<cuDoubleComplex*>(evec.data()), N);
-                (*eigenvectors)[idx] = evec;
-            } else {
-                // Degenerate case - special handling
-                int subspace_dim = cluster.size();
-                std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N, Complex(0.0, 0.0)));
-                std::vector<DeviceMemory<cuDoubleComplex>> d_subspace_vectors(subspace_dim);
-                
-                // Compute raw eigenvectors in original basis
-                for (int c = 0; c < subspace_dim; c++) {
-                    d_subspace_vectors[c].allocate(N);
-                    cudaCheckError(cudaMemset(d_subspace_vectors[c].get(), 0, N * sizeof(cuDoubleComplex)));
-                    
-                    int idx = cluster[c];
-                    for (int k = 0; k < m; k++) {
-                        DeviceMemory<cuDoubleComplex> d_basis_k(N);
-                        d_basis_k.copyToDevice(reinterpret_cast<cuDoubleComplex*>(basis_vectors[k].data()), N);
-                        
-                        cuDoubleComplex coeff = make_cuDoubleComplex(evecs[k*m + idx], 0.0);
-                        cublasCheckError(cublasZaxpy(cublasHandle, N, &coeff, d_basis_k.get(), 1, d_subspace_vectors[c].get(), 1));
-                    }
+                if (norm > 1e-10) {
+                    cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
+                    cublasCheckError(cublasZscal(cublasHandle, N, &scale, d_evec.get(), 1));
                 }
                 
-                // Re-orthogonalize within degenerate subspace
-                for (int c = 0; c < subspace_dim; c++) {
-                    // Normalize current vector
-                    double norm;
-                    cublasCheckError(cublasDznrm2(cublasHandle, N, d_subspace_vectors[c].get(), 1, &norm));
-                    cuDoubleComplex scale = make_cuDoubleComplex(1.0/norm, 0.0);
-                    cublasCheckError(cublasZscal(cublasHandle, N, &scale, d_subspace_vectors[c].get(), 1));
-                    
-                    // Orthogonalize against previous vectors
-                    for (int prev = 0; prev < c; prev++) {
-                        cuDoubleComplex overlap;
-                        cublasCheckError(cublasZdotc(cublasHandle, N, d_subspace_vectors[prev].get(), 1, d_subspace_vectors[c].get(), 1, &overlap));
-                        
-                        cuDoubleComplex neg_overlap = make_cuDoubleComplex(-cuCreal(overlap), -cuCimag(overlap));
-                        cublasCheckError(cublasZaxpy(cublasHandle, N, &neg_overlap, d_subspace_vectors[prev].get(), 1, d_subspace_vectors[c].get(), 1));
-                    }
-                    
-                    // Renormalize if necessary
-                    cublasCheckError(cublasDznrm2(cublasHandle, N, d_subspace_vectors[c].get(), 1, &norm));
-                    if (norm > tol) {
-                        scale = make_cuDoubleComplex(1.0/norm, 0.0);
-                        cublasCheckError(cublasZscal(cublasHandle, N, &scale, d_subspace_vectors[c].get(), 1));
-                    }
-                    
-                    // Copy back to host and store
-                    int idx = cluster[c];
-                    d_subspace_vectors[c].copyToHost(reinterpret_cast<cuDoubleComplex*>(subspace_vectors[c].data()), N);
-                    (*eigenvectors)[idx] = subspace_vectors[c];
+                // Copy back to host
+                d_evec.copyToHost(reinterpret_cast<cuDoubleComplex*>(evec.data()), N);
+                
+                // Save eigenvector to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(start_idx + i) + ".bin";
+                std::ofstream outfile(evec_file, std::ios::binary);
+                if (outfile) {
+                    outfile.write(reinterpret_cast<char*>(evec.data()), N * sizeof(Complex));
+                    outfile.close();
                 }
             }
         }
-        
-        // Optionally refine eigenvectors using conjugate gradient
-        // This would need a CUDA implementation of refine_eigenvector_with_cg
     }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+    
+    // Clean up CUDA resources
+    cleanupCUDA();
+    
+    std::cout << "Lanczos CUDA: Completed successfully" << std::endl;
 }
 
 

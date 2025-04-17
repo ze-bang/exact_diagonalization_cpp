@@ -2609,6 +2609,409 @@ void arpack_diagonalization(std::function<void(const Complex*, Complex*, int)> H
         }
     }
 }
+
+// Thermal Pure Quantum (TPQ) state methods for thermodynamic calculations
+
+// Generate a canonical TPQ state by applying (H - E)^k to a random vector
+ComplexVector generate_tpq_state(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                                 // Hilbert space dimension
+    double E_offset,                                       // Energy offset
+    int k = 1,                                             // Power of (H - E)
+    double tol = 1e-10                                     // Tolerance
+) {
+    // Create a random initial state
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    ComplexVector tpq_state(N);
+    for (int i = 0; i < N; i++) {
+        tpq_state[i] = Complex(dist(gen), dist(gen));
+    }
+    
+    // Normalize
+    double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+    Complex scale = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, tpq_state.data(), 1);
+    
+    // Apply (H - E)^k
+    ComplexVector temp_state(N);
+    
+    for (int i = 0; i < k; i++) {
+        // Apply H to current state
+        H(tpq_state.data(), temp_state.data(), N);
+        
+        // Subtract E * current state
+        for (int j = 0; j < N; j++) {
+            temp_state[j] -= E_offset * tpq_state[j];
+        }
+        
+        // Normalize
+        norm = cblas_dznrm2(N, temp_state.data(), 1);
+        if (norm < tol) {
+            // If norm is too small, we've probably hit an eigenstate
+            std::cout << "Warning: TPQ generation may have converged to an eigenstate at step " << i + 1 << std::endl;
+            break;
+        }
+        
+        scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, temp_state.data(), 1);
+        
+        // Update for next iteration
+        tpq_state = temp_state;
+    }
+    
+    return tpq_state;
+}
+
+// Calculate the effective inverse temperature (beta) of a TPQ state
+double calculate_tpq_beta(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    const ComplexVector& tpq_state,                        // TPQ state
+    int N,                                                 // Hilbert space dimension
+    double E_ref = 0.0                                     // Energy reference (usually ground state)
+) {
+    // Calculate <H>
+    ComplexVector H_tpq(N);
+    H(tpq_state.data(), H_tpq.data(), N);
+    
+    Complex energy_exp;
+    cblas_zdotc_sub(N, tpq_state.data(), 1, H_tpq.data(), 1, &energy_exp);
+    double energy = std::real(energy_exp);
+    
+    // Calculate <H²>
+    ComplexVector H2_tpq(N);
+    H(H_tpq.data(), H2_tpq.data(), N);
+    
+    Complex energy2_exp;
+    cblas_zdotc_sub(N, tpq_state.data(), 1, H2_tpq.data(), 1, &energy2_exp);
+    double energy2 = std::real(energy2_exp);
+    
+    // Variance of H
+    double var_H = energy2 - energy * energy;
+    
+    // Effective inverse temperature: β = 2*(⟨H⟩ - E_ref)/⟨(H-⟨H⟩)²⟩
+    if (var_H < 1e-10) {
+        return std::numeric_limits<double>::infinity(); // If variance is zero, we have an eigenstate
+    }
+    
+    return 2.0 * (energy - E_ref) / var_H;
+}
+
+// Calculate thermodynamic quantities from a TPQ state
+struct TPQThermodynamics {
+    double beta;       // Inverse temperature
+    double energy;     // Energy
+    double specific_heat;
+    double entropy;
+    double free_energy;
+};
+
+TPQThermodynamics calculate_tpq_thermodynamics(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    const ComplexVector& tpq_state,                        // TPQ state
+    int N,                                                 // Hilbert space dimension
+    double E_ref = 0.0                                     // Energy reference (usually ground state)
+) {
+    // Calculate <H>
+    ComplexVector H_tpq(N);
+    H(tpq_state.data(), H_tpq.data(), N);
+    
+    Complex energy_exp;
+    cblas_zdotc_sub(N, tpq_state.data(), 1, H_tpq.data(), 1, &energy_exp);
+    double energy = std::real(energy_exp);
+    
+    // Calculate <H²>
+    ComplexVector H2_tpq(N);
+    H(H_tpq.data(), H2_tpq.data(), N);
+    
+    Complex energy2_exp;
+    cblas_zdotc_sub(N, tpq_state.data(), 1, H2_tpq.data(), 1, &energy2_exp);
+    double energy2 = std::real(energy2_exp);
+    
+    // Variance of H
+    double var_H = energy2 - energy * energy;
+    
+    // Effective inverse temperature
+    double beta = 2.0 * (energy - E_ref) / var_H;
+    double temperature = (beta > 1e-10) ? 1.0 / beta : std::numeric_limits<double>::infinity();
+    
+    // Specific heat: C = beta² * var_H
+    double specific_heat = beta * beta * var_H;
+    
+    // Entropy and free energy require additional approximations
+    // For canonical TPQ states, entropy can be approximated as S ≈ ln(D) - β²*var_H/2
+    // where D is the Hilbert space dimension
+    double entropy = std::log(N) - beta * beta * var_H / 2.0;
+    
+    // Free energy: F = E - TS
+    double free_energy = energy - temperature * entropy;
+    
+    return {beta, energy, specific_heat, entropy, free_energy};
+}
+
+// Calculate expectation value of an observable using a TPQ state
+Complex calculate_tpq_expectation(
+    std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
+    const ComplexVector& tpq_state,                        // TPQ state
+    int N                                                 // Hilbert space dimension
+) {
+    ComplexVector A_tpq(N);
+    A(tpq_state.data(), A_tpq.data(), N);
+    
+    Complex expectation;
+    cblas_zdotc_sub(N, tpq_state.data(), 1, A_tpq.data(), 1, &expectation);
+    
+    return expectation;
+}
+
+// Main TPQ implementation for temperature scanning
+struct TPQResults {
+    std::vector<double> betas;           // Inverse temperatures
+    std::vector<double> temperatures;    // Temperatures
+    std::vector<double> energies;        // Energies
+    std::vector<double> specific_heats;  // Specific heats
+    std::vector<double> entropies;       // Entropies
+    std::vector<double> free_energies;   // Free energies
+    std::vector<std::vector<Complex>> observables; // Observable expectation values
+};
+
+TPQResults perform_tpq_calculation(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                                 // Hilbert space dimension
+    int num_samples = 20,                                 // Number of TPQ samples
+    int max_k = 50,                                       // Maximum power for (H-E)^k
+    double E_min = -1.0,                                  // Minimum energy offset 
+    double E_max = 1.0,                                   // Maximum energy offset
+    double E_ref = 0.0,                                   // Energy reference
+    double beta_min = 0.01,                               // Minimum inverse temperature
+    double beta_max = 100.0,                              // Maximum inverse temperature
+    int num_beta_bins = 100,                             // Number of temperature bins
+    std::vector<std::function<void(const Complex*, Complex*, int)>> observables = {}  // Optional observables
+) {
+    TPQResults results;
+    
+    // Initialize result containers
+    results.betas.resize(num_beta_bins, 0.0);
+    results.temperatures.resize(num_beta_bins, 0.0);
+    results.energies.resize(num_beta_bins, 0.0);
+    results.specific_heats.resize(num_beta_bins, 0.0);
+    results.entropies.resize(num_beta_bins, 0.0);
+    results.free_energies.resize(num_beta_bins, 0.0);
+    
+    // Initialize counters for each bin
+    std::vector<int> bin_counts(num_beta_bins, 0);
+    
+    // Initialize bins for beta values
+    double log_beta_min = std::log(beta_min);
+    double log_beta_max = std::log(beta_max);
+    double log_beta_step = (log_beta_max - log_beta_min) / (num_beta_bins - 1);
+    
+    for (int i = 0; i < num_beta_bins; i++) {
+        results.betas[i] = std::exp(log_beta_min + i * log_beta_step);
+        results.temperatures[i] = 1.0 / results.betas[i];
+    }
+    
+    // Initialize observable containers if provided
+    if (!observables.empty()) {
+        results.observables.resize(observables.size(), std::vector<Complex>(num_beta_bins, Complex(0.0, 0.0)));
+    }
+    
+    std::cout << "TPQ: Starting calculations with " << num_samples << " samples" << std::endl;
+    
+    // Generate TPQ states with different energy offsets and powers
+    for (int sample = 0; sample < num_samples; sample++) {
+        // Randomly choose energy offset between E_min and E_max
+        double energy_offset = E_min + (E_max - E_min) * static_cast<double>(sample) / num_samples;
+        
+        // Generate multiple states with different powers
+        for (int k = 1; k <= max_k; k += 2) { // Increment by 2 for efficiency
+            // Generate TPQ state
+            ComplexVector tpq_state = generate_tpq_state(H, N, energy_offset, k);
+            
+            // Calculate thermodynamics
+            auto thermo = calculate_tpq_thermodynamics(H, tpq_state, N, E_ref);
+            
+            // Determine which beta bin this state belongs to
+            double log_beta = std::log(thermo.beta);
+            int bin = static_cast<int>((log_beta - log_beta_min) / log_beta_step);
+            
+            // Skip if outside our temperature range
+            if (bin < 0 || bin >= num_beta_bins) {
+                continue;
+            }
+            
+            // Accumulate thermodynamic data
+            bin_counts[bin]++;
+            results.energies[bin] += thermo.energy;
+            results.specific_heats[bin] += thermo.specific_heat;
+            results.entropies[bin] += thermo.entropy;
+            results.free_energies[bin] += thermo.free_energy;
+            
+            // Calculate observables if provided
+            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+                Complex exp_val = calculate_tpq_expectation(observables[obs_idx], tpq_state, N);
+                results.observables[obs_idx][bin] += exp_val;
+            }
+            
+            // Progress reporting
+            if ((sample * max_k + k) % 10 == 0) {
+                std::cout << "TPQ: Sample " << sample + 1 << "/" << num_samples 
+                          << ", k = " << k << ", β = " << thermo.beta
+                          << ", E = " << thermo.energy << std::endl;
+            }
+        }
+    }
+    
+    // Average the results over the number of samples in each bin
+    for (int i = 0; i < num_beta_bins; i++) {
+        if (bin_counts[i] > 0) {
+            results.energies[i] /= bin_counts[i];
+            results.specific_heats[i] /= bin_counts[i];
+            results.entropies[i] /= bin_counts[i];
+            results.free_energies[i] /= bin_counts[i];
+            
+            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+                results.observables[obs_idx][i] /= bin_counts[i];
+            }
+            
+            std::cout << "TPQ: Bin " << i << " (β = " << results.betas[i] 
+                      << ") has " << bin_counts[i] << " samples" << std::endl;
+        } else {
+            std::cout << "TPQ: Warning - no samples in bin " << i 
+                      << " (β = " << results.betas[i] << ")" << std::endl;
+        }
+    }
+    
+    return results;
+}
+
+// Generate microcanonical TPQ states for better control over temperature
+ComplexVector generate_microcanonical_tpq(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                                 // Hilbert space dimension
+    double target_energy,                                  // Target energy
+    double energy_window = 0.1,                           // Energy window width
+    int max_iter = 100,                                   // Maximum iterations
+    double tol = 1e-6                                     // Tolerance
+) {
+    // Create a random initial state
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    ComplexVector psi(N);
+    for (int i = 0; i < N; i++) {
+        psi[i] = Complex(dist(gen), dist(gen));
+    }
+    
+    // Normalize
+    double norm = cblas_dznrm2(N, psi.data(), 1);
+    Complex scale = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, psi.data(), 1);
+    
+    // Apply a filter to target the desired energy window
+    // This is approximated by exp(-γ(H-E)²)
+    ComplexVector H_psi(N);
+    ComplexVector H2_psi(N);
+    ComplexVector psi_new(N);
+    
+    for (int iter = 0; iter < max_iter; iter++) {
+        // Calculate current energy expectation
+        H(psi.data(), H_psi.data(), N);
+        Complex energy_exp;
+        cblas_zdotc_sub(N, psi.data(), 1, H_psi.data(), 1, &energy_exp);
+        double current_energy = std::real(energy_exp);
+        
+        // Calculate energy variance
+        H(H_psi.data(), H2_psi.data(), N);
+        Complex energy2_exp;
+        cblas_zdotc_sub(N, psi.data(), 1, H2_psi.data(), 1, &energy2_exp);
+        double energy_var = std::real(energy2_exp) - current_energy * current_energy;
+        
+        std::cout << "Microcanonical TPQ: iter " << iter << ", E = " << current_energy 
+                  << ", var = " << energy_var << std::endl;
+        
+        // Check if we're close enough to target energy with small variance
+        if (std::abs(current_energy - target_energy) < tol && energy_var < energy_window) {
+            std::cout << "Microcanonical TPQ: Converged at iteration " << iter << std::endl;
+            break;
+        }
+        
+        // Adjust filtering parameter based on current energy
+        double gamma = 1.0 / (2.0 * energy_window);
+        if (std::abs(current_energy - target_energy) > energy_window) {
+            gamma = 0.1 / energy_var; // Faster approach when far from target
+        }
+        
+        // Apply filter exp(-γ(H-E)²) using Chebyshev approximation
+        ComplexVector temp1(N), temp2(N);
+        for (int i = 0; i < N; i++) {
+            psi_new[i] = psi[i];
+            temp1[i] = psi[i];
+        }
+        
+        // Subtract target energy: (H-E)|ψ⟩
+        for (int i = 0; i < N; i++) {
+            H_psi[i] -= target_energy * psi[i];
+        }
+        
+        // Apply approximation of exp(-γ(H-E)²) using series expansion
+        Complex coef = Complex(1.0, 0.0);
+        cblas_zaxpy(N, &coef, psi.data(), 1, psi_new.data(), 1);
+        
+        coef = Complex(-gamma, 0.0);
+        for (int i = 0; i < N; i++) {
+            temp2[i] = H_psi[i] * H_psi[i]; // (H-E)²|ψ⟩
+        }
+        cblas_zaxpy(N, &coef, temp2.data(), 1, psi_new.data(), 1);
+        
+        // Normalize the new state
+        norm = cblas_dznrm2(N, psi_new.data(), 1);
+        scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, psi_new.data(), 1);
+        
+        // Update state for next iteration
+        psi = psi_new;
+    }
+    
+    return psi;
+}
+
+// Save TPQ results to file
+void save_tpq_results(const TPQResults& results, const std::string& filename, 
+                     int num_observables = 0) {
+    std::ofstream outfile(filename);
+    if (!outfile.is_open()) {
+        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+        return;
+    }
+    
+    outfile << "# Beta Temperature Energy SpecificHeat Entropy FreeEnergy";
+    for (int i = 0; i < num_observables; i++) {
+        outfile << " Observable" << i << "_Real Observable" << i << "_Imag";
+    }
+    outfile << std::endl;
+    
+    for (size_t i = 0; i < results.betas.size(); i++) {
+        outfile << results.betas[i] << " "
+               << results.temperatures[i] << " "
+               << results.energies[i] << " "
+               << results.specific_heats[i] << " "
+               << results.entropies[i] << " "
+               << results.free_energies[i];
+        
+        for (int j = 0; j < num_observables; j++) {
+            outfile << " " << results.observables[j][i].real()
+                   << " " << results.observables[j][i].imag();
+        }
+        
+        outfile << std::endl;
+    }
+    
+    outfile.close();
+    std::cout << "TPQ results saved to " << filename << std::endl;
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //// Observables
 
@@ -2860,1300 +3263,283 @@ Complex calculate_matrix_element(
     return matrix_element;
 }
 
-
-
-// Finite Temperature Lanczos Method (FTLM)
-// Calculates <A> = Tr(A*e^(-βH))/Tr(e^(-βH)) for inverse temperature β
-Complex FTLM(
-    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
-    std::function<void(const Complex*, Complex*, int)> A, // Observable matrix-vector product
-    int N,             // Dimension of Hilbert space
-    double beta,          // Inverse temperature (β = 1/kT)
-    int r_max = 20,    // Number of random vectors for sampling the trace
-    int m_max = 100,   // Maximum Lanczos iterations per random vector
-    double tol = 1e-10 // Tolerance
-) {
-    // Initialize random number generator
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Accumulators for traces
-    Complex trace_A_exp_H = 0.0;
-    double trace_exp_H = 0.0;
-    
-    // For each random vector
-    for (int r = 0; r < r_max; r++) {
-        // Generate random starting vector
-        ComplexVector v0(N);
-        for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
-        
-        // Store the starting vector as first basis vector
-        std::vector<ComplexVector> basis_vectors;
-        basis_vectors.push_back(v0);
-        
-        // Run Chebyshev filtered Lanczos to get eigenvalues and eigenvectors
-        std::vector<double> evals;
-        std::vector<ComplexVector> evecs;
-        
-        // Call the already implemented chebyshev_filtered_lanczos function
-        chebyshev_filtered_lanczos(H, N, m_max, m_max, tol, evals, &evecs);
-        
-        int m = evals.size();
-        
-        // Compute reduced matrix elements of A in the Lanczos basis
-        std::vector<std::vector<Complex>> A_reduced(m, std::vector<Complex>(m, 0.0));
-        
-        ComplexVector Av(N);
-        for (int i = 0; i < m; i++) {
-            // Apply A to |ψᵢ⟩
-            A(evecs[i].data(), Av.data(), N);
-            
-            // Compute matrix elements ⟨ψⱼ|A|ψᵢ⟩
-            for (int j = 0; j < m; j++) {
-                // Calculate ⟨ψⱼ|A|ψᵢ⟩
-                Complex matrix_element;
-                cblas_zdotc_sub(N, evecs[j].data(), 1, Av.data(), 1, &matrix_element);
-                A_reduced[j][i] = matrix_element;
-            }
-        }
-        
-        // Calculate contributions to the thermal traces
-        for (int i = 0; i < m; i++) {
-            double exp_factor = std::exp(-beta * evals[i]);
-            trace_exp_H += exp_factor;
-            trace_A_exp_H += A_reduced[i][i] * exp_factor;
-        }
-    }
-    
-    // Return thermal average <A> = Tr(A*e^(-βH))/Tr(e^(-βH))
-    return trace_A_exp_H / trace_exp_H;
-}
-
-// Calculate the dynamical correlation function S_AB(ω) using FTLM
-// S_AB(ω) = (1/Z) ∑_n,m e^(-βE_n) ⟨n|A|m⟩⟨m|B|n⟩ δ(ω - (E_m - E_n))
-std::vector<std::pair<double, Complex>> FTLM_dynamical(
+// Finite Temperature Lanczos Method (FTLM) for thermal expectation values
+ThermodynamicData finite_temperature_lanczos_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    std::function<void(const Complex*, Complex*, int)> A,  // First operator
-    std::function<void(const Complex*, Complex*, int)> B,  // Second operator (use A for auto-correlation)
-    int N,                    // Dimension of Hilbert space
-    double beta,              // Inverse temperature β = 1/kT
-    double omega_min,         // Minimum frequency
-    double omega_max,         // Maximum frequency
-    int n_points,             // Number of frequency points
-    double eta,               // Broadening parameter (half-width of Lorentzian)
-    int r_max = 30,           // Number of random vectors for sampling
-    int m_max = 1000           // Maximum Lanczos iterations per random vector
+    int N,                                                // Hilbert space dimension
+    int num_samples = 20,                                 // Number of random starting vectors
+    int m = 100,                                          // Lanczos iterations per sample
+    double T_min = 0.01,                                  // Minimum temperature
+    double T_max = 10.0,                                  // Maximum temperature
+    int num_points = 100,                                 // Number of temperature points
+    std::string dir = "",                                 // Directory for temporary files
+    std::vector<std::function<void(const Complex*, Complex*, int)>> observables = {} // Optional observables
 ) {
-    // Generate frequency grid
-    std::vector<double> omega_values(n_points);
-    double delta_omega = (omega_max - omega_min) / (n_points - 1);
-    for (int i = 0; i < n_points; i++) {
-        omega_values[i] = omega_min + i * delta_omega;
+    ThermodynamicData results;
+    
+    // Generate logarithmically spaced temperature points
+    results.temperatures.resize(num_points);
+    const double log_T_min = std::log(T_min);
+    const double log_T_max = std::log(T_max);
+    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
+    
+    for (int i = 0; i < num_points; i++) {
+        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
     }
     
-    // Initialize result vector with zeros
-    std::vector<Complex> response(n_points, Complex(0.0, 0.0));
+    // Initialize results vectors
+    results.energy.resize(num_points, 0.0);
+    results.specific_heat.resize(num_points, 0.0);
+    results.entropy.resize(num_points, 0.0);
+    results.free_energy.resize(num_points, 0.0);
     
-    // Initialize random number generator
+    // Vectors for accumulating values across samples
+    std::vector<double> Z_T(num_points, 0.0);  // Partition function
+    std::vector<double> E_T(num_points, 0.0);  // Energy
+    std::vector<double> E2_T(num_points, 0.0); // Energy squared
+    
+    // Vectors for observable expectation values if provided
+    std::vector<std::vector<Complex>> obs_values;
+    if (!observables.empty()) {
+        obs_values.resize(observables.size(), std::vector<Complex>(num_points, Complex(0.0, 0.0)));
+    }
+    
+    // Create random number generator
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Accumulators for the partition function
-    double Z = 0.0;
+    // Create directory for temporary files
+    std::string temp_dir = dir + "/ftlm_temp";
+    system(("mkdir -p " + temp_dir).c_str());
     
-    // For each random vector
-    for (int r = 0; r < r_max; r++) {
+    std::cout << "FTLM: Starting with " << num_samples << " samples, " 
+              << m << " Lanczos iterations per sample" << std::endl;
+    
+    // Loop over random samples
+    for (int sample = 0; sample < num_samples; sample++) {
+        std::cout << "FTLM: Processing sample " << sample + 1 << " of " << num_samples << std::endl;
+        
         // Generate random starting vector
-        ComplexVector v0(N);
+        ComplexVector v_start(N);
         for (int i = 0; i < N; i++) {
-            v0[i] = Complex(dist(gen), dist(gen));
+            v_start[i] = Complex(dist(gen), dist(gen));
         }
         
         // Normalize
-        double norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, v0.data(), 1);
+        double norm = cblas_dznrm2(N, v_start.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, v_start.data(), 1);
         
-        // Create a modified Hamiltonian operator that starts from our random vector
-        auto H_from_v0 = [&H, &v0, N](const Complex* v, Complex* result, int size) {
-            // If v is the unit vector e_0 = [1,0,0,...], we return H*v0
-            // Otherwise we apply H normally
-            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
-                bool is_e0 = true;
-                for (int i = 1; i < size; i++) {
-                    if (std::abs(v[i]) > 1e-10) {
-                        is_e0 = false;
-                        break;
-                    }
-                }
-                
-                if (is_e0) {
-                    H(v0.data(), result, size);
-                    return;
-                }
-            }
-            
-            // Regular application of H
-            H(v, result, size);
-        };
+        // Perform Lanczos iteration to generate basis and tridiagonal matrix
+        ComplexVector v_prev(N, Complex(0.0, 0.0));
+        ComplexVector v_curr = v_start;
+        ComplexVector v_next(N);
+        ComplexVector w(N);
         
-        // Use Chebyshev filtered Lanczos to get eigenvalues and eigenvectors
-        std::vector<double> eigenvalues;
-        std::vector<ComplexVector> eigenvectors;
+        // Store Lanczos vectors for later reconstruction
+        std::vector<ComplexVector> lanczos_vectors;
+        lanczos_vectors.push_back(v_curr);
         
-        // Call chebyshev_filtered_lanczos with appropriate parameters
-        const double tol = 1e-10;
-        chebyshev_filtered_lanczos(H, N, m_max, m_max, tol, eigenvalues, &eigenvectors);
+        // Initialize alpha and beta for tridiagonal matrix
+        std::vector<double> alpha;  // Diagonal elements
+        std::vector<double> beta;   // Off-diagonal elements
+        beta.push_back(0.0);        // β_0 is not used
         
-        int m = eigenvalues.size();
-        
-        // Calculate partition function contribution
-        double Z_r = 0.0;
-        for (int n = 0; n < m; n++) {
-            Z_r += std::exp(-beta * eigenvalues[n]);
-        }
-        Z += Z_r;
-        
-        // Apply operators A and B to eigenvectors
-        std::vector<ComplexVector> A_eigenvectors(m, ComplexVector(N));
-        std::vector<ComplexVector> B_eigenvectors(m, ComplexVector(N));
-        
-        for (int n = 0; n < m; n++) {
-            A(eigenvectors[n].data(), A_eigenvectors[n].data(), N);
-            B(eigenvectors[n].data(), B_eigenvectors[n].data(), N);
-        }
-        
-        // Calculate matrix elements and dynamical response
-        for (int n = 0; n < m; n++) {
-            double weight = std::exp(-beta * eigenvalues[n]);
-            
-            for (int p = 0; p < m; p++) {
-                // Compute <n|A|p>
-                Complex A_np;
-                cblas_zdotc_sub(N, eigenvectors[n].data(), 1, A_eigenvectors[p].data(), 1, &A_np);
-                
-                // Compute <p|B|n>
-                Complex B_pn;
-                cblas_zdotc_sub(N, eigenvectors[p].data(), 1, B_eigenvectors[n].data(), 1, &B_pn);
-                
-                // Matrix element product
-                Complex matrix_element = A_np * B_pn;
-                
-                // Energy difference
-                double omega_np = eigenvalues[p] - eigenvalues[n];
-                
-                // Add contribution to all frequency points with Lorentzian broadening
-                for (int i = 0; i < n_points; i++) {
-                    double omega = omega_values[i];
-                    // Lorentzian: 1/π * η/((ω-ω_0)² + η²)
-                    Complex lorentzian = Complex(eta / (M_PI * ((omega - omega_np)*(omega - omega_np) + eta*eta)), 0.0);
-                    response[i] += weight * matrix_element * lorentzian;
-                }
-            }
-        }
-    }
-    
-    // Normalize by partition function
-    for (int i = 0; i < n_points; i++) {
-        response[i] /= Z;
-    }
-    
-    // Create result pair vector
-    std::vector<std::pair<double, Complex>> result(n_points);
-    for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(omega_values[i], response[i]);
-    }
-    
-    return result;
-}
-
-// Low-Temperature Lanczos Method (LTLM) for thermal expectation values
-Complex LTLM(
-    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
-    std::function<void(const Complex*, Complex*, int)> A, // Observable operator
-    int N,              // Dimension of Hilbert space
-    double beta,        // Inverse temperature (β = 1/kT)
-    int R=30,              // Number of random samples
-    int M=1000,              // Lanczos iterations per sample
-    double tol = 1e-10  // Tolerance for convergence
-) {
-    // Random number generator for random states
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Accumulators for numerator and denominator
-    Complex num(0.0, 0.0);
-    double denom = 0.0;
-    
-    // For each random sample
-    for (int r = 0; r < R; r++) {
-        // Generate random vector |r⟩
-        ComplexVector r_vec(N);
-        for (int i = 0; i < N; i++) {
-            r_vec[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, r_vec.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, r_vec.data(), 1);
-        
-        // Create a matrix-vector product that starts from our random vector
-        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
-            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
-            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
-                bool is_e0 = true;
-                for (int i = 1; i < size; i++) {
-                    if (std::abs(v[i]) > 1e-10) {
-                        is_e0 = false;
-                        break;
-                    }
-                }
-                
-                if (is_e0) {
-                    H(r_vec.data(), result, size);
-                    return;
-                }
-            }
-            
-            // Regular application of H
-            H(v, result, size);
-        };
-        
-        // Use Chebyshev filtered Lanczos to get eigenvalues and eigenvectors
-        std::vector<double> eigenvalues;
-        std::vector<ComplexVector> eigenvectors;
-        
-        chebyshev_filtered_lanczos(H, N, M, M, tol, eigenvalues, &eigenvectors);
-        
-        int m = eigenvalues.size();
-        
-        // Calculate ⟨r|e^{-βH}A|r⟩ and ⟨r|e^{-βH}|r⟩
-        Complex exp_H_A_r(0.0, 0.0);
-        double exp_H_r = 0.0;
-        
-        // For each eigenvalue/vector pair
+        // Lanczos iteration to build tridiagonal matrix
         for (int j = 0; j < m; j++) {
-            // Calculate |⟨r|ψ_j⟩|²
-            Complex r_psi_j;
-            cblas_zdotc_sub(N, r_vec.data(), 1, eigenvectors[j].data(), 1, &r_psi_j);
-            double weight = std::exp(-beta * eigenvalues[j]) * std::norm(r_psi_j);
+            // w = H*v_j
+            H(v_curr.data(), w.data(), N);
             
-            // Add to denominator
-            exp_H_r += weight;
-            
-            // Apply A to |ψ_j⟩
-            ComplexVector A_psi(N);
-            A(eigenvectors[j].data(), A_psi.data(), N);
-            
-            // Calculate ⟨r|A|ψ_j⟩
-            Complex r_A_psi;
-            cblas_zdotc_sub(N, r_vec.data(), 1, A_psi.data(), 1, &r_A_psi);
-            
-            // Add contribution to numerator
-            exp_H_A_r += weight * r_A_psi;
-        }
-        
-        // Add to accumulators
-        num += exp_H_A_r;
-        denom += exp_H_r;
-    }
-    
-    // Return thermal average ⟨A⟩ = Tr(e^{-βH}A)/Tr(e^{-βH})
-    return num / denom;
-}
-
-// LTLM for dynamical correlation function at low temperatures
-// Calculates S_AB(ω) = (1/Z) ∑_j e^{-βE_j} ∑_i |⟨i|A|j⟩|^2 δ(ω - (E_i - E_j))
-std::vector<std::pair<double, Complex>> LTLM_dynamical(
-    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
-    std::function<void(const Complex*, Complex*, int)> A, // First operator
-    std::function<void(const Complex*, Complex*, int)> B, // Second operator
-    int N,              // Dimension of Hilbert space
-    double beta,        // Inverse temperature (β = 1/kT)
-    double omega_min,   // Minimum frequency
-    double omega_max,   // Maximum frequency
-    int n_points,       // Number of frequency points
-    double eta,         // Broadening parameter
-    int R,              // Number of random samples
-    int M,              // Lanczos iterations per sample
-    double tol = 1e-10  // Tolerance for convergence
-) {
-    // Generate frequency grid
-    std::vector<double> omega_values(n_points);
-    double delta_omega = (omega_max - omega_min) / (n_points - 1);
-    for (int i = 0; i < n_points; i++) {
-        omega_values[i] = omega_min + i * delta_omega;
-    }
-    
-    // Initialize result vector
-    std::vector<Complex> S_AB(n_points, Complex(0.0, 0.0));
-    
-    // Initialize random number generator
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Accumulator for partition function
-    double Z = 0.0;
-    
-    // For each random sample
-    for (int r = 0; r < R; r++) {
-        // Generate random vector |r⟩
-        ComplexVector r_vec(N);
-        for (int i = 0; i < N; i++) {
-            r_vec[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, r_vec.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, r_vec.data(), 1);
-        
-        // Create a function that applies H but starts from our random vector
-        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
-            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
-            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
-                bool is_e0 = true;
-                for (int i = 1; i < size; i++) {
-                    if (std::abs(v[i]) > 1e-10) {
-                        is_e0 = false;
-                        break;
-                    }
-                }
-                
-                if (is_e0) {
-                    H(r_vec.data(), result, size);
-                    return;
-                }
+            // w = w - beta_j * v_{j-1}
+            if (j > 0) {
+                Complex neg_beta = Complex(-beta[j], 0.0);
+                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
             }
             
-            // Regular application of H
-            H(v, result, size);
-        };
-        
-        // Run Chebyshev filtered Lanczos to get eigenpairs
-        std::vector<double> eigvals;
-        std::vector<ComplexVector> eigvecs;
-        
-        chebyshev_filtered_lanczos(H_from_r, N, M, M, tol, eigvals, &eigvecs);
-        
-        // Calculate Z contribution for this sample
-        double Z_r = 0.0;
-        for (int j = 0; j < eigvals.size(); j++) {
-            // Calculate |⟨r|ψ_j⟩|^2
-            Complex r_psi_j;
-            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
-            Z_r += std::exp(-beta * eigvals[j]) * std::norm(r_psi_j);
-        }
-        Z += Z_r;
-        
-        // For each eigenstate |j⟩
-        for (int j = 0; j < eigvals.size(); j++) {
-            // Calculate |⟨r|ψ_j⟩|^2
-            Complex r_psi_j;
-            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
+            // alpha_j = <v_j, w>
+            Complex dot_product;
+            cblas_zdotc_sub(N, v_curr.data(), 1, w.data(), 1, &dot_product);
+            alpha.push_back(std::real(dot_product));
             
-            // Thermodynamic weight factor e^{-βE_j}|⟨r|ψ_j⟩|^2
-            double weight = std::exp(-beta * eigvals[j]) * std::norm(r_psi_j);
+            // w = w - alpha_j * v_j
+            Complex neg_alpha = Complex(-alpha[j], 0.0);
+            cblas_zaxpy(N, &neg_alpha, v_curr.data(), 1, w.data(), 1);
             
-            // Apply A to |ψ_j⟩
-            ComplexVector A_psi_j(N);
-            A(eigvecs[j].data(), A_psi_j.data(), N);
-            
-            // Normalize A|ψ_j⟩
-            double A_psi_norm = cblas_dznrm2(N, A_psi_j.data(), 1);
-            if (A_psi_norm < tol) continue;  // Skip if A|ψ_j⟩ is approximately 0
-            
-            Complex A_scale = Complex(1.0/A_psi_norm, 0.0);
-            cblas_zscal(N, &A_scale, A_psi_j.data(), 1);
-            
-            // Create a function that applies H but starts from A|ψ_j⟩
-            auto H_from_Apsi = [&H, &A_psi_j, N](const Complex* v, Complex* result, int size) {
-                // If v is the unit vector e_0 = [1,0,0,...], we return H*A_psi_j
-                if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
-                    bool is_e0 = true;
-                    for (int i = 1; i < size; i++) {
-                        if (std::abs(v[i]) > 1e-10) {
-                            is_e0 = false;
-                            break;
-                        }
-                    }
-                    
-                    if (is_e0) {
-                        H(A_psi_j.data(), result, size);
-                        return;
-                    }
-                }
-                
-                // Regular application of H
-                H(v, result, size);
-            };
-            
-            // Run second Chebyshev filtered Lanczos with A|ψ_j⟩ as starting vector
-            std::vector<double> eigvals2;
-            std::vector<ComplexVector> eigvecs2;
-            
-            chebyshev_filtered_lanczos(H_from_Apsi, N, M, M, tol, eigvals2, &eigvecs2);
-            
-            // Calculate B matrix elements if B is different from A
-            bool B_is_A = (&B == &A);
-            ComplexVector B_psi_j;
-            double B_psi_norm = 0.0;
-            
-            if (!B_is_A) {
-                B_psi_j.resize(N);
-                B(eigvecs[j].data(), B_psi_j.data(), N);
-                B_psi_norm = cblas_dznrm2(N, B_psi_j.data(), 1);
+            // Reorthogonalization for numerical stability
+            for (int k = 0; k <= j; k++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
             }
             
-            // For each final state |i⟩
-            for (int i = 0; i < eigvals2.size(); i++) {
-                // Energy difference
-                double omega_ij = eigvals2[i] - eigvals[j];
-                
-                // Calculate ⟨ψ_i|A|ψ_j⟩
-                Complex A_matrix_element;
-                cblas_zdotc_sub(N, eigvecs2[i].data(), 1, A_psi_j.data(), 1, &A_matrix_element);
-                A_matrix_element *= A_psi_norm; // Adjust for normalization
-                
-                // For cross-correlation <AB>, compute <i|B|j> matrix element
-                Complex B_matrix_element;
-                if (B_is_A) {
-                    B_matrix_element = A_matrix_element;
-                } else {
-                    // Calculate ⟨ψ_i|B|ψ_j⟩
-                    cblas_zdotc_sub(N, eigvecs2[i].data(), 1, B_psi_j.data(), 1, &B_matrix_element);
-                }
-                
-                // Contribution to correlation function with Lorentzian broadening
-                Complex contrib = weight * A_matrix_element * std::conj(B_matrix_element);
-                
-                // Add to all frequency points with broadening
-                for (int p = 0; p < n_points; p++) {
-                    double omega = omega_values[p];
-                    // Lorentzian: η/π / [(ω-ω_ij)^2 + η^2]
-                    double lorentz = eta / (M_PI * ((omega - omega_ij)*(omega - omega_ij) + eta*eta));
-                    S_AB[p] += contrib * Complex(lorentz, 0.0);
-                }
-            }
-        }
-    }
-    
-    // Normalize by partition function and prepare result
-    std::vector<std::pair<double, Complex>> result(n_points);
-    for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(omega_values[i], S_AB[i] / Z);
-    }
-    
-    return result;
-}
-
-// LTLM for calculating thermal real-time correlation function
-// Computes C_AB(t) = (1/Z) ∑_j e^{-βE_j} ⟨j|A(t)B|j⟩
-std::vector<std::pair<double, Complex>> LTLM_real_time_correlation(
-    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian operator
-    std::function<void(const Complex*, Complex*, int)> A, // First operator
-    std::function<void(const Complex*, Complex*, int)> B, // Second operator
-    int N,              // Dimension of Hilbert space
-    double b,        // Inverse temperature (β = 1/kT)
-    double t_min,       // Minimum time
-    double t_max,       // Maximum time
-    int n_points,       // Number of time points
-    int R,              // Number of random samples
-    int M,              // Lanczos iterations per sample
-    double tol = 1e-10  // Tolerance for convergence
-) {
-    // Generate time grid
-    std::vector<double> time_values(n_points);
-    double delta_t = (t_max - t_min) / (n_points - 1);
-    for (int i = 0; i < n_points; i++) {
-        time_values[i] = t_min + i * delta_t;
-    }
-    
-    // Initialize result
-    std::vector<Complex> C_AB(n_points, Complex(0.0, 0.0));
-    
-    // Random generator
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Partition function accumulator
-    double Z = 0.0;
-    
-    // For each random sample
-    for (int r = 0; r < R; r++) {
-        // Generate random vector |r⟩
-        ComplexVector r_vec(N);
-        for (int i = 0; i < N; i++) {
-            r_vec[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, r_vec.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, r_vec.data(), 1);
-        
-        // Create a function that applies H but starts from our random vector
-        auto H_from_r = [&H, &r_vec, N](const Complex* v, Complex* result, int size) {
-            // If v is the unit vector e_0 = [1,0,0,...], we return H*r_vec
-            if (std::abs(v[0] - Complex(1.0, 0.0)) < 1e-10) {
-                bool is_e0 = true;
-                for (int i = 1; i < size; i++) {
-                    if (std::abs(v[i]) > 1e-10) {
-                        is_e0 = false;
-                        break;
-                    }
-                }
-                
-                if (is_e0) {
-                    H(r_vec.data(), result, size);
-                    return;
-                }
-            }
+            // beta_{j+1} = ||w||
+            norm = cblas_dznrm2(N, w.data(), 1);
+            beta.push_back(norm);
             
-            // Regular application of H
-            H(v, result, size);
-        };
-        
-        // Run Chebyshev filtered Lanczos to get eigenpairs
-        std::vector<double> eigvals;
-        std::vector<ComplexVector> eigvecs;
-        
-        chebyshev_filtered_lanczos(H_from_r, N, M, M, tol, eigvals, &eigvecs);
-        
-        // Update partition function
-        double Z_r = 0.0;
-        for (int j = 0; j < eigvals.size(); j++) {
-            // Calculate |⟨r|ψ_j⟩|^2
-            Complex r_psi_j;
-            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
-            Z_r += std::exp(-b * eigvals[j]) * std::norm(r_psi_j);
-        }
-        Z += Z_r;
-        
-        // For each eigenstate |j⟩
-        for (int j = 0; j < eigvals.size(); j++) {
-            // Calculate |⟨r|ψ_j⟩|^2
-            Complex r_psi_j;
-            cblas_zdotc_sub(N, r_vec.data(), 1, eigvecs[j].data(), 1, &r_psi_j);
-            
-            // Thermal weight
-            double weight = std::exp(-b * eigvals[j]) * std::norm(r_psi_j);
-            
-            // Apply B to |ψ_j⟩: |φ⟩ = B|ψ_j⟩
-            ComplexVector phi(N);
-            B(eigvecs[j].data(), phi.data(), N);
-            
-            // For each time point
-            for (int t_idx = 0; t_idx < n_points; t_idx++) {
-                double t = time_values[t_idx];
-                
-                // Time-evolved state |φ(t)⟩ = exp(-iHt)|φ⟩ = exp(-iHt)B|ψ_j⟩
-                ComplexVector phi_t(N, Complex(0.0, 0.0));
-                
-                // For each eigenvalue/vector pair
-                for (int m = 0; m < eigvals.size(); m++) {
-                    // Calculate ⟨ψ_m|φ⟩
-                    Complex psi_m_phi;
-                    cblas_zdotc_sub(N, eigvecs[m].data(), 1, phi.data(), 1, &psi_m_phi);
-                    
-                    // Apply time evolution: exp(-iE_m t)⟨ψ_m|φ⟩|ψ_m⟩
-                    Complex phase = std::exp(Complex(0.0, -eigvals[m] * t));
-                    Complex coef = phase * psi_m_phi;
-                    
-                    cblas_zaxpy(N, &coef, eigvecs[m].data(), 1, phi_t.data(), 1);
-                }
-                
-                // Calculate ⟨φ(t)|A|ψ_j⟩
-                ComplexVector A_psi(N);
-                A(eigvecs[j].data(), A_psi.data(), N);
-                
-                Complex corr;
-                cblas_zdotc_sub(N, phi_t.data(), 1, A_psi.data(), 1, &corr);
-                
-                // Add contribution
-                C_AB[t_idx] += weight * corr;
-            }
-        }
-    }
-    
-    // Normalize by partition function
-    std::vector<std::pair<double, Complex>> result(n_points);
-    for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(time_values[i], C_AB[i] / Z);
-    }
-    
-    return result;
-}
-
-// Advanced FTLM with adaptive convergence strategy
-Complex FTLM_adaptive(
-    std::function<void(const Complex*, Complex*, int)> H, // Hamiltonian matrix-vector product
-    std::function<void(const Complex*, Complex*, int)> A, // Observable matrix-vector product
-    int N,             // Dimension of Hilbert space
-    double b,          // Inverse temperature (β = 1/kT)
-    double conv_tol = 1e-4, // Convergence tolerance
-    int r_start = 20,  // Starting number of random vectors
-    int m_start = 100, // Starting max Lanczos iterations
-    int max_steps = 3,// Maximum number of refinement steps
-    double tol = 1e-10 // Tolerance for Lanczos algorithm
-) {
-    // Keep track of results for different parameters
-    struct FTLMResult {
-        int r_val;
-        int m_val;
-        Complex result;
-        double rel_change;
-    };
-    std::vector<FTLMResult> results;
-    
-    // First calculation
-    Complex initial_result = FTLM(H, A, N, b, r_start, m_start, tol);
-    results.push_back({r_start, m_start, initial_result, 0.0});
-    
-    std::cout << "FTLM adaptive initial: r=" << r_start << ", m=" << m_start 
-              << ", result=" << initial_result << std::endl;
-    
-    // Two separate parameters to vary independently
-    int r_current = r_start;
-    int m_current = m_start;
-    
-    // First try increasing r (more random vectors)
-    for (int step = 0; step < max_steps/2 && results.size() < max_steps; step++) {
-        r_current = static_cast<int>(r_current * 1.5);
-        
-        Complex r_result = FTLM(H, A, N, b, r_current, m_start, tol);
-        double rel_diff = std::abs(r_result - results.back().result) / 
-                          (std::abs(results.back().result) > 1e-10 ? std::abs(results.back().result) : 1.0);
-        
-        results.push_back({r_current, m_start, r_result, rel_diff});
-        
-        std::cout << "FTLM r-refinement: r=" << r_current << ", m=" << m_start 
-                  << ", result=" << r_result << " (rel. change: " << rel_diff << ")" << std::endl;
-        
-        if (rel_diff < conv_tol/2) {
-            break; // Converged on r parameter
-        }
-    }
-    
-    // Then try increasing m (Lanczos subspace size)
-    for (int step = 0; step < max_steps/2 && results.size() < max_steps; step++) {
-        m_current = static_cast<int>(m_current * 1.3);
-        
-        Complex m_result = FTLM(H, A, N, b, r_current, m_current, tol);
-        double rel_diff = std::abs(m_result - results.back().result) / 
-                          (std::abs(results.back().result) > 1e-10 ? std::abs(results.back().result) : 1.0);
-        
-        results.push_back({r_current, m_current, m_result, rel_diff});
-        
-        std::cout << "FTLM m-refinement: r=" << r_current << ", m=" << m_current 
-                  << ", result=" << m_result << " (rel. change: " << rel_diff << ")" << std::endl;
-        
-        if (rel_diff < conv_tol/2) {
-            break; // Converged on m parameter
-        }
-    }
-    
-    // Check if we've converged
-    if (results.back().rel_change < conv_tol) {
-        std::cout << "FTLM adaptive converged with r=" << results.back().r_val 
-                  << ", m=" << results.back().m_val << std::endl;
-    } else {
-        std::cout << "FTLM adaptive did not fully converge. Using best result with r=" 
-                  << results.back().r_val << ", m=" << results.back().m_val << std::endl;
-    }
-    
-    return results.back().result;
-}
-
-// Thermodynamic quantities calculation using Finite Temperature Lanczos Method
-struct ThermodynamicResults {
-    std::vector<double> temperatures; // Temperature points
-    std::vector<double> energy;       // Internal energy <E>
-    std::vector<double> specific_heat; // Specific heat C_v
-    std::vector<double> entropy;      // Entropy S
-    std::vector<double> free_energy;  // Free energy F
-};
-
-// Calculate thermodynamic quantities using Low-Temperature Lanczos Method (LTLM)
-ThermodynamicResults calculate_thermodynamics_LTLM(
-    std::function<void(const Complex*, Complex*, int)> H, 
-    int N,                    // Dimension of Hilbert space
-    double T_min = 0.01,     // Minimum temperature
-    double T_max = 10.0,     // Maximum temperature
-    int num_points = 100,    // Number of temperature points
-    int R = 20,              // Number of random samples
-    int M = 100,             // Lanczos iterations per sample
-    double tol = 1e-10       // Tolerance for Lanczos algorithm
-) {
-    // Initialize results structure
-    ThermodynamicResults results;
-    results.temperatures.resize(num_points);
-    results.energy.resize(num_points);
-    results.specific_heat.resize(num_points);
-    results.entropy.resize(num_points);
-    results.free_energy.resize(num_points);
-    
-    // Generate logarithmically spaced temperature points
-    const double log_T_min = std::log(T_min);
-    const double log_T_max = std::log(T_max);
-    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
-    
-    for (int i = 0; i < num_points; i++) {
-        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    }
-    
-    // Define identity operator for calculating partition function
-    auto identity_op = [](const Complex* v, Complex* result, int size) {
-        std::copy(v, v + size, result);
-    };
-    
-    // For each temperature point
-    for (int i = 0; i < num_points; i++) {
-        double T = results.temperatures[i];
-        double beta = 1.0 / T;
-        
-        std::cout << "Processing T = " << T << " (point " << (i+1) << "/" << num_points << ")" << std::endl;
-        
-        // Calculate <H> using LTLM
-        Complex avg_energy = LTLM(H, H, N, beta, R, M, tol);
-        results.energy[i] = avg_energy.real();
-        
-        // Calculate <H²> for specific heat
-        auto H_squared = [&H, N](const Complex* v, Complex* result, int size) {
-            // Apply H twice
-            std::vector<Complex> temp(size);
-            H(v, temp.data(), size);
-            H(temp.data(), result, size);
-        };
-        
-        Complex avg_energy_squared = LTLM(H, H_squared, N, beta, R, M, tol);
-        
-        // Calculate specific heat: C_v = β²(<H²> - <H>²)
-        double var_energy = avg_energy_squared.real() - avg_energy.real() * avg_energy.real();
-        results.specific_heat[i] = beta * beta * var_energy;
-        
-        // Calculate partition function Z = Tr[e^(-βH)]
-        Complex Z_complex = LTLM(H, identity_op, N, beta, R, M, tol) * Complex(N, 0.0);
-        double Z = Z_complex.real();
-        
-        // Calculate free energy F = -T * ln(Z)
-        results.free_energy[i] = -T * std::log(Z);
-        
-        // Calculate entropy S = (E - F) / T
-        results.entropy[i] = (results.energy[i] - results.free_energy[i]) / T;
-        
-        std::cout << "  E = " << results.energy[i] 
-                  << ", C_v = " << results.specific_heat[i]
-                  << ", S = " << results.entropy[i] << std::endl;
-    }
-    
-    return results;
-}
-
-ThermodynamicResults calculate_thermodynamics(
-    std::function<void(const Complex*, Complex*, int)> H, 
-    int N,                    // Dimension of Hilbert space
-    double T_min = 0.01,     // Minimum temperature
-    double T_max = 10.0,     // Maximum temperature
-    int num_points = 100,    // Number of temperature points
-    int r_max = 20,          // Number of random vectors for FTLM
-    int m_max = 100,         // Maximum Lanczos iterations per random vector
-    double tol = 1e-10       // Tolerance for Lanczos algorithm
-) {
-    // Initialize results structure
-    ThermodynamicResults results;
-    results.temperatures.resize(num_points);
-    results.energy.resize(num_points);
-    results.specific_heat.resize(num_points);
-    results.entropy.resize(num_points);
-    results.free_energy.resize(num_points);
-    
-    // Generate logarithmically spaced temperature points
-    const double log_T_min = std::log(T_min);
-    const double log_T_max = std::log(T_max);
-    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
-    
-    for (int i = 0; i < num_points; i++) {
-        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    }
-    
-    // Define identity operator for calculating partition function
-    auto identity_op = [](const Complex* v, Complex* result, int size) {
-        std::copy(v, v + size, result);
-    };
-    
-    // Calculate energy using FTLM for each temperature point
-    for (int i = 0; i < num_points; i++) {
-        double T = results.temperatures[i];
-        double beta = 1.0 / T;
-        
-        // Calculate <H> using FTLM
-        Complex avg_energy = FTLM(H, H, N, beta, r_max, m_max, tol);
-        results.energy[i] = avg_energy.real();
-        
-        // Calculate <H²> for specific heat
-        auto H_squared = [&H, N](const Complex* v, Complex* result, int size) {
-            // First apply H to v
-            std::vector<Complex> temp(size);
-            H(v, temp.data(), size);
-            
-            // Then apply H to the result
-            H(temp.data(), result, size);
-        };
-        
-        Complex avg_energy_squared = FTLM(H, H_squared, N, beta, r_max, m_max, tol);
-        
-        // Calculate specific heat: C_v = β²(<H²> - <H>²)
-        double var_energy = avg_energy_squared.real() - avg_energy.real() * avg_energy.real();
-        results.specific_heat[i] = beta * beta * var_energy;
-        
-        // Calculate partition function Z = Tr[e^(-βH)]
-        // We use the identity operator for the observable
-        Complex Z_complex = FTLM(H, identity_op, N, beta, r_max, m_max, tol) * Complex(N, 0.0);
-        double Z = Z_complex.real();
-        
-        // Calculate free energy F = -T * ln(Z)
-        results.free_energy[i] = -T * std::log(Z);
-        
-        // Calculate entropy S = (E - F) / T
-        results.entropy[i] = (results.energy[i] - results.free_energy[i]) / T;
-    }
-    
-    return results;
-}
-// Function to output thermodynamic results to file
-void output_thermodynamic_data(const ThermodynamicResults& results, const std::string& filename) {
-    std::ofstream outfile(filename);
-    if (!outfile.is_open()) {
-        std::cerr << "Failed to open output file: " << filename << std::endl;
-        return;
-    }
-    
-    outfile << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-    for (size_t i = 0; i < results.temperatures.size(); i++) {
-        outfile << std::fixed << std::setprecision(6)
-                << results.temperatures[i] << " "
-                << results.energy[i] << " "
-                << results.specific_heat[i] << " "
-                << results.entropy[i] << " "
-                << results.free_energy[i] << std::endl;
-    }
-    
-    outfile.close();
-    std::cout << "Thermodynamic data written to " << filename << std::endl;
-}
-
-// Improved version with adaptive FTLM calculations
-ThermodynamicResults calculate_thermodynamics_adaptive(
-    std::function<void(const Complex*, Complex*, int)> H, 
-    int N,                    // Dimension of Hilbert space
-    double T_min = 0.01,     // Minimum temperature
-    double T_max = 10.0,     // Maximum temperature
-    int num_points = 100,    // Number of temperature points
-    double conv_tol = 1e-4,  // FTLM convergence tolerance
-    int r_start = 20,        // Starting number of random vectors
-    int m_start = 100        // Starting Lanczos iterations
-) {
-    // Initialize results structure
-    ThermodynamicResults results;
-    results.temperatures.resize(num_points);
-    results.energy.resize(num_points);
-    results.specific_heat.resize(num_points);
-    results.entropy.resize(num_points);
-    results.free_energy.resize(num_points);
-    
-    // Generate logarithmically spaced temperature points
-    const double log_T_min = std::log(T_min);
-    const double log_T_max = std::log(T_max);
-    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
-    
-    for (int i = 0; i < num_points; i++) {
-        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    }
-    
-    // Define identity operator for calculating partition function
-    auto identity_op = [](const Complex* v, Complex* result, int size) {
-        std::copy(v, v + size, result);
-    };
-    
-    // Calculate energy using adaptive FTLM for each temperature point
-    for (int i = 0; i < num_points; i++) {
-        double T = results.temperatures[i];
-        double beta = 1.0 / T;
-        
-        std::cout << "Processing T = " << T << " (point " << (i+1) << "/" << num_points << ")" << std::endl;
-        
-        // Calculate <H> using adaptive FTLM
-        Complex avg_energy = FTLM_adaptive(H, H, N, beta, conv_tol, r_start, m_start);
-        results.energy[i] = avg_energy.real();
-        
-        // Calculate <H²> for specific heat
-        auto H_squared = [&H, N](const Complex* v, Complex* result, int size) {
-            // First apply H to v
-            std::vector<Complex> temp(size);
-            H(v, temp.data(), size);
-            
-            // Then apply H to the result
-            H(temp.data(), result, size);
-        };
-        
-        Complex avg_energy_squared = FTLM_adaptive(H, H_squared, N, beta, conv_tol, r_start, m_start);
-        
-        // Calculate specific heat: C_v = β²(<H²> - <H>²)
-        double var_energy = avg_energy_squared.real() - avg_energy.real() * avg_energy.real();
-        results.specific_heat[i] = beta * beta * var_energy;
-        
-        // Calculate partition function Z = Tr[e^(-βH)]
-        Complex Z_complex = FTLM_adaptive(H, identity_op, N, beta, conv_tol, r_start, m_start) * Complex(N, 0.0);
-        double Z = Z_complex.real();
-        
-        // Calculate free energy F = -T * ln(Z)
-        results.free_energy[i] = -T * std::log(Z);
-        
-        // Calculate entropy S = (E - F) / T
-        results.entropy[i] = (results.energy[i] - results.free_energy[i]) / T;
-        
-        std::cout << "  E = " << results.energy[i] 
-                  << ", C_v = " << results.specific_heat[i]
-                  << ", S = " << results.entropy[i] << std::endl;
-    }
-    
-    return results;
-}
-
-// ShiftedKrylovSolver class to calculate Green's function using
-// the shifted Krylov subspace method from the paper
-class ShiftedKrylovSolver {
-public:
-    // Calculate Green's function G(z) = <a|(zI-H)^(-1)|b> for multiple z-values
-    static std::vector<Complex> calculateGreenFunction(
-        std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-        const ComplexVector& b,                               // Source vector
-        const ComplexVector& a,                               // Projection vector
-        const std::vector<Complex>& shifts,                   // List of energy points z_k
-        int max_iter,                                         // Maximum iterations
-        double tol,                                          // Convergence tolerance
-        bool hermitian = true                                // Whether H is Hermitian
-    ) {
-        int N = b.size();
-        
-        if (hermitian) {
-            return solveShiftedCG(H, b, a, shifts, N, max_iter, tol);
-        } else {
-            return solveShiftedCOCG(H, b, a, shifts, N, max_iter, tol);
-        }
-    }
-
-private:
-    // Shifted CG method for Hermitian matrices
-    static std::vector<Complex> solveShiftedCG(
-        std::function<void(const Complex*, Complex*, int)> H,
-        const ComplexVector& b,
-        const ComplexVector& a,
-        const std::vector<Complex>& shifts,
-        int N, int max_iter, double tol
-    ) {
-        int n_shifts = shifts.size();
-        
-        // Select the first shift as the seed
-        Complex sigma_seed = shifts[0];
-        
-        // Define the seed shifted matrix A = sigma_seed*I - H
-        auto A = [&H, &sigma_seed, N](const Complex* v, Complex* result, int size) {
-            // First compute H*v
-            H(v, result, size);
-            
-            // Then compute (sigma_seed*I - H)*v
-            for (int i = 0; i < size; i++) {
-                result[i] = sigma_seed * v[i] - result[i];
-            }
-        };
-        
-        // Initialize residual vectors for the seed equation
-        ComplexVector r_prev(N, Complex(0.0, 0.0));
-        ComplexVector r_curr(b);  // r_0 = b
-        ComplexVector r_next(N);
-        
-        // Initialize coefficients
-        Complex rho_curr, rho_prev = Complex(0.0, 0.0);
-        Complex alpha, alpha_prev = Complex(0.0, 0.0);
-        Complex beta, beta_prev = Complex(0.0, 0.0);
-        
-        // Calculate initial rho_0 = <r_0|r_0>
-        cblas_zdotc_sub(N, r_curr.data(), 1, r_curr.data(), 1, &rho_curr);
-        
-        // Initialize collinearity factors for each shift
-        std::vector<Complex> pi_prev(n_shifts, Complex(1.0, 0.0));
-        std::vector<Complex> pi_curr(n_shifts, Complex(1.0, 0.0));
-        std::vector<Complex> pi_next(n_shifts);
-        
-        // Initialize projected solution and search vectors
-        std::vector<Complex> y_sigma(n_shifts, Complex(0.0, 0.0));
-        
-        // Calculate initial projection u_0^sigma = <a|b>
-        Complex a_dot_b;
-        cblas_zdotc_sub(N, a.data(), 1, b.data(), 1, &a_dot_b);
-        std::vector<Complex> u_sigma(n_shifts, a_dot_b);
-        
-        // Main iteration loop
-        for (int n = 0; n < max_iter; n++) {
-            // Apply matrix A to current residual
-            ComplexVector Ar(N);
-            A(r_curr.data(), Ar.data(), N);
-            
-            // Calculate <r_n|A*r_n>
-            Complex r_dot_Ar;
-            cblas_zdotc_sub(N, r_curr.data(), 1, Ar.data(), 1, &r_dot_Ar);
-            
-            // Calculate alpha_n using three-term recurrence
-            if (n == 0) {
-                alpha = rho_curr / r_dot_Ar;
-            } else {
-                alpha = rho_curr / (r_dot_Ar - (beta_prev / alpha_prev) * rho_curr);
-            }
-            
-            // Update residual using three-term recurrence (Eq. 9)
-            if (n == 0) {
-                for (int i = 0; i < N; i++) {
-                    r_next[i] = r_curr[i] - alpha * Ar[i];
-                }
-            } else {
-                Complex factor = alpha * beta_prev / alpha_prev;
-                for (int i = 0; i < N; i++) {
-                    r_next[i] = (1.0 + factor) * r_curr[i] - factor * r_prev[i] - alpha * Ar[i];
-                }
-            }
-            
-            // Calculate the projection <a|r_{n+1}>
-            Complex a_dot_r_next;
-            cblas_zdotc_sub(N, a.data(), 1, r_next.data(), 1, &a_dot_r_next);
-            
-            // Calculate rho_{n+1}
-            rho_prev = rho_curr;
-            cblas_zdotc_sub(N, r_next.data(), 1, r_next.data(), 1, &rho_curr);
-            
-            // Calculate beta_n
-            beta = rho_curr / rho_prev;
-            
-            // Update for all shifts
-            for (int k = 0; k < n_shifts; k++) {
-                Complex sigma_diff = shifts[k] - sigma_seed;
-                
-                // Calculate pi_{n+1}^sigma using recurrence (Eq. 17)
-                if (n == 0) {
-                    pi_next[k] = (1.0 + alpha * sigma_diff) * pi_curr[k];
-                } else {
-                    Complex factor = alpha * beta_prev / alpha_prev;
-                    pi_next[k] = (1.0 + factor + alpha * sigma_diff) * pi_curr[k] - 
-                                  factor * pi_prev[k];
-                }
-                
-                // Calculate alpha_n^sigma and beta_n^sigma (Eq. 18 and 19)
-                Complex alpha_sigma = alpha * (pi_curr[k] / pi_next[k]);
-                Complex beta_sigma = beta * std::pow(pi_curr[k] / pi_next[k], 2);
-                
-                // Update projected solution (Eq. 21)
-                y_sigma[k] += alpha_sigma * u_sigma[k];
-                
-                // Update projected search vector (Eq. 22)
-                u_sigma[k] = a_dot_r_next / pi_next[k] + beta_sigma * u_sigma[k];
-            }
-            
-            // Check convergence
-            double res_norm = cblas_dznrm2(N, r_next.data(), 1);
-            if (res_norm < tol) {
-                std::cout << "Converged after " << n+1 << " iterations." << std::endl;
+            // Check for invariant subspace
+            if (norm < 1e-10) {
+                std::cout << "FTLM: Invariant subspace found at iteration " << j + 1 << std::endl;
                 break;
             }
             
-            // Update for next iteration
-            r_prev = r_curr;
-            r_curr = r_next;
+            // v_{j+1} = w / beta_{j+1}
+            for (int i = 0; i < N; i++) {
+                v_next[i] = w[i] / norm;
+            }
             
-            alpha_prev = alpha;
-            beta_prev = beta;
+            // Store for next iteration
+            v_prev = v_curr;
+            v_curr = v_next;
             
-            pi_prev = pi_curr;
-            pi_curr = pi_next;
-            
-            // Optional: Implement seed switching for better performance
+            // Store Lanczos vector for later reconstruction
+            if (j < m - 1) {
+                lanczos_vectors.push_back(v_curr);
+            }
         }
         
-        return y_sigma;
-    }
-    
-    // Shifted COCG method for complex symmetric matrices
-    static std::vector<Complex> solveShiftedCOCG(
-        std::function<void(const Complex*, Complex*, int)> H,
-        const ComplexVector& b,
-        const ComplexVector& a,
-        const std::vector<Complex>& shifts,
-        int N, int max_iter, double tol
-    ) {
-        int n_shifts = shifts.size();
+        // Diagonalize tridiagonal matrix
+        int actual_m = alpha.size();
+        std::vector<double> eigenvalues(actual_m);
+        std::vector<double> eigenvectors_T(actual_m * actual_m);
         
-        // Select the first shift as the seed
-        Complex sigma_seed = shifts[0];
+        // Call LAPACK
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', actual_m, 
+                                alpha.data(), &beta[1], eigenvectors_T.data(), actual_m);
         
-        // Define the seed shifted matrix A = sigma_seed*I - H
-        auto A = [&H, &sigma_seed, N](const Complex* v, Complex* result, int size) {
-            H(v, result, size);
-            for (int i = 0; i < size; i++) {
-                result[i] = sigma_seed * v[i] - result[i];
-            }
-        };
-        
-        // Initialize vectors for COCG algorithm
-        ComplexVector r(b);  // r_0 = b
-        ComplexVector p(r);  // p_0 = r_0
-        
-        // Initialize coefficients
-        std::vector<Complex> pi_curr(n_shifts, Complex(1.0, 0.0));
-        std::vector<Complex> pi_prev(n_shifts, Complex(1.0, 0.0));
-        
-        // Initialize projected solution and search vectors
-        std::vector<Complex> y_sigma(n_shifts, Complex(0.0, 0.0));
-        Complex a_dot_p;
-        cblas_zdotc_sub(N, a.data(), 1, p.data(), 1, &a_dot_p);
-        std::vector<Complex> u_sigma(n_shifts, a_dot_p);
-        
-        // Main iteration
-        for (int n = 0; n < max_iter; n++) {
-            // Calculate (r_n, r_n)
-            Complex r_dot_r;
-            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
-            
-            // Apply A to p_n
-            ComplexVector Ap(N);
-            A(p.data(), Ap.data(), N);
-            
-            // Calculate (p_n, Ap_n) - note: transpose, not conjugate transpose for COCG
-            Complex p_dot_Ap = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                p_dot_Ap += p[i] * Ap[i];  // Complex multiplication without conjugation
-            }
-            
-            // Calculate alpha_n
-            Complex alpha = r_dot_r / p_dot_Ap;
-            
-            // Calculate a^T * Ap_n (transpose)
-            Complex a_dot_Ap = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                a_dot_Ap += a[i] * Ap[i];  // Complex multiplication without conjugation
-            }
-            
-            // Update residual: r_{n+1} = r_n - alpha_n * Ap_n
-            ComplexVector r_next(N);
-            for (int i = 0; i < N; i++) {
-                r_next[i] = r[i] - alpha * Ap[i];
-            }
-            
-            // Calculate a^T * r_{n+1}
-            Complex a_dot_r_next = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                a_dot_r_next += a[i] * r_next[i];  // Complex multiplication without conjugation
-            }
-            
-            // Update for all shifts
-            for (int k = 0; k < n_shifts; k++) {
-                Complex sigma_diff = shifts[k] - sigma_seed;
-                
-                // Update collinearity factor pi
-                Complex pi_next = pi_curr[k] * (1.0 + sigma_diff * alpha) / 
-                                (1.0 + sigma_diff * alpha * pi_curr[k] / pi_prev[k]);
-                
-                // Calculate alpha_sigma
-                Complex alpha_sigma = alpha * (pi_curr[k] / pi_next);
-                
-                // Update projected solution
-                y_sigma[k] += alpha_sigma * u_sigma[k];
-                
-                // Update parameters for next iteration
-                Complex beta = (r_next[0] * r_next[0]) / (r[0] * r[0]);  // Simplified
-                Complex beta_sigma = beta * std::pow(pi_next / pi_curr[k], 2);
-                
-                // Update projected search direction
-                u_sigma[k] = a_dot_r_next / pi_next + beta_sigma * u_sigma[k];
-                
-                // Update pi for next iteration
-                pi_prev[k] = pi_curr[k];
-                pi_curr[k] = pi_next;
-            }
-            
-            // Check for convergence
-            double res_norm = cblas_dznrm2(N, r_next.data(), 1);
-            if (res_norm < tol) {
-                std::cout << "COCG converged after " << n+1 << " iterations." << std::endl;
-                break;
-            }
-            
-            // Calculate beta_n = (r_{n+1}, r_{n+1})/(r_n, r_n)
-            Complex r_next_dot_r_next;
-            cblas_zdotc_sub(N, r_next.data(), 1, r_next.data(), 1, &r_next_dot_r_next);
-            Complex beta = r_next_dot_r_next / r_dot_r;
-            
-            // Update search direction: p_{n+1} = r_{n+1} + beta_n * p_n
-            ComplexVector p_next(N);
-            for (int i = 0; i < N; i++) {
-                p_next[i] = r_next[i] + beta * p[i];
-            }
-            
-            // Update for next iteration
-            r = r_next;
-            p = p_next;
+        if (info != 0) {
+            std::cerr << "FTLM: LAPACKE_dstevd failed with code " << info << std::endl;
+            continue;
         }
         
-        return y_sigma;
-    }
-};
-
-// Function to calculate dynamical Green's function for a range of frequencies
-std::vector<std::pair<double, Complex>> calculateDynamicalGreenFunction(
-    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                               // Dimension of Hilbert space
-    const ComplexVector& a,                              // Left vector <a|
-    const ComplexVector& b,                              // Right vector |b>
-    double omega_min,                                    // Minimum frequency
-    double omega_max,                                    // Maximum frequency
-    int n_points,                                        // Number of frequency points
-    double eta,                                          // Small imaginary broadening
-    int max_iter = 1000,                                 // Maximum iterations
-    double tol = 1e-10                                   // Convergence tolerance
-) {
-    // Generate frequency grid
-    std::vector<double> omega_values(n_points);
-    double delta_omega = (omega_max - omega_min) / (n_points - 1);
-    for (int i = 0; i < n_points; i++) {
-        omega_values[i] = omega_min + i * delta_omega;
+        // Compute matrix elements of observables if provided
+        std::vector<std::vector<Complex>> obs_matrix_elements;
+        if (!observables.empty()) {
+            obs_matrix_elements.resize(observables.size(), 
+                                     std::vector<Complex>(actual_m, Complex(0.0, 0.0)));
+            
+            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+                auto& A = observables[obs_idx];
+                
+                // For each eigenstate in the Krylov subspace
+                for (int i = 0; i < actual_m; i++) {
+                    // Reconstruct eigenstate in original basis
+                    ComplexVector psi_i(N, Complex(0.0, 0.0));
+                    for (int j = 0; j < actual_m; j++) {
+                        Complex coef(eigenvectors_T[j * actual_m + i], 0.0);
+                        cblas_zaxpy(N, &coef, lanczos_vectors[j].data(), 1, psi_i.data(), 1);
+                    }
+                    
+                    // Apply observable
+                    ComplexVector A_psi(N);
+                    A(psi_i.data(), A_psi.data(), N);
+                    
+                    // Compute <psi_i|A|psi_i>
+                    Complex expectation;
+                    cblas_zdotc_sub(N, psi_i.data(), 1, A_psi.data(), 1, &expectation);
+                    
+                    obs_matrix_elements[obs_idx][i] = expectation;
+                }
+            }
+        }
+        
+        // For each temperature, compute contribution to partition function and thermal averages
+        for (int t = 0; t < num_points; t++) {
+            double beta = 1.0 / results.temperatures[t];
+            double Z_sample = 0.0;
+            double E_sample = 0.0;
+            double E2_sample = 0.0;
+            std::vector<Complex> obs_sample(observables.size(), Complex(0.0, 0.0));
+            
+            // Project the initial random vector onto the eigenbasis of the tridiagonal matrix
+            std::vector<double> overlaps(actual_m);
+            for (int i = 0; i < actual_m; i++) {
+                // The overlap is just the first component of the eigenvector
+                // because the initial Lanczos vector is the first standard basis vector
+                // in the Krylov subspace
+                overlaps[i] = eigenvectors_T[i * actual_m + 0];
+            }
+            
+            // Accumulate contributions to the trace
+            for (int i = 0; i < actual_m; i++) {
+                double boltzmann = std::exp(-beta * eigenvalues[i]);
+                double weight = overlaps[i] * overlaps[i] * boltzmann;
+                
+                Z_sample += weight;
+                E_sample += eigenvalues[i] * weight;
+                E2_sample += eigenvalues[i] * eigenvalues[i] * weight;
+                
+                // Accumulate observable expectation values
+                for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+                    obs_sample[obs_idx] += obs_matrix_elements[obs_idx][i] * weight;
+                }
+            }
+            
+            // Factor N accounts for the trace normalization
+            Z_T[t] += Z_sample * N;
+            E_T[t] += E_sample * N;
+            E2_T[t] += E2_sample * N;
+            
+            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+                obs_values[obs_idx][t] += obs_sample[obs_idx] * N;
+            }
+        }
+        
+        // Progress reporting
+        if ((sample + 1) % 5 == 0 || sample == num_samples - 1) {
+            std::cout << "FTLM: Completed " << sample + 1 << " samples" << std::endl;
+            // Show current estimate of ground state energy
+            std::cout << "  Current estimate of ground state energy: " << eigenvalues[0] << std::endl;
+        }
     }
     
-    // Generate complex shifts z = omega + i*eta
-    std::vector<Complex> shifts(n_points);
-    for (int i = 0; i < n_points; i++) {
-        shifts[i] = Complex(omega_values[i], eta);
+    // Finalize results by averaging over samples
+    for (int t = 0; t < num_points; t++) {
+        double T = results.temperatures[t];
+        double Z = Z_T[t] / num_samples;
+        double E = E_T[t] / num_samples;
+        double E2 = E2_T[t] / num_samples;
+        
+        // Thermal averages
+        results.energy[t] = E / Z;
+        results.specific_heat[t] = (E2 / Z - (E / Z) * (E / Z)) / (T * T);
+        results.free_energy[t] = -T * std::log(Z);
+        results.entropy[t] = (results.energy[t] - results.free_energy[t]) / T;
+        
+        // Normalize observable expectation values
+        for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+            obs_values[obs_idx][t] /= (num_samples * Z);
+        }
     }
     
-    // Calculate Green's function using shifted Krylov solver
-    std::vector<Complex> green_function = ShiftedKrylovSolver::calculateGreenFunction(
-        H, b, a, shifts, max_iter, tol, true  // Assuming Hermitian H
-    );
-    
-    // Combine frequencies and Green's function values
-    std::vector<std::pair<double, Complex>> result(n_points);
-    for (int i = 0; i < n_points; i++) {
-        result[i] = std::make_pair(omega_values[i], green_function[i]);
+    // Save observable results if provided
+    if (!observables.empty()) {
+        std::string obs_dir = dir + "/ftlm_observables";
+        system(("mkdir -p " + obs_dir).c_str());
+        
+        for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
+            std::string filename = obs_dir + "/observable_" + std::to_string(obs_idx) + ".dat";
+            std::ofstream outfile(filename);
+            
+            if (outfile.is_open()) {
+                outfile << "# Temperature Real Imaginary" << std::endl;
+                for (int t = 0; t < num_points; t++) {
+                    outfile << results.temperatures[t] << " " 
+                          << obs_values[obs_idx][t].real() << " "
+                          << obs_values[obs_idx][t].imag() << std::endl;
+                }
+                outfile.close();
+                std::cout << "FTLM: Observable " << obs_idx << " saved to " << filename << std::endl;
+            }
+        }
     }
     
-    return result;
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+    
+    return results;
 }
+
 
 #include <chrono>
 int main(int argc, char* argv[]) {
