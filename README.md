@@ -29,3 +29,12 @@ This file serves as the interface for creating and manipulating the Hamiltonian,
 1. Construct the Hamiltonian using the functions defined in `construct_ham.h`.
 2. Use the Lanczos algorithm in `lanczos.cpp` to compute eigenvalues and eigenvectors.
 3. Analyze the results to extract physical properties, such as thermodynamic quantities or dynamical correlation functions.
+
+
+## Dependencies
+1. BLAS/LAPACK
+2. CuBLAS (if you want to use lanczos_cuda.cu)
+3. Eigen3
+4. OpenMP
+5. MPI
+6. ezARPACK-ng / arpack-ng
