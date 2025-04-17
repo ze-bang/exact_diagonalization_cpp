@@ -2095,7 +2095,403 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     system(("rm -rf " + temp_dir).c_str());
 }
 
+// Shift-invert Lanczos algorithm implementation
+void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
+                         int N, int max_iter, int exct, double sigma, 
+                         double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                         bool eigenvectors = false) {
+    
+    std::cout << "Shift-invert Lanczos: Starting with shift σ = " << sigma << std::endl;
+    
+    // Initialize random starting vector
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v_current(N);
+    
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        double real = dist(gen);
+        double imag = dist(gen);
+        #pragma omp critical
+        {
+            v_current[i] = Complex(real, imag);
+        }
+    }
+    
+    // Normalize the starting vector
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir + "/shift_invert_lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
 
+    // Write the first basis vector to file
+    std::string basis_file = temp_dir + "/basis_0.bin";
+    std::ofstream outfile(basis_file, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
+    outfile.close();
+    
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    // Initialize alpha and beta vectors for tridiagonal matrix
+    std::vector<double> alpha;  // Diagonal elements
+    std::vector<double> beta;   // Off-diagonal elements
+    beta.push_back(0.0);        // β_0 is not used
+    
+    max_iter = std::min(N, max_iter);
+    
+    std::cout << "Begin Shift-invert Lanczos iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Helper function to solve the shift-invert system (H - sigma*I)x = v using CG
+    auto solve_shifted_system = [&H, sigma, N, tol](const ComplexVector& v) -> ComplexVector {
+        // Define the shifted operator (H - sigma*I)
+        auto shifted_H = [&H, sigma, N](const Complex* v, Complex* result, int size) {
+            // Apply H to v
+            H(v, result, size);
+            // Subtract sigma*v
+            for (int i = 0; i < size; i++) {
+                result[i] -= sigma * v[i];
+            }
+        };
+        
+        // Initialize CG variables
+        ComplexVector x(N, Complex(0.0, 0.0));  // Initial guess
+        ComplexVector r(v);                     // Initial residual r = v - A*x = v
+        ComplexVector p(r);                     // Initial search direction
+        ComplexVector Ap(N);                    // To store A*p
+        
+        // Initial residual norm
+        double r_norm = cblas_dznrm2(N, r.data(), 1);
+        double initial_r_norm = r_norm;
+        
+        // CG iteration
+        const int max_cg_iter = 1000;
+        for (int iter = 0; iter < max_cg_iter && r_norm > tol * initial_r_norm; iter++) {
+            // Apply shifted operator to p
+            shifted_H(p.data(), Ap.data(), N);
+            
+            // Calculate step size alpha = (r·r)/(p·Ap)
+            Complex r_dot_r, p_dot_Ap;
+            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+            cblas_zdotc_sub(N, p.data(), 1, Ap.data(), 1, &p_dot_Ap);
+            
+            Complex alpha = r_dot_r / p_dot_Ap;
+            
+            // Update solution: x = x + alpha*p
+            cblas_zaxpy(N, &alpha, p.data(), 1, x.data(), 1);
+            
+            // Store old r·r for beta calculation
+            Complex r_dot_r_old = r_dot_r;
+            
+            // Update residual: r = r - alpha*Ap
+            Complex neg_alpha = -alpha;
+            cblas_zaxpy(N, &neg_alpha, Ap.data(), 1, r.data(), 1);
+            
+            // Check convergence
+            r_norm = cblas_dznrm2(N, r.data(), 1);
+            
+            // Calculate beta = (r_new·r_new)/(r_old·r_old)
+            cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+            Complex beta = r_dot_r / r_dot_r_old;
+            
+            // Update search direction: p = r + beta*p
+            for (int j = 0; j < N; j++) {
+                p[j] = r[j] + beta * p[j];
+            }
+        }
+        
+        return x;
+    };
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        
+        // Apply shift-invert operator: w = (H - sigma*I)^(-1) * v_j
+        w = solve_shifted_system(v_current);
+        
+        // w = w - beta_j * v_{j-1}
+        if (j > 0) {
+            Complex neg_beta = Complex(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+        }
+        
+        // alpha_j = <v_j, w>
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha = Complex(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // Full reorthogonalization
+        for (int k = 0; k <= j; k++) {
+            // Read basis vector k from file
+            ComplexVector basis_k = read_basis_vector(k, N);
+            
+            Complex overlap;
+            cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+            
+            Complex neg_overlap = -overlap;
+            cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+        }
+        
+        // beta_{j+1} = ||w||
+        norm = cblas_dznrm2(N, w.data(), 1);
+        beta.push_back(norm);
+        
+        // Check for invariant subspace
+        if (norm < tol) {
+            std::cout << "Shift-invert Lanczos: Invariant subspace found at iteration " << j + 1 << std::endl;
+            break;
+        }
+        
+        // v_{j+1} = w / beta_{j+1}
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        // Store basis vector to file
+        if (j < max_iter - 1) {
+            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
+            std::ofstream outfile(next_basis_file, std::ios::binary);
+            if (!outfile) {
+                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                return;
+            }
+            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
+            outfile.close();
+        }
+        
+        // Update for next iteration
+        v_prev = v_current;
+        v_current = v_next;
+    }
+    
+    // Construct and solve tridiagonal matrix
+    int m = alpha.size();
+    
+    std::cout << "Shift-invert Lanczos: Constructing tridiagonal matrix" << std::endl;
+
+    // Allocate arrays for LAPACKE
+    std::vector<double> diag = alpha;    // Copy of diagonal elements
+    std::vector<double> offdiag(m-1);    // Off-diagonal elements
+    
+    #pragma omp parallel for
+    for (int i = 0; i < m-1; i++) {
+        offdiag[i] = beta[i+1];
+    }
+
+    std::cout << "Shift-invert Lanczos: Solving tridiagonal matrix" << std::endl;
+    
+    // Save the requested number of eigenvalues, or all of them if m < exct
+    int n_eigenvalues = std::min(exct, m);
+    std::vector<double> shift_invert_evals(m);  // Eigenvalues of shift-invert operator
+    std::vector<double> evecs;                 // For eigenvectors
+    
+    // Workspace parameters
+    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
+    int info;
+    
+    if (eigenvectors) {
+        evecs.resize(m*m);
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), evecs.data(), m);
+    } else {
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
+    }
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Convert shift-invert eigenvalues back to original spectrum
+    // For shift-invert: λ_original = σ + 1/λ_shift_invert
+    eigenvalues.resize(n_eigenvalues);
+    for (int i = 0; i < n_eigenvalues; i++) {
+        // Note: The largest eigenvalues of the shift-invert operator
+        // correspond to eigenvalues closest to sigma in the original spectrum
+        double shift_invert_eval = diag[m-1-i];  // Take from the largest values
+        
+        // Avoid division by zero
+        if (std::abs(shift_invert_eval) < 1e-10) {
+            eigenvalues[i] = sigma;
+        } else {
+            eigenvalues[i] = sigma + 1.0 / shift_invert_eval;
+        }
+    }
+    
+    // Write eigenvalues and eigenvectors to files
+    std::string evec_dir = dir + "/shift_invert_lanczos_results";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+    
+    // Save eigenvalues to a single file
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Transform eigenvectors if requested
+    if (eigenvectors) {
+        std::cout << "Shift-invert Lanczos: Transforming eigenvectors" << std::endl;
+        
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int batch = 0; batch < (n_eigenvalues + batch_size - 1) / batch_size; batch++) {
+            int start_idx = batch * batch_size;
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
+            
+            std::cout << "Processing eigenvectors " << start_idx + 1 << " to " << end_idx 
+                      << " of " << n_eigenvalues << std::endl;
+            
+            // For each eigenvector in this batch
+            for (int i = start_idx; i < end_idx; i++) {
+                // The index in the evecs array (reverse order since we want closest to sigma)
+                int si_idx = m - 1 - i;
+                
+                // Calculate the full eigenvector in the original basis
+                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                
+                // Read basis vectors in batches to reduce disk I/O
+                const int basis_batch_size = 100;
+                for (int basis_start = 0; basis_start < m; basis_start += basis_batch_size) {
+                    int basis_end = std::min(basis_start + basis_batch_size, m);
+                    
+                    // Read this batch of basis vectors
+                    std::vector<ComplexVector> basis_batch;
+                    basis_batch.reserve(basis_end - basis_start);
+                    for (int j = basis_start; j < basis_end; j++) {
+                        basis_batch.push_back(read_basis_vector(j, N));
+                    }
+                    
+                    // Compute contribution from this batch
+                    for (int j = 0; j < basis_end - basis_start; j++) {
+                        int j_global = basis_start + j;
+                        Complex coef(evecs[si_idx*m + j_global], 0.0);
+                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
+                    }
+                }
+                
+                // Normalize the eigenvector
+                double norm = cblas_dznrm2(N, full_vector.data(), 1);
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, full_vector.data(), 1);
+                
+                // Optionally refine the eigenvector using inverse iteration
+                // (H - lambda*I)x = previous_x
+                ComplexVector refined_vector = full_vector;
+                for (int refine_iter = 0; refine_iter < 3; refine_iter++) {
+                    // Create a shifted system for this specific eigenvalue
+                    auto lambda_shifted_system = [&H, &eigenvalues, i, N](const Complex* v, Complex* result, int size) {
+                        // Apply H to v
+                        H(v, result, size);
+                        // Subtract lambda*v
+                        double lambda = eigenvalues[i];
+                        for (int j = 0; j < size; j++) {
+                            result[j] -= lambda * v[j];
+                        }
+                    };
+                    
+                    // Solve the system
+                    ComplexVector temp_vec = refined_vector;
+                    refined_vector.assign(N, Complex(0.0, 0.0));
+                    
+                    // Use a simpler direct solver for refinement
+                    // In practice, we would use a more sophisticated method here
+                    auto shifted_H = [&H, &eigenvalues, i, N](const Complex* v, Complex* result, int size) {
+                        H(v, result, size);
+                        for (int j = 0; j < size; j++) {
+                            result[j] -= eigenvalues[i] * v[j];
+                        }
+                    };
+                    
+                    // Approximate solution using a few steps of CG
+                    ComplexVector r(temp_vec);
+                    ComplexVector p(r);
+                    ComplexVector Ap(N);
+                    
+                    for (int cg_iter = 0; cg_iter < 5; cg_iter++) {
+                        shifted_H(p.data(), Ap.data(), N);
+                        
+                        Complex r_dot_r, p_dot_Ap;
+                        cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
+                        cblas_zdotc_sub(N, p.data(), 1, Ap.data(), 1, &p_dot_Ap);
+                        
+                        Complex alpha = r_dot_r / p_dot_Ap;
+                        cblas_zaxpy(N, &alpha, p.data(), 1, refined_vector.data(), 1);
+                        
+                        Complex neg_alpha = -alpha;
+                        cblas_zaxpy(N, &neg_alpha, Ap.data(), 1, r.data(), 1);
+                        
+                        Complex r_new_dot_r_new;
+                        cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_new_dot_r_new);
+                        
+                        Complex beta = r_new_dot_r_new / r_dot_r;
+                        for (int j = 0; j < N; j++) {
+                            p[j] = r[j] + beta * p[j];
+                        }
+                    }
+                    
+                    // Normalize
+                    norm = cblas_dznrm2(N, refined_vector.data(), 1);
+                    scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, refined_vector.data(), 1);
+                }
+                
+                // Save to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (!evec_outfile) {
+                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    continue;
+                }
+                evec_outfile.write(reinterpret_cast<char*>(refined_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+    
+    std::cout << "Shift-invert Lanczos: Completed successfully" << std::endl;
+}
 
 // Full diagonalization using LAPACK for Hermitian matrices
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N,
