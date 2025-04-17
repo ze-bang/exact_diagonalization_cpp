@@ -14,6 +14,10 @@
 using Complex = std::complex<double>;
 using Matrix = std::vector<std::vector<Complex>>;
 
+
+std::array<double, 2> operator* (const std::array<double, 4>& a, const std::array<double, 4>& b) {
+    return {a[0] * b[0] + a[1] * b[1], a[2] * b[0] + a[3] * b[1]};
+}
 /**
  * Operator class that can represent arbitrary quantum operators
  * through bit flip operations and scalar multiplications
@@ -126,7 +130,7 @@ public:
                     }
                 }
                 // Default case: no transformation applies
-                return {-1, Complex(0.0, 0.0)};
+                return {basis, Complex(0.0, 0.0)};
             });
             lineCount++;
         }
@@ -208,7 +212,7 @@ public:
                     }
                 }
                 // Default case: no transformation applies
-                return {-1, Complex(0.0, 0.0)};
+                return {basis, Complex(0.0, 0.0)};
             });
             lineCount++;
         }
@@ -217,6 +221,14 @@ public:
 private:
     std::vector<TransformFunction> transforms_;
     int n_bits_; // Number of bits in the basis representation
+    const std::array<std::array<double, 4>, 3> operators = {
+        {{0, 1, 0, 0}, {0, 0, 1, 0},{1, 0, 0, -1}}
+    };
+
+    const std::array<std::array<double, 2>, 2> basis = {
+        {{1, 0}, {0, 1}}
+    };
+
     mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
     mutable bool matrixBuilt_ = false;
 
@@ -968,5 +980,4 @@ private:
         return result;
     }
 };
-
 

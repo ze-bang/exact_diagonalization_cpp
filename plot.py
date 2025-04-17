@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Load data from file
-data_file = '/home/pc_linux/exact_diagonalization_cpp/ED_test_thermodynamics_full.dat'
+data_file = '/home/pc_linux/exact_diagonalization_cpp/data/4a/output/thermodynamics.dat'
 data = np.loadtxt(data_file, comments='#')
 
 # Extract temperature and specific heat columns

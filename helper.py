@@ -142,5 +142,50 @@ def write_transfer(interALL, file_name):
         +"\n")
     f.close()
 
-write_interALL(interALL, 'InterAll.def')
-write_transfer(transfer, 'Trans.def')
+def one_body_correlations(Op, file_name):
+    num_green_one  = All_N
+    f        = open(output_dir+file_name, 'wt')
+    f.write("==================="+"\n")
+    f.write("loc "+"{0:8d}".format(num_green_one)+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    for all_i in range(0,All_N):
+        f.write(" {0:8d} ".format(Op) \
+        +" {0:8d}   ".format(all_i)     \
+        +" {0:8f}   ".format(1)     \
+        +" {0:8f}   ".format(0)
+        +"\n")
+    f.close()
+
+
+def two_body_correlations(Op1, Op2, file_name):
+    num_green_two  = All_N*All_N
+    f        = open(output_dir+file_name, 'wt')
+    f.write("==================="+"\n")
+    f.write("loc "+"{0:8d}".format(num_green_two)+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    for all_i in range(0,All_N):
+        for all_j in range(0,All_N):
+            f.write(" {0:8d} ".format(Op1) \
+            +" {0:8d}   ".format(all_i)     \
+            +" {0:8d}   ".format(Op2)     \
+            +" {0:8d}   ".format(all_j)     \
+            +" {0:8f}   ".format(1) \
+            +" {0:8f}   ".format(0) \
+            +"\n")
+    f.close()
+
+
+
+write_interALL(interALL, "InterAll.dat")
+write_transfer(transfer, "Trans.dat")
+
+opname = ['S+', 'S-', 'Sz']
+
+for i in range(3):
+    one_body_correlations(i, "one_body_correlations"+opname[i]+".dat")
+    for j in range(3):
+        two_body_correlations(i, j, "two_body_correlations"+opname[i]+opname[j]+".dat")
