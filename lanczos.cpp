@@ -1463,8 +1463,8 @@ void block_lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H
     system(("rm -rf " + temp_dir).c_str());
 }
 
-// Block Lanczos algorithm with full reorthogonalization
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct,
+// Block Lanczos algorithm with periodic reorthogonalization
+void block_lanczos_periodic_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct,
                  double tol, std::vector<double>& eigenvalues, std::string dir = "",
                  bool eigenvectors = false, int block_size = 4) {
     
@@ -3179,73 +3179,97 @@ struct ThermodynamicData {
     std::vector<double> free_energy;
 };
 
-// Calculate thermodynamic quantities directly from energy eigenvalues
+// Calculate thermodynamic quantities directly from eigenvalues
 ThermodynamicData calculate_thermodynamics_from_spectrum(
-    const std::vector<double>& eigenvalues, 
-    double T_min = 0.01, 
-    double T_max = 10.0, 
-    int num_points = 100
+    const std::vector<double>& eigenvalues,
+    double T_min = 0.01,        // Minimum temperature
+    double T_max = 10.0,        // Maximum temperature
+    int num_points = 100        // Number of temperature points
 ) {
-    ThermodynamicData result;
+    ThermodynamicData results;
     
     // Generate logarithmically spaced temperature points
+    results.temperatures.resize(num_points);
     const double log_T_min = std::log(T_min);
     const double log_T_max = std::log(T_max);
     const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
     
-    result.temperatures.resize(num_points);
-    result.energy.resize(num_points);
-    result.specific_heat.resize(num_points);
-    result.entropy.resize(num_points);
-    result.free_energy.resize(num_points);
-    
     for (int i = 0; i < num_points; i++) {
-        double T = std::exp(log_T_min + i * log_T_step);
-        result.temperatures[i] = T;
-        
-        double beta = 1.0 / T;
-        
-        // Calculate log(Z) using the log-sum-exp trick for numerical stability
-        // log(sum_i exp(x_i)) = a + log(sum_i exp(x_i - a)) where a = max(x_i)
-        double max_val = -beta * eigenvalues[0]; // Start with first eigenvalue
-        for (size_t j = 1; j < eigenvalues.size(); j++) {
-            max_val = std::max(max_val, -beta * eigenvalues[j]);
-        }
-        
-        double sum_exp = 0.0;
-        for (const auto& e : eigenvalues) {
-            sum_exp += std::exp(-beta * e - max_val);
-        }
-        double log_Z = max_val + std::log(sum_exp);
-        
-        // Free energy: F = -T * log(Z)
-        result.free_energy[i] = -T * log_Z;
-        
-        // Internal energy: E = -d(log(Z))/d(beta) = sum_i E_i * exp(-beta*E_i) / Z
-        double energy = 0.0;
-        for (const auto& e : eigenvalues) {
-            energy += e * std::exp(-beta * e - max_val);
-        }
-        result.energy[i] = energy / sum_exp;
-        
-        // Entropy: S = (E - F) / T = log(Z) + beta*E
-        result.entropy[i] = log_Z + beta * result.energy[i];
-        
-        // Heat capacity: C = dE/dT = k*beta^2 * d^2(log(Z))/d(beta)^2
-        double E_squared = 0.0;
-        for (const auto& e : eigenvalues) {
-            E_squared += e * e * std::exp(-beta * e - max_val);
-        }
-        E_squared /= sum_exp;
-        
-        // C = beta^2 * (E^2 - E^2)
-        result.specific_heat[i] = beta * beta * (E_squared - result.energy[i] * result.energy[i]);
+        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
     }
     
-    return result;
+    // Resize other arrays
+    results.energy.resize(num_points);
+    results.specific_heat.resize(num_points);
+    results.entropy.resize(num_points);
+    results.free_energy.resize(num_points);
+    
+    // Find ground state energy (useful for numerical stability)
+    double E0 = *std::min_element(eigenvalues.begin(), eigenvalues.end());
+    
+    // For each temperature
+    for (int i = 0; i < num_points; i++) {
+        double T = results.temperatures[i];
+        double beta = 1.0 / T;
+        
+        // Use log-sum-exp trick for numerical stability in calculating Z
+        // Find the maximum value for normalization
+        double max_exp = -beta * E0;  // Start with ground state
+        
+        // Calculate partition function Z and energy using log-sum-exp trick
+        double sum_exp = 0.0;
+        double sum_E_exp = 0.0;
+        double sum_E2_exp = 0.0;
+        
+        for (double E : eigenvalues) {
+            double delta_E = E - E0;
+            double exp_term = std::exp(-beta * delta_E);
+            
+            sum_exp += exp_term;
+            sum_E_exp += E * exp_term;
+            sum_E2_exp += E * E * exp_term;
+        }
+        
+        // Calculate log(Z) = log(sum_exp) + (-beta*E0)
+        double log_Z = std::log(sum_exp) - beta * E0;
+        
+        // Free energy F = -T * log(Z)
+        results.free_energy[i] = -T * log_Z;
+        
+        // Energy E = (1/Z) * sum_i E_i * exp(-beta*E_i)
+        results.energy[i] = sum_E_exp / sum_exp;
+        
+        // Specific heat C_v = beta^2 * (⟨E^2⟩ - ⟨E⟩^2)
+        double avg_E2 = sum_E2_exp / sum_exp;
+        double avg_E_squared = results.energy[i] * results.energy[i];
+        results.specific_heat[i] = beta * beta * (avg_E2 - avg_E_squared);
+        
+        // Entropy S = (E - F) / T
+        results.entropy[i] = (results.energy[i] - results.free_energy[i]) / T;
+    }
+    
+    // Handle special case for T → 0 (avoid numerical issues)
+    if (T_min < 1e-6) {
+        // In the limit T → 0, only the ground state contributes
+        // Energy → E0
+        results.energy[0] = E0;
+        
+        // Specific heat → 0
+        results.specific_heat[0] = 0.0;
+        
+        // Entropy → 0 (third law of thermodynamics) or ln(g) if g-fold degenerate
+        int degeneracy = 0;
+        for (double E : eigenvalues) {
+            if (std::abs(E - E0) < 1e-10) degeneracy++;
+        }
+        results.entropy[0] = (degeneracy > 1) ? std::log(degeneracy) : 0.0;
+        
+        // Free energy → E0 - TS
+        results.free_energy[0] = E0 - results.temperatures[0] * results.entropy[0];
+    }
+    
+    return results;
 }
-
-
 
 // Calculate the expectation value <ψ_a|A|ψ_a> for the a-th eigenstate of H
 Complex calculate_expectation_value(
