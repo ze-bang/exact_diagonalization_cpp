@@ -834,7 +834,1292 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     system(("rm -rf " + temp_dir).c_str());
 }
 
+// Lanczos algorithm implementation with periodic reorthogonalization
+void lanczos_periodic_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+             double tol, std::vector<double>& eigenvalues, std::string dir = "",
+             bool eigenvectors = false, int reorth_period = 20) {
+    
+    // Initialize random starting vector
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v_current(N);
+    
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        double real = dist(gen);
+        double imag = dist(gen);
+        #pragma omp critical
+        {
+            v_current[i] = Complex(real, imag);
+        }
+    }
 
+    std::cout << "Lanczos: Initial vector generated" << std::endl;
+    
+    // Normalize the starting vector
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir+"/lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+
+    // Write the first basis vector to file
+    std::string basis_file = temp_dir + "/basis_0.bin";
+    std::ofstream outfile(basis_file, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+        return;
+    }
+    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
+    outfile.close();
+    
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    // Initialize alpha and beta vectors for tridiagonal matrix
+    std::vector<double> alpha;  // Diagonal elements
+    std::vector<double> beta;   // Off-diagonal elements
+    beta.push_back(0.0);        // β_0 is not used
+    
+    max_iter = std::min(N, max_iter);
+    
+    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Reorthogonalization period = " << reorth_period << std::endl;
+    std::cout << "Lanczos: Iterating..." << std::endl;   
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        // w = H*v_j
+        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        H(v_current.data(), w.data(), N);
+        
+        // w = w - beta_j * v_{j-1}
+        if (j > 0) {
+            Complex neg_beta = Complex(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+        }
+        
+        // alpha_j = <v_j, w>
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha = Complex(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // Periodic reorthogonalization
+        // Only reorthogonalize every reorth_period iterations or if j is close to max_iter
+        if (j % reorth_period == reorth_period - 1 || j >= max_iter - 5) {
+            std::cout << "  Performing reorthogonalization at step " << j + 1 << std::endl;
+            
+            // Full reorthogonalization against all previous basis vectors
+            for (int k = 0; k <= j; k++) {
+                // Read basis vector k from file
+                ComplexVector basis_k = read_basis_vector(k, N);
+                
+                // Calculate projection and subtract
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            }
+            
+            // Optional: repeat for enhanced numerical stability
+            for (int k = 0; k <= j; k++) {
+                ComplexVector basis_k = read_basis_vector(k, N);
+                
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            }
+        }
+        
+        // beta_{j+1} = ||w||
+        norm = cblas_dznrm2(N, w.data(), 1);
+        beta.push_back(norm);
+        
+        // v_{j+1} = w / beta_{j+1}
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        // Store basis vector to file
+        if (eigenvectors){
+            if (j < max_iter - 1) {
+                std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
+                std::ofstream outfile(next_basis_file, std::ios::binary);
+                if (!outfile) {
+                    std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                    return;
+                }
+                outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
+                outfile.close();
+            }    
+        }
+
+        // Update for next iteration
+        v_prev = v_current;
+        v_current = v_next;
+    }
+    
+    // Construct and solve tridiagonal matrix
+    int m = alpha.size();
+    
+    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
+
+    // Allocate arrays for LAPACKE
+    std::vector<double> diag = alpha;    // Copy of diagonal elements
+    std::vector<double> offdiag(m-1);    // Off-diagonal elements
+    
+    #pragma omp parallel for
+    for (int i = 0; i < m-1; i++) {
+        offdiag[i] = beta[i+1];
+    }
+
+    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
+    
+    // Save only the first exct eigenvalues, or all of them if m < exct
+    int n_eigenvalues = std::min(exct, m);
+    std::vector<double> evals(m);        // For eigenvalues    
+    // Workspace parameters
+    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
+    int info;
+    
+    // Write eigenvalues and eigenvectors to files
+    std::string evec_dir = dir + "/lanczos_eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+
+    if (eigenvectors) {
+        // Need space for eigenvectors but m might be too large for full allocation
+        // Instead of computing all eigenvectors at once, compute them in batches
+        const int batch_size = 1000; // Adjust based on available memory
+        int num_batches = (n_eigenvalues + batch_size - 1) / batch_size; // Ceiling division
+
+        
+        // First compute all eigenvalues without eigenvectors
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
+        
+        if (info != 0) {
+            std::cerr << "LAPACKE_dstevd failed with error code " << info 
+                  << " when computing eigenvalues" << std::endl;
+            system(("rm -rf " + temp_dir).c_str());
+            return;
+        }
+        
+        // Then compute eigenvectors in batches using dstevr which allows range selection
+        for (int batch = 0; batch < num_batches; batch++) {
+            int start_idx = batch * batch_size;
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues) - 1;
+            int batch_n = end_idx - start_idx + 1;
+            
+            std::cout << "Computing eigenvectors batch " << batch + 1 << "/" << num_batches 
+                  << " (indices " << start_idx << " to " << end_idx << ")" << std::endl;
+            
+            // Allocate memory just for this batch
+            std::vector<double> batch_evals(batch_n);
+            std::vector<double> batch_evecs(m * batch_n);
+            std::vector<int> isuppz(2 * batch_n);
+            
+            // Make a copy of the tridiagonal matrix data for dstevr
+            std::vector<double> diag_copy = diag;
+            std::vector<double> offdiag_copy(offdiag);
+            
+            int m_found;
+            // Compute eigenvectors for this batch using index range
+            info = LAPACKE_dstevr(LAPACK_COL_MAJOR, 'V', 'I', m, 
+                     diag_copy.data(), offdiag_copy.data(), 
+                     0.0, 0.0, // vl, vu not used with 'I' range option
+                     start_idx + 1, end_idx + 1, // FORTRAN 1-indexing
+                     1e-6, // abstol, set to 0 for default
+                     &m_found,
+                     batch_evals.data(), batch_evecs.data(), m, 
+                     isuppz.data());
+            
+            if (info != 0 || m_found != batch_n) {
+            std::cerr << "LAPACKE_dstevr failed with error code " << info 
+                  << " when computing eigenvectors for batch " << batch + 1 
+                  << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
+            continue;
+            }
+
+            std::cout << "  Found " << m_found << " eigenvectors in this batch." << std::endl;
+            
+            // Transform and save each eigenvector in this batch
+            for (int i = 0; i < batch_n; i++) {
+                int global_idx = start_idx + i;
+                
+                // Transform the eigenvector
+                // Initialize full vector
+                std::cout << "  Transforming eigenvector " << global_idx + 1 << std::endl;
+                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                // Read basis vectors in batches to reduce disk I/O
+                const int basis_batch_size = 100;  // Adjust based on available memory
+                for (int batch_start = 0; batch_start < m; batch_start += basis_batch_size) {
+                    int batch_end = std::min(batch_start + basis_batch_size, m);
+                    
+                    // Read this batch of basis vectors
+                    std::vector<ComplexVector> basis_batch;
+                    basis_batch.reserve(batch_end - batch_start);
+                    for (int j = batch_start; j < batch_end; j++) {
+                        basis_batch.push_back(read_basis_vector(j, N));
+                    }
+                    
+                    // Compute contribution from this batch
+                    for (int j = 0; j < batch_end - batch_start; j++) {
+                        int j_global = batch_start + j;
+                        Complex coef(batch_evecs[j_global*batch_n + i], 0.0);
+                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
+                    }
+                }
+                std::cout << "  Normalizing eigenvector " << global_idx + 1 << std::endl;
+                // Normalize
+                double norm = cblas_dznrm2(N, full_vector.data(), 1);
+                if (norm > 1e-12) {
+                    Complex scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, full_vector.data(), 1);
+                }
+                
+                // Save to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".bin";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (!evec_outfile) {
+                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    continue;
+                }
+                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+                
+                // Print progress occasionally
+                if (global_idx % 10 == 0 || global_idx == n_eigenvalues - 1) {
+                    std::cout << "  Saved eigenvector " << global_idx + 1 << " of " << n_eigenvalues << std::endl;
+                }
+            }
+            
+            // Clear memory by reassigning vectors to empty ones
+            std::vector<double>().swap(batch_evals);
+            std::vector<double>().swap(batch_evecs);
+            std::vector<int>().swap(isuppz);
+        }
+    } else {
+        // Just compute eigenvalues
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
+    }
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        // Clean up temporary files before returning
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues
+    eigenvalues.resize(n_eigenvalues);
+    std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
+
+    // Save eigenvalues to a single file
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+}
+
+
+// Block Lanczos algorithm without reorthogonalization
+void block_lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct,
+                          double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                          bool eigenvectors = false, int block_size = 4) {
+    
+    // Initialize random block of orthogonal vectors
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<ComplexVector> block_vectors(block_size, ComplexVector(N));
+    
+    // Generate first random vector
+    block_vectors[0] = generateRandomVector(N, gen, dist);
+    
+    // Generate remaining orthogonal vectors in the block
+    for (int i = 1; i < block_size; i++) {
+        block_vectors[i] = generateOrthogonalVector(N, 
+            std::vector<ComplexVector>(block_vectors.begin(), block_vectors.begin() + i), 
+            gen, dist);
+    }
+    
+    // Create directory for temporary basis vector blocks
+    std::string temp_dir = dir + "/block_lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+    
+    // Write the first block of basis vectors to files
+    for (int i = 0; i < block_size; i++) {
+        std::string basis_file = temp_dir + "/basis_0_" + std::to_string(i) + ".bin";
+        std::ofstream outfile(basis_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+            return;
+        }
+        outfile.write(reinterpret_cast<char*>(block_vectors[i].data()), N * sizeof(Complex));
+        outfile.close();
+    }
+    
+    // Previous, current and next blocks
+    std::vector<ComplexVector> prev_block(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+    std::vector<ComplexVector> curr_block = block_vectors;
+    std::vector<ComplexVector> next_block(block_size, ComplexVector(N));
+    std::vector<ComplexVector> work_block(block_size, ComplexVector(N));
+    
+    // Adjust max_iter to account for block size
+    int num_steps = std::min(max_iter / block_size, N / block_size);
+    
+    // Use flat vectors for alpha and beta blocks
+    std::vector<Complex> alpha_flat(num_steps * block_size * block_size, Complex(0.0, 0.0));
+    std::vector<Complex> beta_flat((num_steps+1) * block_size * block_size, Complex(0.0, 0.0));
+    
+    std::cout << "Block Lanczos: Iterating with block size " << block_size << ", steps " << num_steps << std::endl;
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int block_idx, int vec_idx, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(block_idx) + "_" + std::to_string(vec_idx) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Helper functions to access flattened arrays
+    auto alpha = [&alpha_flat, block_size](int j, int r, int c) -> Complex& {
+        return alpha_flat[j * block_size * block_size + r * block_size + c];
+    };
+    
+    auto beta = [&beta_flat, block_size](int j, int r, int c) -> Complex& {
+        return beta_flat[j * block_size * block_size + r * block_size + c];
+    };
+    
+    // Block Lanczos iteration
+    for (int j = 0; j < num_steps; j++) {
+        std::cout << "Block iteration " << j + 1 << " of " << num_steps << std::endl;
+        
+        // Apply H to each vector in the current block
+        for (int b = 0; b < block_size; b++) {
+            H(curr_block[b].data(), work_block[b].data(), N);
+        }
+        
+        // Subtract beta_j * prev_block
+        if (j > 0) {
+            for (int i = 0; i < block_size; i++) {
+                for (int k = 0; k < block_size; k++) {
+                    Complex neg_beta = -beta(j, i, k);
+                    cblas_zaxpy(N, &neg_beta, prev_block[k].data(), 1, work_block[i].data(), 1);
+                }
+            }
+        }
+        
+        // Compute alpha_j block
+        for (int i = 0; i < block_size; i++) {
+            for (int k = 0; k < block_size; k++) {
+                Complex dot;
+                cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
+                alpha(j, i, k) = dot;
+                
+                // Subtract from work vector
+                Complex neg_dot = -dot;
+                cblas_zaxpy(N, &neg_dot, curr_block[k].data(), 1, work_block[i].data(), 1);
+            }
+        }
+        
+        // QR factorization of the work block to get next orthonormal block
+        for (int i = 0; i < block_size; i++) {
+            // Compute the norm of the work vector
+            double norm = cblas_dznrm2(N, work_block[i].data(), 1);
+            
+            // If nearly zero, generate a new orthogonal vector
+            if (norm < tol) {
+                // Generate a set of all vectors we've seen so far
+                std::vector<ComplexVector> all_vectors;
+                for (int b = 0; b < block_size; b++) {
+                    all_vectors.push_back(curr_block[b]);
+                    if (j > 0) all_vectors.push_back(prev_block[b]);
+                }
+                for (int b = 0; b < i; b++) {
+                    all_vectors.push_back(next_block[b]);
+                }
+                
+                next_block[i] = generateOrthogonalVector(N, all_vectors, gen, dist);
+                norm = 1.0; // Already normalized by generateOrthogonalVector
+            } else {
+                // Copy work to next
+                next_block[i] = work_block[i];
+                
+                // Normalize
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, next_block[i].data(), 1);
+            }
+            
+            // Set the diagonal beta element
+            beta(j+1, i, i) = Complex(norm, 0.0);
+            
+            // Orthogonalize remaining work vectors against this one
+            for (int k = i + 1; k < block_size; k++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, next_block[i].data(), 1, work_block[k].data(), 1, &overlap);
+                beta(j+1, k, i) = overlap;  // Off-diagonal beta element
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, next_block[i].data(), 1, work_block[k].data(), 1);
+            }
+        }
+        
+        // Store the new basis vectors to disk
+        if (eigenvectors) {
+            if (j < num_steps - 1) {
+                for (int b = 0; b < block_size; b++) {
+                    std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + "_" + std::to_string(b) + ".bin";
+                    std::ofstream outfile(next_basis_file, std::ios::binary);
+                    if (!outfile) {
+                        std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                        return;
+                    }
+                    outfile.write(reinterpret_cast<char*>(next_block[b].data()), N * sizeof(Complex));
+                    outfile.close();
+                }
+            }
+        }
+        
+        // Update for next iteration
+        prev_block = curr_block;
+        curr_block = next_block;
+    }
+    
+    // Convert block tridiagonal matrix to regular format for solving
+    int total_dim = block_size * num_steps;
+    std::vector<Complex> block_matrix(total_dim * total_dim, Complex(0.0, 0.0));
+    
+    std::cout << "Block Lanczos: Constructing block tridiagonal matrix of size " << total_dim << "x" << total_dim << std::endl;
+    
+    // Fill diagonal blocks (alpha)
+    for (int j = 0; j < num_steps; j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = j * block_size + r;
+                int col = j * block_size + c;
+                block_matrix[col * total_dim + row] = alpha(j, r, c);
+            }
+        }
+    }
+    
+    // Fill off-diagonal blocks (beta)
+    for (int j = 1; j < num_steps + 1; j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = (j-1) * block_size + r;
+                int col = j * block_size + c;
+                if (col < total_dim) {
+                    block_matrix[col * total_dim + row] = beta(j, r, c);
+                    block_matrix[row * total_dim + col] = std::conj(beta(j, r, c));
+                }
+            }
+        }
+    }
+    
+    std::cout << "Block Lanczos: Solving block tridiagonal matrix" << std::endl;
+    
+    // Diagonalize the block tridiagonal matrix
+    std::vector<double> evals(total_dim);
+    std::vector<Complex> evecs;
+    
+    char jobz = eigenvectors ? 'V' : 'N';
+    int info;
+    
+    if (eigenvectors) {
+        evecs = block_matrix;  // Copy for LAPACK which overwrites input
+    }
+    
+    info = LAPACKE_zheev(LAPACK_COL_MAJOR, jobz, 'U', 
+                       total_dim, reinterpret_cast<lapack_complex_double*>(eigenvectors ? evecs.data() : block_matrix.data()), 
+                       total_dim, evals.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues
+    int n_eigenvalues = std::min(exct, total_dim);
+    eigenvalues.resize(n_eigenvalues);
+    std::copy(evals.begin(), evals.begin() + n_eigenvalues, eigenvalues.begin());
+    
+    // Save eigenvalues to a single file
+    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+    
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Transform eigenvectors back to original basis if requested
+    if (eigenvectors) {
+        std::cout << "Block Lanczos: Transforming eigenvectors back to original basis" << std::endl;
+        
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int start_idx = 0; start_idx < n_eigenvalues; start_idx += batch_size) {
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
+            
+            std::cout << "Processing eigenvectors " << start_idx + 1 << " to " << end_idx 
+                      << " of " << n_eigenvalues << std::endl;
+            
+            // Transform each eigenvector in the batch
+            for (int i = start_idx; i < end_idx; i++) {
+                std::cout << "  Transforming eigenvector " << i + 1 << std::endl;
+                
+                // Initialize full eigenvector
+                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                
+                // For each block step
+                for (int j = 0; j < num_steps; j++) {
+                    // For each vector in the block
+                    for (int b = 0; b < block_size; b++) {
+                        // Load basis vector
+                        ComplexVector basis = read_basis_vector(j, b, N);
+                        
+                        // Get coefficient
+                        Complex coef = evecs[(j * block_size + b) * total_dim + i];
+                        
+                        // Add contribution
+                        cblas_zaxpy(N, &coef, basis.data(), 1, full_vector.data(), 1);
+                    }
+                }
+                
+                // Normalize the eigenvector
+                double norm = cblas_dznrm2(N, full_vector.data(), 1);
+                if (norm > 1e-12) {
+                    Complex scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, full_vector.data(), 1);
+                }
+                
+                // Save to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (!evec_outfile) {
+                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    continue;
+                }
+                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+}
+
+// Block Lanczos algorithm with full reorthogonalization
+void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct,
+                 double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                 bool eigenvectors = false, int block_size = 4) {
+    
+    // Initialize random block of orthogonal vectors
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<ComplexVector> block_vectors(block_size, ComplexVector(N));
+    
+    // Generate first random vector
+    block_vectors[0] = generateRandomVector(N, gen, dist);
+    
+    // Generate remaining orthogonal vectors in the block
+    for (int i = 1; i < block_size; i++) {
+        block_vectors[i] = generateOrthogonalVector(N, 
+            std::vector<ComplexVector>(block_vectors.begin(), block_vectors.begin() + i), 
+            gen, dist);
+    }
+    
+    // Create directory for temporary basis vector blocks
+    std::string temp_dir = dir + "/block_lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+    
+    // Store all basis vectors for reorthogonalization
+    std::vector<ComplexVector> all_basis_vectors;
+    for (int i = 0; i < block_size; i++) {
+        all_basis_vectors.push_back(block_vectors[i]);
+        
+        // Write the first block of basis vectors to files
+        std::string basis_file = temp_dir + "/basis_0_" + std::to_string(i) + ".bin";
+        std::ofstream outfile(basis_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+            return;
+        }
+        outfile.write(reinterpret_cast<char*>(block_vectors[i].data()), N * sizeof(Complex));
+        outfile.close();
+    }
+    
+    // Previous, current and next blocks
+    std::vector<ComplexVector> prev_block(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+    std::vector<ComplexVector> curr_block = block_vectors;
+    std::vector<ComplexVector> next_block(block_size, ComplexVector(N));
+    std::vector<ComplexVector> work_block(block_size, ComplexVector(N));
+    
+    // Flattened block tridiagonal matrix elements
+    std::vector<Complex> alpha_flat; // Flattened diagonal blocks
+    std::vector<Complex> beta_flat;  // Flattened off-diagonal blocks
+    
+    // Accessor functions for indexing the flattened arrays
+    auto alpha = [&alpha_flat, block_size](int j, int r, int c) -> Complex& {
+        return alpha_flat[j * block_size * block_size + r * block_size + c];
+    };
+    
+    auto beta = [&beta_flat, block_size](int j, int r, int c) -> Complex& {
+        return beta_flat[j * block_size * block_size + r * block_size + c];
+    };
+    
+    // Pre-allocate space for alpha and beta
+    int num_steps = std::min(max_iter / block_size, N / block_size);
+    alpha_flat.resize(num_steps * block_size * block_size, Complex(0.0, 0.0));
+    beta_flat.resize((num_steps + 1) * block_size * block_size, Complex(0.0, 0.0));
+    
+    std::cout << "Block Lanczos with full reorthogonalization: Iterating with block size " << block_size 
+              << ", steps " << num_steps << std::endl;
+    
+    // Block Lanczos iteration
+    for (int j = 0; j < num_steps; j++) {
+        std::cout << "Block iteration " << j + 1 << " of " << num_steps << std::endl;
+        
+        // Apply H to each vector in the current block
+        for (int b = 0; b < block_size; b++) {
+            H(curr_block[b].data(), work_block[b].data(), N);
+        }
+        
+        // Subtract beta_j * prev_block
+        if (j > 0) {
+            for (int i = 0; i < block_size; i++) {
+                for (int k = 0; k < block_size; k++) {
+                    Complex neg_beta = -beta(j, i, k);
+                    cblas_zaxpy(N, &neg_beta, prev_block[k].data(), 1, work_block[i].data(), 1);
+                }
+            }
+        }
+        
+        // Compute alpha_j block
+        for (int i = 0; i < block_size; i++) {
+            for (int k = 0; k < block_size; k++) {
+                Complex dot;
+                cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
+                alpha(j, i, k) = dot;
+                
+                // Subtract from work vector
+                Complex neg_dot = -dot;
+                cblas_zaxpy(N, &neg_dot, curr_block[k].data(), 1, work_block[i].data(), 1);
+            }
+        }
+        
+        // Full reorthogonalization against all previous basis vectors
+        for (int b = 0; b < block_size; b++) {
+            for (int iter = 0; iter < 2; iter++) { // Twice for numerical stability
+                for (const auto& basis : all_basis_vectors) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, basis.data(), 1, work_block[b].data(), 1, &overlap);
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, basis.data(), 1, work_block[b].data(), 1);
+                }
+            }
+        }
+        
+        // QR factorization of the work block to get next orthonormal block
+        // Simplified Gram-Schmidt for QR factorization
+        for (int i = 0; i < block_size; i++) {
+            // Compute the norm of the work vector
+            double norm = cblas_dznrm2(N, work_block[i].data(), 1);
+            
+            // If nearly zero, generate a new orthogonal vector
+            if (norm < tol) {
+                next_block[i] = generateOrthogonalVector(N, all_basis_vectors, gen, dist);
+                norm = 1.0; // Already normalized by generateOrthogonalVector
+            } else {
+                // Copy work to next
+                next_block[i] = work_block[i];
+                
+                // Normalize
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, next_block[i].data(), 1);
+            }
+            
+            // Set the diagonal beta element
+            beta(j+1, i, i) = Complex(norm, 0.0);
+            
+            // Orthogonalize remaining work vectors against this one
+            for (int k = i + 1; k < block_size; k++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, next_block[i].data(), 1, work_block[k].data(), 1, &overlap);
+                beta(j+1, k, i) = overlap;  // Off-diagonal beta element
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, next_block[i].data(), 1, work_block[k].data(), 1);
+            }
+            
+            // Add to all basis vectors for future reorthogonalization
+            all_basis_vectors.push_back(next_block[i]);
+        }
+        
+        // Store the new basis vectors to disk
+        if (eigenvectors || j < num_steps - 1) {
+            for (int b = 0; b < block_size; b++) {
+                std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + "_" + std::to_string(b) + ".bin";
+                std::ofstream outfile(next_basis_file, std::ios::binary);
+                if (!outfile) {
+                    std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                    return;
+                }
+                outfile.write(reinterpret_cast<char*>(next_block[b].data()), N * sizeof(Complex));
+                outfile.close();
+            }
+        }
+        
+        // Update for next iteration
+        prev_block = curr_block;
+        curr_block = next_block;
+    }
+    
+    // Convert block tridiagonal matrix to regular format for solving
+    int total_dim = block_size * num_steps;
+    std::vector<Complex> block_matrix(total_dim * total_dim, Complex(0.0, 0.0));
+    
+    std::cout << "Block Lanczos: Constructing block tridiagonal matrix of size " << total_dim << "x" << total_dim << std::endl;
+    
+    // Fill diagonal blocks (alpha)
+    for (int j = 0; j < num_steps; j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = j * block_size + r;
+                int col = j * block_size + c;
+                if (row < total_dim && col < total_dim) {
+                    block_matrix[col * total_dim + row] = alpha(j, r, c);
+                }
+            }
+        }
+    }
+    
+    // Fill off-diagonal blocks (beta)
+    for (int j = 1; j <= num_steps; j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = (j-1) * block_size + r;
+                int col = j * block_size + c;
+                if (row < total_dim && col < total_dim) {
+                    block_matrix[col * total_dim + row] = beta(j, r, c);
+                    block_matrix[row * total_dim + col] = std::conj(beta(j, r, c));
+                }
+            }
+        }
+    }
+    
+    std::cout << "Block Lanczos: Solving block tridiagonal matrix" << std::endl;
+    
+    // Diagonalize the block tridiagonal matrix
+    std::vector<double> evals(total_dim);
+    std::vector<Complex> evecs;
+    
+    char jobz = eigenvectors ? 'V' : 'N';
+    int info;
+    
+    if (eigenvectors) {
+        evecs = block_matrix;  // Copy for LAPACK which overwrites input
+    }
+    
+    info = LAPACKE_zheev(LAPACK_COL_MAJOR, jobz, 'U', 
+                       total_dim, reinterpret_cast<lapack_complex_double*>(eigenvectors ? evecs.data() : block_matrix.data()), 
+                       total_dim, evals.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues
+    int n_eigenvalues = std::min(exct, total_dim);
+    eigenvalues.resize(n_eigenvalues);
+    std::copy(evals.begin(), evals.begin() + n_eigenvalues, eigenvalues.begin());
+    
+    // Save eigenvalues to a single file
+    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+    
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int block_idx, int vec_idx, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(block_idx) + "_" + std::to_string(vec_idx) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Transform eigenvectors back to original basis if requested
+    if (eigenvectors) {
+        std::cout << "Block Lanczos: Transforming eigenvectors back to original basis" << std::endl;
+        
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int start_idx = 0; start_idx < n_eigenvalues; start_idx += batch_size) {
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
+            int batch_n = end_idx - start_idx;
+            
+            std::cout << "Processing eigenvectors " << start_idx + 1 << " to " << end_idx 
+                      << " of " << n_eigenvalues << std::endl;
+            
+            // Transform each eigenvector in the batch
+            for (int i = start_idx; i < end_idx; i++) {
+                std::cout << "  Transforming eigenvector " << i + 1 << std::endl;
+                
+                // Initialize full eigenvector
+                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                
+                // For each block step
+                for (int j = 0; j < num_steps; j++) {
+                    // For each vector in the block
+                    for (int b = 0; b < block_size; b++) {
+                        // Load basis vector
+                        ComplexVector basis = read_basis_vector(j, b, N);
+                        
+                        // Get coefficient
+                        Complex coef = evecs[(j * block_size + b) * total_dim + i];
+                        
+                        // Add contribution
+                        cblas_zaxpy(N, &coef, basis.data(), 1, full_vector.data(), 1);
+                    }
+                }
+                
+                // Normalize the eigenvector
+                double norm = cblas_dznrm2(N, full_vector.data(), 1);
+                if (norm > 1e-12) {
+                    Complex scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, full_vector.data(), 1);
+                }
+                
+                // Save to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (!evec_outfile) {
+                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    continue;
+                }
+                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+}
+
+// Block Lanczos algorithm with periodic reorthogonalization
+void block_lanczos_periodic_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct,
+                                 double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                                 bool eigenvectors = false, int block_size = 4, int reorth_period = 5) {
+    
+    // Initialize random block of orthogonal vectors
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::vector<ComplexVector> block_vectors(block_size, ComplexVector(N));
+    
+    // Generate first random vector
+    block_vectors[0] = generateRandomVector(N, gen, dist);
+    
+    // Generate remaining orthogonal vectors in the block
+    for (int i = 1; i < block_size; i++) {
+        block_vectors[i] = generateOrthogonalVector(N, 
+            std::vector<ComplexVector>(block_vectors.begin(), block_vectors.begin() + i), 
+            gen, dist);
+    }
+    
+    // Create directory for temporary basis vector blocks
+    std::string temp_dir = dir + "/block_lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+    
+    // Store basis vectors for reorthogonalization
+    std::vector<ComplexVector> all_basis_vectors;
+    for (int i = 0; i < block_size; i++) {
+        all_basis_vectors.push_back(block_vectors[i]);
+        
+        // Write the first block of basis vectors to files
+        std::string basis_file = temp_dir + "/basis_0_" + std::to_string(i) + ".bin";
+        std::ofstream outfile(basis_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+            return;
+        }
+        outfile.write(reinterpret_cast<char*>(block_vectors[i].data()), N * sizeof(Complex));
+        outfile.close();
+    }
+    
+    // Previous, current and next blocks
+    std::vector<ComplexVector> prev_block(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+    std::vector<ComplexVector> curr_block = block_vectors;
+    std::vector<ComplexVector> next_block(block_size, ComplexVector(N));
+    std::vector<ComplexVector> work_block(block_size, ComplexVector(N));
+    
+    // Block tridiagonal matrix elements
+    std::vector<std::vector<std::vector<Complex>>> alpha; // Diagonal blocks
+    std::vector<std::vector<std::vector<Complex>>> beta;  // Off-diagonal blocks
+    
+    // First empty beta block
+    beta.push_back(std::vector<std::vector<Complex>>(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0))));
+    
+    // Adjust max_iter to account for block size
+    int num_steps = std::min(max_iter / block_size, N / block_size);
+    
+    std::cout << "Block Lanczos with periodic reorthogonalization: Iterating with block size " << block_size 
+              << ", steps " << num_steps << ", reorth period " << reorth_period << std::endl;
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int block_idx, int vec_idx, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(block_idx) + "_" + std::to_string(vec_idx) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Block Lanczos iteration
+    for (int j = 0; j < num_steps; j++) {
+        std::cout << "Block iteration " << j + 1 << " of " << num_steps << std::endl;
+        
+        // Current alpha block
+        std::vector<std::vector<Complex>> curr_alpha(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
+        
+        // Apply H to each vector in the current block
+        for (int b = 0; b < block_size; b++) {
+            H(curr_block[b].data(), work_block[b].data(), N);
+        }
+        
+        // Subtract beta_j * prev_block
+        if (j > 0) {
+            for (int i = 0; i < block_size; i++) {
+                for (int k = 0; k < block_size; k++) {
+                    Complex neg_beta = -beta[j][i][k];
+                    cblas_zaxpy(N, &neg_beta, prev_block[k].data(), 1, work_block[i].data(), 1);
+                }
+            }
+        }
+        
+        // Compute alpha_j block
+        for (int i = 0; i < block_size; i++) {
+            for (int k = 0; k < block_size; k++) {
+                Complex dot;
+                cblas_zdotc_sub(N, curr_block[k].data(), 1, work_block[i].data(), 1, &dot);
+                curr_alpha[i][k] = dot;
+                
+                // Subtract from work vector
+                Complex neg_dot = -dot;
+                cblas_zaxpy(N, &neg_dot, curr_block[k].data(), 1, work_block[i].data(), 1);
+            }
+        }
+        
+        alpha.push_back(curr_alpha);
+        
+        // Periodic reorthogonalization
+        if (j % reorth_period == reorth_period - 1 || j >= num_steps - 3) {
+            std::cout << "  Performing reorthogonalization at step " << j + 1 << std::endl;
+            
+            // Full reorthogonalization against all previous basis vectors
+            for (int b = 0; b < block_size; b++) {
+                for (int iter = 0; iter < 2; iter++) { // Twice for numerical stability
+                    for (int step = 0; step <= j; step++) {
+                        for (int vec = 0; vec < block_size; vec++) {
+                            // Read basis vector from file
+                            ComplexVector basis = read_basis_vector(step, vec, N);
+                            
+                            // Calculate projection and subtract
+                            Complex overlap;
+                            cblas_zdotc_sub(N, basis.data(), 1, work_block[b].data(), 1, &overlap);
+                            
+                            Complex neg_overlap = -overlap;
+                            cblas_zaxpy(N, &neg_overlap, basis.data(), 1, work_block[b].data(), 1);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // QR factorization of the work block to get next orthonormal block
+        std::vector<std::vector<Complex>> next_beta(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
+        
+        // Simplified Gram-Schmidt for QR factorization
+        for (int i = 0; i < block_size; i++) {
+            // Compute the norm of the work vector
+            double norm = cblas_dznrm2(N, work_block[i].data(), 1);
+            
+            // If nearly zero, generate a new orthogonal vector
+            if (norm < tol) {
+                // Generate a new vector orthogonal to all previously stored vectors
+                std::vector<ComplexVector> all_vectors;
+                for (int step = 0; step <= j; step++) {
+                    for (int vec = 0; vec < block_size; vec++) {
+                        all_vectors.push_back(read_basis_vector(step, vec, N));
+                    }
+                }
+                for (int b = 0; b < i; b++) {
+                    all_vectors.push_back(next_block[b]);
+                }
+                
+                next_block[i] = generateOrthogonalVector(N, all_vectors, gen, dist);
+                norm = 1.0; // Already normalized by generateOrthogonalVector
+            } else {
+                // Copy work to next
+                next_block[i] = work_block[i];
+                
+                // Normalize
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, next_block[i].data(), 1);
+            }
+            
+            // Set the diagonal beta element
+            next_beta[i][i] = Complex(norm, 0.0);
+            
+            // Orthogonalize remaining work vectors against this one
+            for (int j = i + 1; j < block_size; j++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, next_block[i].data(), 1, work_block[j].data(), 1, &overlap);
+                next_beta[j][i] = overlap;  // Off-diagonal beta element
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, next_block[i].data(), 1, work_block[j].data(), 1);
+            }
+        }
+        
+        beta.push_back(next_beta);
+        
+        // Store the new basis vectors to disk
+        if (eigenvectors || j < num_steps - 1) {
+            for (int b = 0; b < block_size; b++) {
+                std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + "_" + std::to_string(b) + ".bin";
+                std::ofstream outfile(next_basis_file, std::ios::binary);
+                if (!outfile) {
+                    std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                    return;
+                }
+                outfile.write(reinterpret_cast<char*>(next_block[b].data()), N * sizeof(Complex));
+                outfile.close();
+            }
+        }
+        
+        // Update for next iteration
+        prev_block = curr_block;
+        curr_block = next_block;
+    }
+    
+    // Convert block tridiagonal matrix to regular format for solving
+    int total_dim = block_size * num_steps;
+    std::vector<Complex> block_matrix(total_dim * total_dim, Complex(0.0, 0.0));
+    
+    std::cout << "Block Lanczos: Constructing block tridiagonal matrix of size " << total_dim << "x" << total_dim << std::endl;
+    
+    // Fill diagonal blocks (alpha)
+    for (size_t j = 0; j < alpha.size(); j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = j * block_size + r;
+                int col = j * block_size + c;
+                if (row < total_dim && col < total_dim) {
+                    block_matrix[col * total_dim + row] = alpha[j][r][c];
+                }
+            }
+        }
+    }
+    
+    // Fill off-diagonal blocks (beta)
+    for (size_t j = 1; j < beta.size(); j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = (j-1) * block_size + r;
+                int col = j * block_size + c;
+                if (row < total_dim && col < total_dim) {
+                    block_matrix[col * total_dim + row] = beta[j][r][c];
+                    block_matrix[row * total_dim + col] = std::conj(beta[j][r][c]);
+                }
+            }
+        }
+    }
+    
+    std::cout << "Block Lanczos: Solving block tridiagonal matrix" << std::endl;
+    
+    // Diagonalize the block tridiagonal matrix
+    std::vector<double> evals(total_dim);
+    std::vector<Complex> evecs;
+    
+    char jobz = eigenvectors ? 'V' : 'N';
+    int info;
+    
+    if (eigenvectors) {
+        evecs = block_matrix;  // Copy for LAPACK which overwrites input
+    }
+    
+    info = LAPACKE_zheev(LAPACK_COL_MAJOR, jobz, 'U', 
+                       total_dim, reinterpret_cast<lapack_complex_double*>(eigenvectors ? evecs.data() : block_matrix.data()), 
+                       total_dim, evals.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues
+    int n_eigenvalues = std::min(exct, total_dim);
+    eigenvalues.resize(n_eigenvalues);
+    std::copy(evals.begin(), evals.begin() + n_eigenvalues, eigenvalues.begin());
+    
+    // Save eigenvalues to a single file
+    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+    
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (!eval_outfile) {
+        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+    } else {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Transform eigenvectors back to original basis if requested
+    if (eigenvectors) {
+        std::cout << "Block Lanczos: Transforming eigenvectors back to original basis" << std::endl;
+        
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int start_idx = 0; start_idx < n_eigenvalues; start_idx += batch_size) {
+            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
+            int batch_n = end_idx - start_idx;
+            
+            std::cout << "Processing eigenvectors " << start_idx + 1 << " to " << end_idx 
+                      << " of " << n_eigenvalues << std::endl;
+            
+            // Transform each eigenvector in the batch
+            for (int i = start_idx; i < end_idx; i++) {
+                std::cout << "  Transforming eigenvector " << i + 1 << std::endl;
+                
+                // Initialize full eigenvector
+                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                
+                // For each block step
+                for (int j = 0; j < num_steps; j++) {
+                    // For each vector in the block
+                    for (int b = 0; b < block_size; b++) {
+                        // Load basis vector
+                        ComplexVector basis = read_basis_vector(j, b, N);
+                        
+                        // Get coefficient
+                        Complex coef = evecs[(j * block_size + b) * total_dim + i];
+                        
+                        // Add contribution
+                        cblas_zaxpy(N, &coef, basis.data(), 1, full_vector.data(), 1);
+                    }
+                }
+                
+                // Normalize the eigenvector
+                double norm = cblas_dznrm2(N, full_vector.data(), 1);
+                if (norm > 1e-12) {
+                    Complex scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, full_vector.data(), 1);
+                }
+                
+                // Save to file
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                if (!evec_outfile) {
+                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    continue;
+                }
+                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+}
 
 // Automatically estimate spectral bounds and optimal parameters for Chebyshev filtering
 struct ChebysehvFilterParams {
@@ -3465,7 +4750,7 @@ int main(int argc, char* argv[]) {
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
     // full_diagonalization(H, N, eigenvalues);
-    lanczos(H, N, N, N, 1e-10, eigenvalues, dir, eigenvector);
+    lanczos_no_ortho(H, N, N, N, 1e-10, eigenvalues, dir, eigenvector);
 
 
 
@@ -3490,201 +4775,201 @@ int main(int argc, char* argv[]) {
         std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
     }
     
-    // std::cout << "Reading eigenvalues from ED_test_full_spectrum.dat..." << std::endl;
-    // std::ifstream eigenvalue_input("ED_test_full_spectrum.dat");
-    // eigenvalues.clear();
+    std::cout << "Reading eigenvalues from ED_test_full_spectrum.dat..." << std::endl;
+    std::ifstream eigenvalue_input("ED_test_full_spectrum.dat");
+    eigenvalues.clear();
 
-    // if (eigenvalue_input.is_open()) {
-    //     double value;
-    //     while (eigenvalue_input >> value) {
-    //         eigenvalues.push_back(value);
-    //     }
-    //     eigenvalue_input.close();
-    //     std::cout << "Read " << eigenvalues.size() << " eigenvalues from file" << std::endl;
-    // } else {
-    //     std::cerr << "Failed to open ED_test_full_spectrum.dat" << std::endl;
-    //     return 1;
-    // }
+    if (eigenvalue_input.is_open()) {
+        double value;
+        while (eigenvalue_input >> value) {
+            eigenvalues.push_back(value);
+        }
+        eigenvalue_input.close();
+        std::cout << "Read " << eigenvalues.size() << " eigenvalues from file" << std::endl;
+    } else {
+        std::cerr << "Failed to open ED_test_full_spectrum.dat" << std::endl;
+        return 1;
+    }
 
     // Calculate thermodynamics from spectrum
-    // std::cout << "Calculating thermodynamic properties and expectation values of observables..." << std::endl;
-    // double T_min = 0.01;
-    // double T_max = 20.0;
-    // int num_points = 2000;
+    std::cout << "Calculating thermodynamic properties and expectation values of observables..." << std::endl;
+    double T_min = 0.01;
+    double T_max = 20.0;
+    int num_points = 2000;
 
+    if (eigenvector){
+    // Find and process operators from files in the directory
+    std::cout << "Looking for operator files in directory: " << dir << std::endl;
 
-    // // Find and process operators from files in the directory
-    // std::cout << "Looking for operator files in directory: " << dir << std::endl;
+    // Vector to store operators and their names
+    std::vector<std::pair<std::string, Operator>> operators;
 
-    // // Vector to store operators and their names
-    // std::vector<std::pair<std::string, Operator>> operators;
-
-    // // Helper function to process a file
-    // auto process_operator_file = [&](const std::string& filepath) {
-    //     // Extract the base filename from the path
-    //     std::string filename = filepath;
-    //     size_t last_slash_pos = filepath.find_last_of('/');
-    //     if (last_slash_pos != std::string::npos) {
-    //         filename = filepath.substr(last_slash_pos + 1);
-    //     }
+    // Helper function to process a file
+    auto process_operator_file = [&](const std::string& filepath) {
+        // Extract the base filename from the path
+        std::string filename = filepath;
+        size_t last_slash_pos = filepath.find_last_of('/');
+        if (last_slash_pos != std::string::npos) {
+            filename = filepath.substr(last_slash_pos + 1);
+        }
         
-    //     // Determine if one-body or two-body operator
-    //     if (filename.find("one_body") == 0) {
-    //         std::cout << "Processing one-body operator from file: " << filename << std::endl;
+        // Determine if one-body or two-body operator
+        if (filename.find("one_body") == 0) {
+            std::cout << "Processing one-body operator from file: " << filename << std::endl;
             
-    //         // Create operator
-    //         Operator new_op(num_site);
+            // Create operator
+            Operator new_op(num_site);
             
-    //         try {
-    //             // Load operator
-    //             new_op.loadFromFile(filepath);
+            try {
+                // Load operator
+                new_op.loadFromFile(filepath);
                 
-    //             // Store the operator with its name
-    //             operators.push_back({filename, new_op});
-    //         } catch (const std::exception& e) {
-    //             std::cerr << "Error loading " << filename << ": " << e.what() << std::endl;
-    //         }
-    //     } 
-    //     else if (filename.find("two_body") == 0) {
-    //         std::cout << "Processing two-body operator from file: " << filename << std::endl;
+                // Store the operator with its name
+                operators.push_back({filename, new_op});
+            } catch (const std::exception& e) {
+                std::cerr << "Error loading " << filename << ": " << e.what() << std::endl;
+            }
+        } 
+        else if (filename.find("two_body") == 0) {
+            std::cout << "Processing two-body operator from file: " << filename << std::endl;
             
-    //         // Create operator
-    //         Operator new_op(num_site);
+            // Create operator
+            Operator new_op(num_site);
             
-    //         try {
-    //             // Load operator
-    //             new_op.loadFromInterAllFile(filepath);
+            try {
+                // Load operator
+                new_op.loadFromInterAllFile(filepath);
                 
-    //             // Store the operator with its name
-    //             operators.push_back({filename, new_op});
-    //         } catch (const std::exception& e) {
-    //             std::cerr << "Error loading " << filename << ": " << e.what() << std::endl;
-    //         }
-    //     }
-    // };
+                // Store the operator with its name
+                operators.push_back({filename, new_op});
+            } catch (const std::exception& e) {
+                std::cerr << "Error loading " << filename << ": " << e.what() << std::endl;
+            }
+        }
+    };
 
-    // // List files in directory using system command
-    // std::string cmd = "find \"" + dir + "\" -type f \\( -name \"one_body*\" -o -name \"two_body*\" \\) 2>/dev/null";
-    // FILE* pipe = popen(cmd.c_str(), "r");
-    // if (pipe) {
-    //     char buffer[1024];
-    //     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-    //         std::string filepath(buffer);
+    // List files in directory using system command
+    std::string cmd = "find \"" + dir + "\" -type f \\( -name \"one_body*\" -o -name \"two_body*\" \\) 2>/dev/null";
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (pipe) {
+        char buffer[1024];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string filepath(buffer);
             
-    //         // Remove trailing newline if present
-    //         if (!filepath.empty() && filepath[filepath.size() - 1] == '\n') {
-    //             filepath.erase(filepath.size() - 1);
-    //         }
+            // Remove trailing newline if present
+            if (!filepath.empty() && filepath[filepath.size() - 1] == '\n') {
+                filepath.erase(filepath.size() - 1);
+            }
             
-    //         process_operator_file(filepath);
-    //     }
-    //     pclose(pipe);
-    // } else {
-    //     std::cerr << "Error executing directory listing command" << std::endl;
-    // }
+            process_operator_file(filepath);
+        }
+        pclose(pipe);
+    } else {
+        std::cerr << "Error executing directory listing command" << std::endl;
+    }
 
-    // std::cout << "Found " << operators.size() << " operator files in directory" << std::endl;
+    std::cout << "Found " << operators.size() << " operator files in directory" << std::endl;
 
-    // // Compute thermal expectation values for each operator
-    // if (operators.empty()) {
-    //     std::cout << "No operator files found. Skipping expectation value calculations." << std::endl;
-    // } else {
-    //     std::cout << "Computing thermal expectation values for " << operators.size() << " operators" << std::endl;
+    // Compute thermal expectation values for each operator
+    if (operators.empty()) {
+        std::cout << "No operator files found. Skipping expectation value calculations." << std::endl;
+    } else {
+        std::cout << "Computing thermal expectation values for " << operators.size() << " operators" << std::endl;
 
-    //     std::vector<double> temperatures(num_points);
-    //     double log_T_min = std::log(T_min);
-    //     double log_T_max = std::log(T_max);
-    //     double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
+        std::vector<double> temperatures(num_points);
+        double log_T_min = std::log(T_min);
+        double log_T_max = std::log(T_max);
+        double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
 
-    //     for (int i = 0; i < num_points; i++) {
-    //         temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    //     }
+        for (int i = 0; i < num_points; i++) {
+            temperatures[i] = std::exp(log_T_min + i * log_T_step);
+        }
 
-    //     // For each operator, calculate expectation values
-    //     for (const auto& op_pair : operators) {
-    //         std::string op_name = op_pair.first;
-    //         const Operator& curr_op = op_pair.second;
+        // For each operator, calculate expectation values
+        for (const auto& op_pair : operators) {
+            std::string op_name = op_pair.first;
+            const Operator& curr_op = op_pair.second;
             
-    //         std::cout << "Calculating thermal expectation values for: " << op_name << std::endl;
+            std::cout << "Calculating thermal expectation values for: " << op_name << std::endl;
             
-    //         // Create operator function for this operator
-    //         auto op_func = [&curr_op](const Complex* v, Complex* result, int size) {
-    //             std::vector<Complex> vec(v, v + size);
-    //             std::vector<Complex> op_result = curr_op.apply(vec);
-    //             std::copy(op_result.begin(), op_result.end(), result);
-    //         };
+            // Create operator function for this operator
+            auto op_func = [&curr_op](const Complex* v, Complex* result, int size) {
+                std::vector<Complex> vec(v, v + size);
+                std::vector<Complex> op_result = curr_op.apply(vec);
+                std::copy(op_result.begin(), op_result.end(), result);
+            };
             
-    //         // Calculate expectation values at each temperature
-    //         std::vector<double> expectation_real;
-    //         std::vector<double> expectation_imag;
+            // Calculate expectation values at each temperature
+            std::vector<double> expectation_real;
+            std::vector<double> expectation_imag;
             
-    //         for (double temp : temperatures) {
-    //             double beta = 1.0 / temp;
+            for (double temp : temperatures) {
+                double beta = 1.0 / temp;
                 
-    //             // Use FTLM method to compute thermal average
-    //             Complex exp_val = calculate_thermal_expectation(
-    //                 op_func, N, beta, dir+"/lanczos_eigenvectors"
-    //             );
+                // Use FTLM method to compute thermal average
+                Complex exp_val = calculate_thermal_expectation(
+                    op_func, N, beta, dir+"/lanczos_eigenvectors"
+                );
                 
-    //             expectation_real.push_back(exp_val.real());
-    //             expectation_imag.push_back(exp_val.imag());
+                expectation_real.push_back(exp_val.real());
+                expectation_imag.push_back(exp_val.imag());
                 
-    //             // Occasional progress reporting
-    //             if (temperatures.size() > 10 && 
-    //                 (temp == temperatures.front() || temp == temperatures.back() || 
-    //                  expectation_real.size() % (num_points/10) == 0)) {
-    //                 std::cout << "  T = " << std::fixed << std::setprecision(4) << temp 
-    //                           << ", <O> = " << exp_val.real() << " + " << exp_val.imag() << "i" << std::endl;
-    //             }
-    //         }
+                // Occasional progress reporting
+                if (temperatures.size() > 10 && 
+                    (temp == temperatures.front() || temp == temperatures.back() || 
+                     expectation_real.size() % (num_points/10) == 0)) {
+                    std::cout << "  T = " << std::fixed << std::setprecision(4) << temp 
+                              << ", <O> = " << exp_val.real() << " + " << exp_val.imag() << "i" << std::endl;
+                }
+            }
             
-    //         // Save results to file
-    //         std::string outfile_name = op_name + "_thermal_expectation.dat";
-    //         std::ofstream outfile(outfile_name);
-    //         if (outfile.is_open()) {
-    //             outfile << "# Temperature ExpectationValue_Real ExpectationValue_Imag" << std::endl;
-    //             for (size_t i = 0; i < temperatures.size(); i++) {
-    //                 outfile << std::fixed << std::setprecision(6)
-    //                         << temperatures[i] << " "
-    //                         << expectation_real[i] << " "
-    //                         << expectation_imag[i] << std::endl;
-    //             }
-    //             outfile.close();
-    //             std::cout << "Thermal expectation values for " << op_name << " saved to " << outfile_name << std::endl;
-    //         } else {
-    //             std::cerr << "Error: Could not open file " << outfile_name << " for writing" << std::endl;
-    //         }
-    //     }
-    // }
+            // Save results to file
+            std::string outfile_name = op_name + "_thermal_expectation.dat";
+            std::ofstream outfile(outfile_name);
+            if (outfile.is_open()) {
+                outfile << "# Temperature ExpectationValue_Real ExpectationValue_Imag" << std::endl;
+                for (size_t i = 0; i < temperatures.size(); i++) {
+                    outfile << std::fixed << std::setprecision(6)
+                            << temperatures[i] << " "
+                            << expectation_real[i] << " "
+                            << expectation_imag[i] << std::endl;
+                }
+                outfile.close();
+                std::cout << "Thermal expectation values for " << op_name << " saved to " << outfile_name << std::endl;
+            } else {
+                std::cerr << "Error: Could not open file " << outfile_name << " for writing" << std::endl;
+            }
+        }
+    }
 
-
+    }   
     
-    // ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
-    //     eigenvalues, T_min, T_max, num_points
-    // );
+    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+        eigenvalues, T_min, T_max, num_points
+    );
     
-    // // Save thermodynamic data
-    // std::ofstream thermo_file(output_dir+"thermodynamics.dat");
-    // if (thermo_file.is_open()) {
-    //     thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-    //     for (size_t i = 0; i < thermo.temperatures.size(); i++) {
-    //         thermo_file << std::fixed << std::setprecision(6)
-    //                   << thermo.temperatures[i] << " "
-    //                   << thermo.energy[i] << " "
-    //                   << thermo.specific_heat[i] << " "
-    //                   << thermo.entropy[i] << " "
-    //                   << thermo.free_energy[i] << std::endl;
-    //     }
-    //     thermo_file.close();
-    //     std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
-    // }
+    // Save thermodynamic data
+    std::ofstream thermo_file(output_dir+"thermodynamics.dat");
+    if (thermo_file.is_open()) {
+        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+            thermo_file << std::fixed << std::setprecision(6)
+                      << thermo.temperatures[i] << " "
+                      << thermo.energy[i] << " "
+                      << thermo.specific_heat[i] << " "
+                      << thermo.entropy[i] << " "
+                      << thermo.free_energy[i] << std::endl;
+        }
+        thermo_file.close();
+        std::cout << "Thermodynamic data saved to ED_test_thermodynamics_full.dat" << std::endl;
+    }
     
-    // // Print some statistics about the spectrum
-    // std::sort(eigenvalues.begin(), eigenvalues.end());
-    // std::cout << "Spectrum statistics:" << std::endl;
-    // std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
-    // std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
-    // std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
+    // Print some statistics about the spectrum
+    std::sort(eigenvalues.begin(), eigenvalues.end());
+    std::cout << "Spectrum statistics:" << std::endl;
+    std::cout << "  Ground state energy: " << eigenvalues.front() << std::endl;
+    std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
+    std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
     
     return 0;
 }

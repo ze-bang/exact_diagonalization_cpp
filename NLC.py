@@ -90,15 +90,17 @@ def specific_heat(eigenvalues, temperatures, kb=1.0):
     n_avogadro = 6.02214076e23  # Avogadro's number in mol^-1
     kb = kb * n_avogadro  # Convert to J/mol/K
 
+    kb_meV = 0.00861733  # Boltzmann constant in meV/K
+
     for i, T in enumerate(temperatures):
         if T == 0 or np.isclose(T, 0):  # Handle T=0 or very small T case
             avg_energy[i] = e_min  # Ground state energy
             specific_heat[i] = 0.0  # Specific heat is zero at T=0
         else:
-            beta = 1.0 / (kb * T)
+            beta = 1.0 / (kb_meV * T)
             
             # For numerical stability, shift eigenvalues by the minimum value
-            shifted_eigenvalues = eigenvalues
+            shifted_eigenvalues = eigenvalues - e_min
             
             # Calculate Boltzmann factors and partition function
             boltzmann_factors = np.exp(-beta * shifted_eigenvalues)
@@ -111,7 +113,7 @@ def specific_heat(eigenvalues, temperatures, kb=1.0):
             avg_shifted_energy_squared = np.sum(shifted_eigenvalues**2 * boltzmann_factors) / Z
             
             # Calculate specific heat (this formula is invariant to energy shifts)
-            specific_heat[i] = kb * beta**2 * (avg_shifted_energy_squared - avg_shifted_energy**2)
+            specific_heat[i] =  (avg_shifted_energy_squared - avg_shifted_energy**2)/(kb*T)**2
     
     return specific_heat
 
@@ -143,12 +145,12 @@ def NLC_weight(observable, cluster_name, dir, temperatures):
     """
     
     if cluster_name == "1":
-        eigenvalues = np.fromfile(dir + "/1/lanczos_eigenvectors/eigenvalues.bin", dtype='uint8')
+        eigenvalues = np.genfromtxt(dir + "/1/output/spectrum.dat", dtype=float)
         return observable(eigenvalues, temperatures)
     
     else:
         # Compute the NLC weight
-        eigenvalues = np.fromfile(dir + "/" + cluster_name + "/lanczos_eigenvectors/eigenvalues.bin", dtype='uint8')
+        eigenvalues = np.genfromtxt(dir + "/" + cluster_name + "/output/spectrum.dat", dtype=float)
 
         nlc_weight = observable(eigenvalues, temperatures)
         for i in ClusterInfo:
@@ -276,7 +278,7 @@ def NLC_compute(params, temperatures, dir):
     for i in ClusterInfo:
         if i[0] == "5a":
             nlc_sum += NLC_weight(specific_heat, i[1], dir, temperatures)*int(i[2])
-    return nlc_sum
+    return nlc_sum/16
 
 
 import scipy.optimize as optimize
@@ -392,19 +394,37 @@ def plot_fit_results(opt_params, reference_data_file, dir_path):
     plt.plot(temp_data, nlc_sum, '-', label='Fitted Model')
     plt.xlabel('Temperature')
     plt.ylabel('Specific Heat')
+    plt.xscale('log')
     plt.legend()
     plt.title('Fitted Specific Heat vs Reference Data')
     plt.grid(True)
     plt.savefig('fit_results.png')
 
 
-# opt_params, min_error = fit_nlc_model(
-#     initial_params=[0.2, 0.2, 1.0],
-#     reference_data_file='specific_heat_Pr2Zr2O7.txt',
-#     dir_path='./data',
-#     temperatures=np.linspace(0.01, 10, 100),
-#     cluster_names=['1', '2', '3', '4a', '4b'],
-#     bounds=((0, None), (0, None), (0, None))
-# )
+def plot_spec_heat_from_file(dir, temperatures):
+    A = np.genfromtxt(dir + "/output/spectrum.dat", dtype=float)
+    print(A)
+    E = specific_heat(A, temperatures)
+    plt.plot(temperatures, E, label='Specific Heat')
+    plt.xlabel('Temperature')
+    plt.ylabel('Specific Heat')
+    plt.xscale('log')
+    plt.legend()
+    plt.title('Specific Heat vs Temperature')
+    plt.grid(True)
+    plt.savefig(dir+'specific_heat_plot.png')
+    plt.show()
 
-plot_fit_results([0.0, 0.0,0.6],'specific_heat_Pr2Zr2O7.txt', './data')
+
+opt_params, min_error = fit_nlc_model(
+    initial_params=[0.2, 0.2, 1.0],
+    reference_data_file='specific_heat_Pr2Zr2O7.txt',
+    dir_path='./data',
+    temperatures=np.linspace(0.01, 10, 100),
+    cluster_names=['1', '2', '3', '4a', '4b'],
+    bounds=((0, None), (0, None), (0, None))
+)
+
+plot_fit_results(opt_params,'specific_heat_Pr2Zr2O7.txt', './data')
+
+# plot_spec_heat_from_file("ED_XXZ_test/", np.logspace(-2, 1, 100))
