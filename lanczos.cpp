@@ -794,7 +794,366 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     system(("rm -rf " + temp_dir).c_str());
 }
 
+// Block Lanczos algorithm implementation without re-orthogonalization
+void block_lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+             double tol, std::vector<double>& eigenvalues, std::string dir = "",
+             std::vector<ComplexVector>* eigenvectors = nullptr, int block_size = 4) {
+    
+    // Initialize random number generator
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Initialize block of random vectors
+    std::vector<ComplexVector> v_current_block(block_size, ComplexVector(N));
+    
+    // Generate initial random block
+    for (int b = 0; b < block_size; b++) {
+        #pragma omp parallel for
+        for (int i = 0; i < N; i++) {
+            double real = dist(gen);
+            double imag = dist(gen);
+            #pragma omp critical
+            {
+                v_current_block[b][i] = Complex(real, imag);
+            }
+        }
+        
+        // Orthogonalize against previous vectors in the block
+        for (int prev = 0; prev < b; prev++) {
+            Complex overlap;
+            cblas_zdotc_sub(N, v_current_block[prev].data(), 1, v_current_block[b].data(), 1, &overlap);
+            Complex neg_overlap = -overlap;
+            cblas_zaxpy(N, &neg_overlap, v_current_block[prev].data(), 1, v_current_block[b].data(), 1);
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, v_current_block[b].data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, v_current_block[b].data(), 1);
+    }
+    
+    std::cout << "Block Lanczos: Initial block generated" << std::endl;
+    
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir+"block_lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
 
+    // Write the first basis block to files
+    for (int b = 0; b < block_size; b++) {
+        std::string basis_file = temp_dir + "/basis_0_" + std::to_string(b) + ".bin";
+        std::ofstream outfile(basis_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+            return;
+        }
+        outfile.write(reinterpret_cast<char*>(v_current_block[b].data()), N * sizeof(Complex));
+        outfile.close();
+    }
+    
+    // Initialize previous, current, and next blocks
+    std::vector<ComplexVector> v_prev_block(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+    std::vector<ComplexVector> v_next_block(block_size, ComplexVector(N));
+    std::vector<ComplexVector> w_block(block_size, ComplexVector(N));
+    
+    // Initialize block tridiagonal matrix elements
+    std::vector<Eigen::MatrixXcd> alpha;  // Diagonal blocks
+    std::vector<Eigen::MatrixXcd> beta;   // Off-diagonal blocks
+    
+    // First beta is zero
+    beta.push_back(Eigen::MatrixXcd::Zero(block_size, block_size));
+    
+    // Adjust maximum iterations based on block size
+    max_iter = std::min(N / block_size, max_iter / block_size) * block_size;
+    int num_steps = max_iter / block_size;
+    
+    std::cout << "Begin Block Lanczos iterations with max_iter = " << max_iter 
+              << " (block_size = " << block_size << ", steps = " << num_steps << ")" << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Block Lanczos: Iterating..." << std::endl;
+    
+    // Helper function to read basis vector from file
+    auto read_basis_vector = [&temp_dir](int step, int block_idx, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(step) + "_" + std::to_string(block_idx) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Block Lanczos iteration
+    for (int j = 0; j < num_steps; j++) {
+        std::cout << "Iteration " << j + 1 << " of " << num_steps << std::endl;
+        
+        // Current alpha block
+        Eigen::MatrixXcd curr_alpha = Eigen::MatrixXcd::Zero(block_size, block_size);
+        
+        // Apply H to current block
+        for (int b = 0; b < block_size; b++) {
+            H(v_current_block[b].data(), w_block[b].data(), N);
+        }
+        
+        // Subtract beta_j * v_{j-1} block
+        if (j > 0) {
+            for (int b1 = 0; b1 < block_size; b1++) {
+                for (int b2 = 0; b2 < block_size; b2++) {
+                    Complex neg_beta = -beta[j](b1, b2);
+                    cblas_zaxpy(N, &neg_beta, v_prev_block[b2].data(), 1, w_block[b1].data(), 1);
+                }
+            }
+        }
+        
+        // Compute alpha_j block (diagonal block)
+        for (int b1 = 0; b1 < block_size; b1++) {
+            for (int b2 = 0; b2 < block_size; b2++) {
+                Complex dot_product;
+                cblas_zdotc_sub(N, v_current_block[b2].data(), 1, w_block[b1].data(), 1, &dot_product);
+                curr_alpha(b1, b2) = dot_product;
+            }
+        }
+        alpha.push_back(curr_alpha);
+        
+        // Subtract alpha_j * v_j block
+        for (int b1 = 0; b1 < block_size; b1++) {
+            for (int b2 = 0; b2 < block_size; b2++) {
+                Complex neg_alpha = -curr_alpha(b1, b2);
+                cblas_zaxpy(N, &neg_alpha, v_current_block[b2].data(), 1, w_block[b1].data(), 1);
+            }
+        }
+        
+        // Compute QR decomposition of w_block to get v_{j+1} and beta_{j+1}
+        Eigen::MatrixXcd next_beta = Eigen::MatrixXcd::Zero(block_size, block_size);
+        
+        // Modified Gram-Schmidt orthogonalization
+        for (int b = 0; b < block_size; b++) {
+            // Compute norm of the work vector
+            double norm = cblas_dznrm2(N, w_block[b].data(), 1);
+            
+            // If norm is too small, generate a new random vector
+            if (norm < tol) {
+                // Generate new random vector
+                for (int i = 0; i < N; i++) {
+                    v_next_block[b][i] = Complex(dist(gen), dist(gen));
+                }
+                
+                // Orthogonalize against current v_next_block
+                for (int prev = 0; prev < b; prev++) {
+                    Complex overlap;
+                    cblas_zdotc_sub(N, v_next_block[prev].data(), 1, v_next_block[b].data(), 1, &overlap);
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, v_next_block[prev].data(), 1, v_next_block[b].data(), 1);
+                }
+                
+                // Renormalize
+                norm = cblas_dznrm2(N, v_next_block[b].data(), 1);
+            } else {
+                // Use existing vector
+                v_next_block[b] = w_block[b];
+            }
+            
+            // Set beta diagonal element
+            next_beta(b, b) = norm;
+            
+            // Normalize
+            Complex scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, v_next_block[b].data(), 1);
+            
+            // Orthogonalize remaining work vectors against this one
+            for (int b2 = b + 1; b2 < block_size; b2++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, v_next_block[b].data(), 1, w_block[b2].data(), 1, &overlap);
+                next_beta(b2, b) = overlap;
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, v_next_block[b].data(), 1, w_block[b2].data(), 1);
+            }
+        }
+        
+        beta.push_back(next_beta);
+        
+        // Store basis block to files
+        if (j < num_steps - 1) {
+            for (int b = 0; b < block_size; b++) {
+                std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + "_" + std::to_string(b) + ".bin";
+                std::ofstream outfile(next_basis_file, std::ios::binary);
+                if (!outfile) {
+                    std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+                    return;
+                }
+                outfile.write(reinterpret_cast<char*>(v_next_block[b].data()), N * sizeof(Complex));
+                outfile.close();
+            }
+        }
+        
+        // Update for next iteration
+        v_prev_block = v_current_block;
+        v_current_block = v_next_block;
+    }
+    
+    // Construct the block tridiagonal matrix
+    int m = alpha.size() * block_size;
+    std::cout << "Block Lanczos: Constructing block tridiagonal matrix of size " << m << "x" << m << std::endl;
+    
+    // Build the full tridiagonal matrix from the blocks
+    Eigen::MatrixXcd full_matrix = Eigen::MatrixXcd::Zero(m, m);
+    
+    // Fill diagonal blocks
+    for (size_t j = 0; j < alpha.size(); j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = j * block_size + r;
+                int col = j * block_size + c;
+                if (row < m && col < m) {
+                    full_matrix(row, col) = alpha[j](r, c);
+                }
+            }
+        }
+    }
+    
+    // Fill off-diagonal blocks
+    for (size_t j = 1; j < beta.size(); j++) {
+        for (int r = 0; r < block_size; r++) {
+            for (int c = 0; c < block_size; c++) {
+                int row = (j-1) * block_size + r;
+                int col = j * block_size + c;
+                if (row < m && col < m) {
+                    full_matrix(row, col) = beta[j](r, c);
+                    full_matrix(col, row) = std::conj(beta[j](r, c));
+                }
+            }
+        }
+    }
+    
+    // Solve eigenvalue problem
+    std::cout << "Block Lanczos: Solving tridiagonal matrix" << std::endl;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> solver(full_matrix);
+    if (solver.info() != Eigen::Success) {
+        std::cerr << "Eigenvalue decomposition failed!" << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Extract eigenvalues
+    int n_eigenvalues = std::min(exct, m);
+    eigenvalues.resize(n_eigenvalues);
+    for (int i = 0; i < n_eigenvalues; i++) {
+        eigenvalues[i] = solver.eigenvalues()[i];
+    }
+    
+    // If eigenvectors are requested, transform back to original basis
+    if (eigenvectors) {
+        std::cout << "Block Lanczos: Computing eigenvectors" << std::endl;
+        
+        // Identify clusters of degenerate eigenvalues
+        const double degen_tol = 1e-10;
+        std::vector<std::vector<int>> degen_clusters;
+        
+        for (int i = 0; i < n_eigenvalues; i++) {
+            bool added_to_cluster = false;
+            for (auto& cluster : degen_clusters) {
+                if (std::abs(solver.eigenvalues()[i] - solver.eigenvalues()[cluster[0]]) < degen_tol) {
+                    cluster.push_back(i);
+                    added_to_cluster = true;
+                    break;
+                }
+            }
+            if (!added_to_cluster) {
+                degen_clusters.push_back({i});
+            }
+        }
+        
+        // Initialize output eigenvectors
+        eigenvectors->clear();
+        eigenvectors->resize(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        // Process each cluster
+        #pragma omp parallel for schedule(dynamic)
+        for (size_t cl = 0; cl < degen_clusters.size(); cl++) {
+            const auto& cluster = degen_clusters[cl];
+            
+            if (cluster.size() == 1) {
+                // Non-degenerate case
+                int idx = cluster[0];
+                ComplexVector evec(N, Complex(0.0, 0.0));
+                
+                // Transform: evec = sum_k z(k,idx) * basis_vectors[k]
+                for (int k = 0; k < m; k++) {
+                    int block_idx = k / block_size;
+                    int vec_idx = k % block_size;
+                    
+                    ComplexVector basis_k = read_basis_vector(block_idx, vec_idx, N);
+                    Complex coeff = solver.eigenvectors()(k, idx);
+                    cblas_zaxpy(N, &coeff, basis_k.data(), 1, evec.data(), 1);
+                }
+                
+                // Normalize
+                double norm = cblas_dznrm2(N, evec.data(), 1);
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, evec.data(), 1);
+                
+                (*eigenvectors)[idx] = evec;
+            } else {
+                // Degenerate case - special handling
+                int subspace_dim = cluster.size();
+                std::vector<ComplexVector> subspace_vectors(subspace_dim, ComplexVector(N, Complex(0.0, 0.0)));
+                
+                // Compute raw eigenvectors in original basis
+                for (int c = 0; c < subspace_dim; c++) {
+                    int idx = cluster[c];
+                    for (int k = 0; k < m; k++) {
+                        int block_idx = k / block_size;
+                        int vec_idx = k % block_size;
+                        
+                        ComplexVector basis_k = read_basis_vector(block_idx, vec_idx, N);
+                        Complex coeff = solver.eigenvectors()(k, idx);
+                        cblas_zaxpy(N, &coeff, basis_k.data(), 1, subspace_vectors[c].data(), 1);
+                    }
+                }
+                
+                // Re-orthogonalize within degenerate subspace
+                for (int c = 0; c < subspace_dim; c++) {
+                    // Normalize current vector
+                    double norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
+                    Complex scale = Complex(1.0/norm, 0.0);
+                    cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
+                    
+                    // Orthogonalize against previous vectors
+                    for (int prev = 0; prev < c; prev++) {
+                        Complex overlap;
+                        cblas_zdotc_sub(N, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1, &overlap);
+                        Complex neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, subspace_vectors[prev].data(), 1, subspace_vectors[c].data(), 1);
+                    }
+                    
+                    // Renormalize if necessary
+                    norm = cblas_dznrm2(N, subspace_vectors[c].data(), 1);
+                    if (norm > tol) {
+                        scale = Complex(1.0/norm, 0.0);
+                        cblas_zscal(N, &scale, subspace_vectors[c].data(), 1);
+                    }
+                    
+                    // Store vector
+                    int idx = cluster[c];
+                    (*eigenvectors)[idx] = subspace_vectors[c];
+                }
+            }
+        }
+        
+        // Optionally refine eigenvectors using conjugate gradient
+        #pragma omp parallel for schedule(dynamic)
+        for (int i = 0; i < n_eigenvalues; i++) {
+            refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
+        }
+    }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+    std::cout << "Block Lanczos completed" << std::endl;
+}
 
 // Automatically estimate spectral bounds and optimal parameters for Chebyshev filtering
 struct ChebysehvFilterParams {
@@ -3347,7 +3706,7 @@ int main(int argc, char* argv[]) {
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
     // full_diagonalization(H, N, eigenvalues);
-    lanczos_no_ortho(H, N, N, N, 1e-10, eigenvalues, dir);
+    block_lanczos_no_ortho(H, N, N, N, 1e-10, eigenvalues, dir);
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
