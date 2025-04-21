@@ -1274,315 +1274,367 @@ void cg_diagonalization(
     }
 }
 
-// LOBPCG method for finding multiple eigenvalues
+// Locally Optimized Block Preconditioned Conjugate Gradient (LOBPCG) method
 void lobpcg_method(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                                 // Hilbert space dimension
+    int max_iter,                                          // Maximum iterations
+    int block_size,                                        // Number of eigenpairs to compute
+    double tol,                                            // Tolerance for convergence
+    std::vector<double>& eigenvalues,                      // Output eigenvalues
+    std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
+    std::function<void(const Complex*, Complex*, int)> M = nullptr  // Preconditioner (optional)
+) {
+    // Initialize block of vectors
+    eigenvectors.clear();
+    eigenvectors.resize(block_size, ComplexVector(N));
+    
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Initialize random vectors and orthonormalize them
+    for (int j = 0; j < block_size; j++) {
+        for (int i = 0; i < N; i++) {
+            eigenvectors[j][i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Orthogonalize against previous vectors
+        for (int k = 0; k < j; k++) {
+            Complex projection;
+            cblas_zdotc_sub(N, eigenvectors[k].data(), 1, eigenvectors[j].data(), 1, &projection);
+            
+            Complex neg_projection = -projection;
+            cblas_zaxpy(N, &neg_projection, eigenvectors[k].data(), 1, eigenvectors[j].data(), 1);
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, eigenvectors[j].data(), 1);
+        Complex scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, eigenvectors[j].data(), 1);
+    }
+    
+    // Initialize workspace
+    std::vector<ComplexVector> X = eigenvectors;  // Current approximations
+    std::vector<ComplexVector> R(block_size, ComplexVector(N));  // Residuals
+    std::vector<ComplexVector> P(block_size, ComplexVector(N));  // Previous direction
+    std::vector<ComplexVector> HX(block_size, ComplexVector(N)); // H*X
+    std::vector<ComplexVector> MR(block_size, ComplexVector(N)); // M^-1*R (preconditioned residuals)
+    
+    // Apply H to initial block
+    for (int j = 0; j < block_size; j++) {
+        H(X[j].data(), HX[j].data(), N);
+    }
+    
+    // Initialize eigenvalues
+    eigenvalues.resize(block_size);
+    for (int j = 0; j < block_size; j++) {
+        Complex rayleigh;
+        cblas_zdotc_sub(N, X[j].data(), 1, HX[j].data(), 1, &rayleigh);
+        eigenvalues[j] = std::real(rayleigh);
+    }
+    
+    // Initialize residuals
+    for (int j = 0; j < block_size; j++) {
+        for (int i = 0; i < N; i++) {
+            R[j][i] = HX[j][i] - eigenvalues[j] * X[j][i];
+        }
+    }
+    
+    // Apply preconditioner if provided
+    if (M) {
+        for (int j = 0; j < block_size; j++) {
+            M(R[j].data(), MR[j].data(), N);
+        }
+    } else {
+        // Without preconditioner, MR = R
+        MR = R;
+    }
+    
+    // Initialize P = MR for first iteration
+    P = MR;
+    
+    std::cout << "LOBPCG: Starting iterations with block size " << block_size << "..." << std::endl;
+    
+    for (int iter = 0; iter < max_iter; iter++) {
+        // Construct 3*blocksize x 3*blocksize projected problem matrices
+        int subspace_size = 3 * block_size;
+        if (iter == 0) {
+            // No P yet on first iteration
+            subspace_size = 2 * block_size;
+        }
+        
+        // Projected operator matrices
+        Eigen::MatrixXcd A_proj(subspace_size, subspace_size);
+        Eigen::MatrixXcd B_proj(subspace_size, subspace_size);  // For generalized EVP with preconditioner
+        A_proj.setZero();
+        B_proj.setZero();
+        
+        // Apply H to P if not first iteration
+        std::vector<ComplexVector> HP;
+        if (iter > 0) {
+            HP.resize(block_size, ComplexVector(N));
+            for (int j = 0; j < block_size; j++) {
+                H(P[j].data(), HP[j].data(), N);
+            }
+        }
+        
+        // Fill the projected operator matrices
+        // [X, MR, P]^H * H * [X, MR, P]
+        for (int i = 0; i < block_size; i++) {
+            // X block
+            for (int j = 0; j < block_size; j++) {
+                Complex val;
+                cblas_zdotc_sub(N, X[i].data(), 1, HX[j].data(), 1, &val);
+                A_proj(i, j) = val;
+                
+                // B_proj for X block is just identity
+                cblas_zdotc_sub(N, X[i].data(), 1, X[j].data(), 1, &val);
+                B_proj(i, j) = val;
+            }
+            
+            // X-MR and MR-X blocks
+            for (int j = 0; j < block_size; j++) {
+                Complex val;
+                cblas_zdotc_sub(N, X[i].data(), 1, HX[j].data(), 1, &val);
+                A_proj(i, block_size + j) = val;
+                A_proj(block_size + j, i) = std::conj(val);
+                
+                // B_proj for X-MR block
+                cblas_zdotc_sub(N, X[i].data(), 1, MR[j].data(), 1, &val);
+                B_proj(i, block_size + j) = val;
+                B_proj(block_size + j, i) = std::conj(val);
+            }
+            
+            // MR-MR block
+            for (int j = 0; j < block_size; j++) {
+                Complex val;
+                cblas_zdotc_sub(N, MR[i].data(), 1, HX[j].data(), 1, &val);
+                A_proj(block_size + i, block_size + j) = val;
+                
+                // B_proj for MR-MR block
+                cblas_zdotc_sub(N, MR[i].data(), 1, MR[j].data(), 1, &val);
+                B_proj(block_size + i, block_size + j) = val;
+            }
+            
+            if (iter > 0) {
+                // X-P and P-X blocks
+                for (int j = 0; j < block_size; j++) {
+                    Complex val;
+                    cblas_zdotc_sub(N, X[i].data(), 1, HP[j].data(), 1, &val);
+                    A_proj(i, 2*block_size + j) = val;
+                    A_proj(2*block_size + j, i) = std::conj(val);
+                    
+                    // B_proj for X-P block
+                    cblas_zdotc_sub(N, X[i].data(), 1, P[j].data(), 1, &val);
+                    B_proj(i, 2*block_size + j) = val;
+                    B_proj(2*block_size + j, i) = std::conj(val);
+                }
+                
+                // MR-P and P-MR blocks
+                for (int j = 0; j < block_size; j++) {
+                    Complex val;
+                    cblas_zdotc_sub(N, MR[i].data(), 1, HP[j].data(), 1, &val);
+                    A_proj(block_size + i, 2*block_size + j) = val;
+                    A_proj(2*block_size + j, block_size + i) = std::conj(val);
+                    
+                    // B_proj for MR-P block
+                    cblas_zdotc_sub(N, MR[i].data(), 1, P[j].data(), 1, &val);
+                    B_proj(block_size + i, 2*block_size + j) = val;
+                    B_proj(2*block_size + j, block_size + i) = std::conj(val);
+                }
+                
+                // P-P block
+                for (int j = 0; j < block_size; j++) {
+                    Complex val;
+                    cblas_zdotc_sub(N, P[i].data(), 1, HP[j].data(), 1, &val);
+                    A_proj(2*block_size + i, 2*block_size + j) = val;
+                    
+                    // B_proj for P-P block
+                    cblas_zdotc_sub(N, P[i].data(), 1, P[j].data(), 1, &val);
+                    B_proj(2*block_size + i, 2*block_size + j) = val;
+                }
+            }
+        }
+        
+        // Ensure matrices are Hermitian
+        A_proj = (A_proj + A_proj.adjoint()) / 2.0;
+        B_proj = (B_proj + B_proj.adjoint()) / 2.0;
+        
+        // Solve the generalized eigenvalue problem A_proj * c = lambda * B_proj * c
+        Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXcd> solver(A_proj, B_proj);
+        
+        if (solver.info() != Eigen::Success) {
+            std::cerr << "Eigenvalue solver failed!" << std::endl;
+            break;
+        }
+        
+        Eigen::VectorXd proj_eigenvals = solver.eigenvalues();
+        Eigen::MatrixXcd proj_eigenvecs = solver.eigenvectors();
+        
+        // Sort eigenvalues and eigenvectors
+        std::vector<std::pair<double, int>> eig_pairs(subspace_size);
+        for (int i = 0; i < subspace_size; i++) {
+            eig_pairs[i] = {proj_eigenvals(i), i};
+        }
+        std::sort(eig_pairs.begin(), eig_pairs.end());
+        
+        // Update eigenvalues
+        std::vector<double> new_eigenvalues(block_size);
+        for (int j = 0; j < block_size; j++) {
+            new_eigenvalues[j] = eig_pairs[j].first;
+        }
+        
+        // Compute new X, P, and R
+        std::vector<ComplexVector> new_X(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+        std::vector<ComplexVector> new_HX(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        for (int j = 0; j < block_size; j++) {
+            int col_idx = eig_pairs[j].second;
+            
+            // Construct new X as linear combination
+            for (int i = 0; i < block_size; i++) {
+                Complex coef = proj_eigenvecs(i, col_idx);
+                cblas_zaxpy(N, &coef, X[i].data(), 1, new_X[j].data(), 1);
+                cblas_zaxpy(N, &coef, HX[i].data(), 1, new_HX[j].data(), 1);
+            }
+            
+            for (int i = 0; i < block_size; i++) {
+                Complex coef = proj_eigenvecs(block_size + i, col_idx);
+                cblas_zaxpy(N, &coef, MR[i].data(), 1, new_X[j].data(), 1);
+                
+                // For new_HX, need to apply H to MR contribution
+                ComplexVector HMR(N);
+                H(MR[i].data(), HMR.data(), N);
+                cblas_zaxpy(N, &coef, HMR.data(), 1, new_HX[j].data(), 1);
+            }
+            
+            if (iter > 0) {
+                for (int i = 0; i < block_size; i++) {
+                    Complex coef = proj_eigenvecs(2*block_size + i, col_idx);
+                    cblas_zaxpy(N, &coef, P[i].data(), 1, new_X[j].data(), 1);
+                    cblas_zaxpy(N, &coef, HP[i].data(), 1, new_HX[j].data(), 1);
+                }
+            }
+            
+            // Normalize new vector
+            double norm = cblas_dznrm2(N, new_X[j].data(), 1);
+            Complex scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, new_X[j].data(), 1);
+            cblas_zscal(N, &scale, new_HX[j].data(), 1);
+        }
+        
+        // Save previous X for P update
+        std::vector<ComplexVector> prev_X = X;
+        
+        // Update X and HX
+        X = new_X;
+        HX = new_HX;
+        
+        // Re-orthogonalize X block to ensure numerical stability
+        for (int j = 0; j < block_size; j++) {
+            // Orthogonalize against previous vectors
+            for (int k = 0; k < j; k++) {
+                Complex projection;
+                cblas_zdotc_sub(N, X[k].data(), 1, X[j].data(), 1, &projection);
+                
+                Complex neg_projection = -projection;
+                cblas_zaxpy(N, &neg_projection, X[k].data(), 1, X[j].data(), 1);
+                
+                // Update HX accordingly
+                cblas_zaxpy(N, &neg_projection, HX[k].data(), 1, HX[j].data(), 1);
+            }
+            
+            // Normalize
+            double norm = cblas_dznrm2(N, X[j].data(), 1);
+            if (norm > 1e-10) {
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, X[j].data(), 1);
+                cblas_zscal(N, &scale, HX[j].data(), 1);
+            }
+        }
+        
+        // Update eigenvalues using Rayleigh quotient
+        for (int j = 0; j < block_size; j++) {
+            Complex rayleigh;
+            cblas_zdotc_sub(N, X[j].data(), 1, HX[j].data(), 1, &rayleigh);
+            eigenvalues[j] = std::real(rayleigh);
+        }
+        
+        // Compute new residuals
+        double max_res_norm = 0.0;
+        for (int j = 0; j < block_size; j++) {
+            for (int i = 0; i < N; i++) {
+                R[j][i] = HX[j][i] - eigenvalues[j] * X[j][i];
+            }
+            
+            double res_norm = cblas_dznrm2(N, R[j].data(), 1);
+            max_res_norm = std::max(max_res_norm, res_norm);
+        }
+        
+        // Output progress
+        if (iter % 10 == 0 || max_res_norm < tol) {
+            std::cout << "Iteration " << iter << ": max residual = " << max_res_norm << std::endl;
+            std::cout << "Eigenvalues: ";
+            for (int j = 0; j < std::min(5, block_size); j++) {
+                std::cout << eigenvalues[j] << " ";
+            }
+            if (block_size > 5) std::cout << "...";
+            std::cout << std::endl;
+        }
+        
+        // Check convergence
+        if (max_res_norm < tol) {
+            std::cout << "LOBPCG converged after " << iter+1 << " iterations." << std::endl;
+            break;
+        }
+        
+        // Apply preconditioner to residuals
+        if (M) {
+            for (int j = 0; j < block_size; j++) {
+                M(R[j].data(), MR[j].data(), N);
+            }
+        } else {
+            // Without preconditioner, MR = R
+            MR = R;
+        }
+        
+        // Update P for next iteration
+        P = MR;
+        
+        // Orthogonalize P against X
+        for (int j = 0; j < block_size; j++) {
+            for (int k = 0; k < block_size; k++) {
+                Complex projection;
+                cblas_zdotc_sub(N, X[k].data(), 1, P[j].data(), 1, &projection);
+                
+                Complex neg_projection = -projection;
+                cblas_zaxpy(N, &neg_projection, X[k].data(), 1, P[j].data(), 1);
+            }
+        }
+    }
+    
+    // Update eigenvectors with the final X
+    eigenvectors = X;
+}
+
+// Wrapper function to match the interface of other diagonalization methods
+void lobpcg_eigenvalues(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
     int N,                                                 // Hilbert space dimension
     int max_iter,                                          // Maximum iterations
     int num_eigenvalues,                                   // Number of eigenvalues to find
     double tol,                                            // Tolerance for convergence
     std::vector<double>& eigenvalues,                      // Output eigenvalues
-    std::vector<ComplexVector>& eigenvectors,              // Output eigenvectors
-    std::string dir = ""                                   // Directory for temporary files
+    std::string dir = "",                                  // Directory for temporary files
+    bool compute_eigenvectors = false                      // Whether to compute eigenvectors
 ) {
-    // Create directory for temporary files if needed
-    std::string temp_dir = dir + "/lobpcg_temp";
-    if (!dir.empty()) {
-        std::string cmd = "mkdir -p " + temp_dir;
-        system(cmd.c_str());
-    }
-    
-    // Block size cannot exceed the dimension
-    int block_size = std::min(num_eigenvalues, N);
-    
-    // Initialize block of random vectors X
-    std::vector<ComplexVector> X(block_size, ComplexVector(N));
-    std::vector<ComplexVector> R(block_size, ComplexVector(N));  // Residuals
-    std::vector<ComplexVector> P(block_size, ComplexVector(N));  // Conjugate directions
-    std::vector<ComplexVector> HX(block_size, ComplexVector(N)); // H*X
-    std::vector<ComplexVector> HP(block_size, ComplexVector(N)); // H*P
-    
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Initialize X with random vectors
-    for (int i = 0; i < block_size; i++) {
-        for (int j = 0; j < N; j++) {
-            X[i][j] = Complex(dist(gen), dist(gen));
-        }
-    }
-    
-    // Orthonormalize X using Gram-Schmidt
-    for (int i = 0; i < block_size; i++) {
-        // Orthogonalize against previous vectors
-        for (int j = 0; j < i; j++) {
-            Complex proj;
-            cblas_zdotc_sub(N, X[j].data(), 1, X[i].data(), 1, &proj);
-            Complex neg_proj = -proj;
-            cblas_zaxpy(N, &neg_proj, X[j].data(), 1, X[i].data(), 1);
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, X[i].data(), 1);
-        if (norm > 1e-10) {
-            Complex scale = Complex(1.0/norm, 0.0);
-            cblas_zscal(N, &scale, X[i].data(), 1);
-        } else {
-            // If the vector is close to zero, reinitialize it
-            for (int j = 0; j < N; j++) {
-                X[i][j] = Complex(dist(gen), dist(gen));
-            }
-            // Repeat orthogonalization for this vector
-            i--;
-            continue;
-        }
-    }
-    
-    // Apply H to initial block
-    for (int i = 0; i < block_size; i++) {
-        H(X[i].data(), HX[i].data(), N);
-    }
-    
-    // Initialize eigenvalues and compute initial residuals
-    eigenvalues.resize(block_size);
-    bool has_p = false;  // Flag for whether P is initialized
-    
-    // Setup matrices for the dense eigenvalue problem
-    Eigen::MatrixXcd gramXX(block_size, block_size);
-    Eigen::MatrixXcd gramXHX(block_size, block_size);
-    
-    std::cout << "LOBPCG: Starting iterations..." << std::endl;
-    
-    for (int iter = 0; iter < max_iter; iter++) {
-        // Compute Gram matrices X'X and X'HX
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < block_size; j++) {
-                Complex xx_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, X[j].data(), 1, &xx_ij);
-                gramXX(i, j) = xx_ij;
-                
-                Complex xhx_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, HX[j].data(), 1, &xhx_ij);
-                gramXHX(i, j) = xhx_ij;
-            }
-        }
-        
-        // Ensure matrices are Hermitian
-        gramXX = (gramXX + gramXX.adjoint()) / 2.0;
-        gramXHX = (gramXHX + gramXHX.adjoint()) / 2.0;
-        
-        // Solve the reduced eigenvalue problem
-        Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXcd> solver(gramXHX, gramXX);
-        Eigen::VectorXd rq_eigenvals = solver.eigenvalues().real();
-        Eigen::MatrixXcd rq_eigenvecs = solver.eigenvectors();
-        
-        // Extract eigenvalues
-        for (int i = 0; i < block_size; i++) {
-            eigenvalues[i] = rq_eigenvals(i);
-        }
-        
-        // Compute residuals R = HX - X*Lambda
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < N; j++) {
-                R[i][j] = Complex(0, 0);
-                for (int k = 0; k < block_size; k++) {
-                    R[i][j] += rq_eigenvecs(k, i) * HX[k][j];
-                }
-                for (int k = 0; k < block_size; k++) {
-                    R[i][j] -= eigenvalues[i] * rq_eigenvecs(k, i) * X[k][j];
-                }
-            }
-        }
-        
-        // Check for convergence
-        double max_res_norm = 0.0;
-        for (int i = 0; i < block_size; i++) {
-            double res_norm = cblas_dznrm2(N, R[i].data(), 1);
-            max_res_norm = std::max(max_res_norm, res_norm);
-        }
-        
-        if (iter % 10 == 0 || max_res_norm < tol) {
-            std::cout << "Iteration " << iter << ": max residual = " << max_res_norm << std::endl;
-            std::cout << "Eigenvalues: ";
-            for (int i = 0; i < std::min(5, block_size); i++) {
-                std::cout << eigenvalues[i] << " ";
-            }
-            if (block_size > 5) std::cout << "...";
-            std::cout << std::endl;
-        }
-        
-        if (max_res_norm < tol) {
-            std::cout << "LOBPCG converged after " << iter+1 << " iterations." << std::endl;
-            break;
-        }
-        
-        // Set up the subspace problem
-        int subspace_dim = has_p ? 3 * block_size : 2 * block_size;
-        Eigen::MatrixXcd A(subspace_dim, subspace_dim);
-        Eigen::MatrixXcd B(subspace_dim, subspace_dim);
-        A.setZero();
-        B.setZero();
-        
-        // Fill the subspace matrices with X'HX, X'HP, etc.
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < block_size; j++) {
-                // X'HX block
-                Complex xhx_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, HX[j].data(), 1, &xhx_ij);
-                A(i, j) = xhx_ij;
-                
-                // X'X block
-                Complex xx_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, X[j].data(), 1, &xx_ij);
-                B(i, j) = xx_ij;
-                
-                // R'HR block
-                Complex rhr_ij;
-                Complex hr_j;
-                cblas_zdotc_sub(N, R[i].data(), 1, R[j].data(), 1, &rhr_ij);
-                A(block_size + i, block_size + j) = rhr_ij;
-                
-                // R'R block
-                Complex rr_ij;
-                cblas_zdotc_sub(N, R[i].data(), 1, R[j].data(), 1, &rr_ij);
-                B(block_size + i, block_size + j) = rr_ij;
-                
-                // X'HR block
-                Complex xhr_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, R[j].data(), 1, &xhr_ij);
-                A(i, block_size + j) = xhr_ij;
-                A(block_size + j, i) = std::conj(xhr_ij);
-                
-                // X'R block
-                Complex xr_ij;
-                cblas_zdotc_sub(N, X[i].data(), 1, R[j].data(), 1, &xr_ij);
-                B(i, block_size + j) = xr_ij;
-                B(block_size + j, i) = std::conj(xr_ij);
-                
-                if (has_p) {
-                    // P'HP block
-                    Complex php_ij;
-                    cblas_zdotc_sub(N, P[i].data(), 1, HP[j].data(), 1, &php_ij);
-                    A(2*block_size + i, 2*block_size + j) = php_ij;
-                    
-                    // P'P block
-                    Complex pp_ij;
-                    cblas_zdotc_sub(N, P[i].data(), 1, P[j].data(), 1, &pp_ij);
-                    B(2*block_size + i, 2*block_size + j) = pp_ij;
-                    
-                    // X'HP block
-                    Complex xhp_ij;
-                    cblas_zdotc_sub(N, X[i].data(), 1, HP[j].data(), 1, &xhp_ij);
-                    A(i, 2*block_size + j) = xhp_ij;
-                    A(2*block_size + j, i) = std::conj(xhp_ij);
-                    
-                    // X'P block
-                    Complex xp_ij;
-                    cblas_zdotc_sub(N, X[i].data(), 1, P[j].data(), 1, &xp_ij);
-                    B(i, 2*block_size + j) = xp_ij;
-                    B(2*block_size + j, i) = std::conj(xp_ij);
-                    
-                    // R'HP block
-                    Complex rhp_ij;
-                    cblas_zdotc_sub(N, R[i].data(), 1, HP[j].data(), 1, &rhp_ij);
-                    A(block_size + i, 2*block_size + j) = rhp_ij;
-                    A(2*block_size + j, block_size + i) = std::conj(rhp_ij);
-                    
-                    // R'P block
-                    Complex rp_ij;
-                    cblas_zdotc_sub(N, R[i].data(), 1, P[j].data(), 1, &rp_ij);
-                    B(block_size + i, 2*block_size + j) = rp_ij;
-                    B(2*block_size + j, block_size + i) = std::conj(rp_ij);
-                }
-            }
-        }
-        
-        // Ensure matrices are Hermitian
-        A = (A + A.adjoint()) / 2.0;
-        B = (B + B.adjoint()) / 2.0;
-        
-        // Solve the subspace generalized eigenvalue problem
-        Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXcd> subsolver(A, B);
-        Eigen::VectorXd sub_eigenvals = subsolver.eigenvalues();
-        Eigen::MatrixXcd sub_eigenvecs = subsolver.eigenvectors();
-        
-        // Store old X for P update
-        std::vector<ComplexVector> X_old = X;
-        
-        // Update X, using only the first block_size eigenvectors
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < N; j++) {
-                X[i][j] = Complex(0, 0);
-                for (int k = 0; k < block_size; k++) {
-                    X[i][j] += sub_eigenvecs(k, i) * X_old[k][j];
-                }
-                for (int k = 0; k < block_size; k++) {
-                    X[i][j] += sub_eigenvecs(block_size + k, i) * R[k][j];
-                }
-                if (has_p) {
-                    for (int k = 0; k < block_size; k++) {
-                        X[i][j] += sub_eigenvecs(2*block_size + k, i) * P[k][j];
-                    }
-                }
-            }
-        }
-        
-        // Update P = X_old - X
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < N; j++) {
-                P[i][j] = X_old[i][j] - X[i][j];
-            }
-        }
-        has_p = true;
-        
-        // Apply H to X and P
-        for (int i = 0; i < block_size; i++) {
-            H(X[i].data(), HX[i].data(), N);
-            H(P[i].data(), HP[i].data(), N);
-        }
-    }
-    
-    // Update eigenvectors from block representation to individual vectors
-    eigenvectors.resize(num_eigenvalues);
-    for (int i = 0; i < num_eigenvalues && i < block_size; i++) {
-        eigenvectors[i].resize(N);
-        for (int j = 0; j < N; j++) {
-            eigenvectors[i][j] = X[i][j];
-        }
-    }
-    
-    // Clean up temporary directory if created
-    if (!dir.empty()) {
-        std::string cmd = "rm -rf " + temp_dir;
-        system(cmd.c_str());
-    }
-}
-
-// Function with same interface as lanczos.cpp and cg_diagonalization
-void lobpcg_diagonalization(
-    std::function<void(const Complex*, Complex*, int)> H, 
-    int N, 
-    int max_iter, 
-    int exct, 
-    double tol, 
-    std::vector<double>& eigenvalues, 
-    std::string dir = "",
-    bool compute_eigenvectors = false
-) {
-    std::cout << "LOBPCG Diagonalization: Starting with max_iter = " << max_iter 
-              << ", exct = " << exct << std::endl;
+    std::cout << "LOBPCG: Starting with max_iter = " << max_iter 
+              << ", num_eigenvalues = " << num_eigenvalues << std::endl;
     
     std::vector<ComplexVector> eigenvectors;
     
-    // LOBPCG works best with a reasonable block size, so we limit it
-    int block_size = std::min(exct, 50);  // Limit block size for stability
-    
-    lobpcg_method(H, N, max_iter, block_size, tol, eigenvalues, eigenvectors, dir);
-    
-    // Limit the number of eigenvalues returned
-    if ((int)eigenvalues.size() > exct) {
-        eigenvalues.resize(exct);
-    }
+    // Call LOBPCG implementation
+    lobpcg_method(H, N, max_iter, num_eigenvalues, tol, eigenvalues, eigenvectors);
     
     // Save eigenvectors to files if requested
     if (compute_eigenvectors && !dir.empty()) {
@@ -1590,8 +1642,7 @@ void lobpcg_diagonalization(
         std::string cmd = "mkdir -p " + evec_dir;
         system(cmd.c_str());
         
-        int num_evecs = std::min(exct, (int)eigenvectors.size());
-        for (int i = 0; i < num_evecs; i++) {
+        for (size_t i = 0; i < eigenvectors.size(); i++) {
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
             std::ofstream outfile(evec_file, std::ios::binary);
             if (outfile) {

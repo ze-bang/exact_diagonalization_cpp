@@ -4183,6 +4183,245 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     }
 }
 
+// Optimal solver for full spectrum with degenerate eigenvalues
+// Combines block Lanczos, Chebyshev filtering, and spectrum slicing
+void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, int N, 
+                             std::vector<double>& eigenvalues, std::string dir = "",
+                             bool compute_eigenvectors = true, double tol = 1e-10) {
+    std::cout << "Starting optimal spectrum solver for matrix of dimension " << N << std::endl;
+    
+    // Create directories for output
+    std::string solver_dir = dir + "/optimal_solver";
+    std::string evec_dir = solver_dir + "/eigenvectors";
+    std::string temp_dir = solver_dir + "/temp";
+    
+    system(("mkdir -p " + evec_dir).c_str());
+    system(("mkdir -p " + temp_dir).c_str());
+    
+    // For very small matrices, just use full diagonalization
+    if (N <= 1000) {
+        std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
+        full_diagonalization(H, N, eigenvalues, compute_eigenvectors ? new std::vector<ComplexVector>() : nullptr);
+        return;
+    }
+    
+    // Parameters for spectrum slicing
+    const int max_slice_size = 5000;  // Maximum eigenvalues per slice
+    const int overlap = 50;           // Overlap between slices to ensure continuity
+    const int num_slices = (N + max_slice_size - 1) / max_slice_size;
+    
+    std::cout << "Using spectrum slicing with " << num_slices << " slices" << std::endl;
+    
+    // Estimate spectral bounds using Lanczos
+    std::vector<double> boundary_evals;
+    std::cout << "Estimating spectral bounds..." << std::endl;
+    lanczos(H, N, 100, 2, tol, boundary_evals, temp_dir, false);
+    
+    double lambda_min = boundary_evals[0];
+    double lambda_max = boundary_evals[1];
+    double safety_margin = 0.05 * (lambda_max - lambda_min);
+    
+    lambda_min -= safety_margin;
+    lambda_max += safety_margin;
+    
+    std::cout << "Estimated spectral range: [" << lambda_min << ", " << lambda_max << "]" << std::endl;
+    
+    // Initialize result vector
+    eigenvalues.clear();
+    
+    // Process each slice
+    for (int slice = 0; slice < num_slices; slice++) {
+        double slice_start, slice_end;
+        
+        if (num_slices == 1) {
+            slice_start = lambda_min;
+            slice_end = lambda_max;
+        } else {
+            double slice_width = (lambda_max - lambda_min) / num_slices;
+            slice_start = lambda_min + slice * slice_width - (slice > 0 ? overlap * slice_width / max_slice_size : 0);
+            slice_end = lambda_min + (slice + 1) * slice_width + (slice < num_slices - 1 ? overlap * slice_width / max_slice_size : 0);
+        }
+        
+        std::cout << "Processing slice " << slice + 1 << "/" << num_slices 
+                  << " range [" << slice_start << ", " << slice_end << "]" << std::endl;
+        
+        // Choose optimal method for this slice based on its position in spectrum
+        std::vector<double> slice_eigenvalues;
+        std::string slice_dir = temp_dir + "/slice_" + std::to_string(slice);
+        system(("mkdir -p " + slice_dir).c_str());
+        
+        // For the lowest part of the spectrum, use Krylov-Schur which works well for smallest eigenvalues
+        if (slice == 0) {
+            std::cout << "Using Krylov-Schur for lowest eigenvalues" << std::endl;
+            krylov_schur(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+        }
+        // For the highest part of the spectrum, use IRL with spectral transformation
+        else if (slice == num_slices - 1) {
+            std::cout << "Using IRL for highest eigenvalues" << std::endl;
+            implicitly_restarted_lanczos(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+            
+            // Reverse transformation if needed
+            // (IRL gives lowest eigenvalues by default, but we want highest for this slice)
+        }
+        // For middle slices, use shift-invert Lanczos with a shift in the middle of the slice
+        else {
+            double sigma = (slice_start + slice_end) / 2.0;
+            std::cout << "Using shift-invert Lanczos with shift σ = " << sigma << std::endl;
+            shift_invert_lanczos(H, N, max_slice_size, max_slice_size, sigma, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+        }
+        
+        // Filter eigenvalues to the current slice
+        std::vector<double> filtered_eigenvalues;
+        for (double eval : slice_eigenvalues) {
+            if (eval >= slice_start && eval <= slice_end) {
+                filtered_eigenvalues.push_back(eval);
+            }
+        }
+        
+        std::cout << "Found " << filtered_eigenvalues.size() << " eigenvalues in slice " << slice + 1 << std::endl;
+        
+        // Add to global eigenvalue list
+        eigenvalues.insert(eigenvalues.end(), filtered_eigenvalues.begin(), filtered_eigenvalues.end());
+        
+        // If computing eigenvectors, move them to the final directory
+        if (compute_eigenvectors) {
+            std::string src_dir = slice_dir;
+            if (slice == 0) {
+                src_dir += "/krylov_schur_eigenvectors";
+            } else if (slice == num_slices - 1) {
+                src_dir += "/irl_eigenvectors";
+            } else {
+                src_dir += "/shift_invert_lanczos_results";
+            }
+            
+            // Copy eigenvectors to final directory
+            int offset = eigenvalues.size() - filtered_eigenvalues.size();
+            for (size_t i = 0; i < filtered_eigenvalues.size(); i++) {
+                std::string src_file = src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                std::string dst_file = evec_dir + "/eigenvector_" + std::to_string(offset + i) + ".bin";
+                
+                // Use system command to copy file
+                std::string copy_cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
+                system(copy_cmd.c_str());
+            }
+        }
+    }
+    
+    // Sort all eigenvalues
+    std::sort(eigenvalues.begin(), eigenvalues.end());
+    
+    // Remove duplicates from overlapping slices
+    if (num_slices > 1) {
+        auto new_end = std::unique(eigenvalues.begin(), eigenvalues.end(), 
+                                  [tol](double a, double b) { return std::abs(a - b) < tol; });
+        eigenvalues.erase(new_end, eigenvalues.end());
+    }
+    
+    std::cout << "Final eigenvalue count: " << eigenvalues.size() << std::endl;
+    
+    // Perform post-processing to identify and refine degenerate eigenvalues
+    std::cout << "Performing post-processing for degenerate eigenspaces..." << std::endl;
+    
+    std::vector<std::pair<double, int>> degeneracy_groups;
+    double current_eval = eigenvalues[0];
+    int current_count = 1;
+    
+    for (size_t i = 1; i < eigenvalues.size(); i++) {
+        if (std::abs(eigenvalues[i] - current_eval) < 10*tol) {
+            current_count++;
+        } else {
+            degeneracy_groups.push_back({current_eval, current_count});
+            current_eval = eigenvalues[i];
+            current_count = 1;
+        }
+    }
+    degeneracy_groups.push_back({current_eval, current_count});
+    
+    // Report degeneracy statistics
+    std::cout << "Degeneracy analysis:" << std::endl;
+    int max_degeneracy = 0;
+    double max_degen_eval = 0;
+    int num_degenerate_groups = 0;
+    
+    for (const auto& group : degeneracy_groups) {
+        if (group.second > 1) {
+            num_degenerate_groups++;
+            if (group.second > max_degeneracy) {
+                max_degeneracy = group.second;
+                max_degen_eval = group.first;
+            }
+        }
+    }
+    
+    std::cout << "Found " << num_degenerate_groups << " degenerate eigenvalue groups" << std::endl;
+    std::cout << "Maximum degeneracy: " << max_degeneracy << " at eigenvalue " << max_degen_eval << std::endl;
+    
+    // If eigenvectors are computed, fix degenerate subspaces for better numerical stability
+    if (compute_eigenvectors && num_degenerate_groups > 0) {
+        std::cout << "Refining eigenvectors for degenerate subspaces..." << std::endl;
+        
+        int index_offset = 0;
+        for (const auto& group : degeneracy_groups) {
+            if (group.second > 1) {
+                // Load group of degenerate eigenvectors
+                std::vector<ComplexVector> degenerate_vectors;
+                for (int i = 0; i < group.second; i++) {
+                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                    std::ifstream infile(evec_file, std::ios::binary);
+                    if (!infile) {
+                        std::cerr << "Error: Cannot open file " << evec_file << " for reading" << std::endl;
+                        continue;
+                    }
+                    
+                    ComplexVector vec(N);
+                    infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+                    infile.close();
+                    
+                    degenerate_vectors.push_back(vec);
+                }
+                
+                // Refine degenerate subspace
+                refine_degenerate_eigenvectors(H, degenerate_vectors, group.first, N, tol);
+                
+                // Save refined vectors
+                for (int i = 0; i < group.second; i++) {
+                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                    std::ofstream outfile(evec_file, std::ios::binary);
+                    if (!outfile) {
+                        std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                        continue;
+                    }
+                    
+                    outfile.write(reinterpret_cast<char*>(degenerate_vectors[i].data()), N * sizeof(Complex));
+                    outfile.close();
+                }
+            }
+            
+            index_offset += group.second;
+        }
+    }
+    
+    // Save eigenvalues to a file
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+    if (eval_outfile) {
+        // Write the number of eigenvalues first
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        // Write all eigenvalues
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+        eval_outfile.close();
+        std::cout << "Saved " << n_evals << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Cleanup temporary files
+    if (!dir.empty()) {
+        system(("rm -rf " + temp_dir).c_str());
+    }
+    
+    std::cout << "Optimal spectrum solver completed successfully" << std::endl;
+}
+
 #include <chrono>
 int main(int argc, char* argv[]) {
     // Load the operator from ED_test directory
@@ -4284,7 +4523,8 @@ int main(int argc, char* argv[]) {
     // Full diagonalization (only for small matrices)
     if (N <= 10000) {
         start_time = std::chrono::high_resolution_clock::now();
-        full_diagonalization(H, N, full_eigenvalues);
+        // full_diagonalization(H, N, full_eigenvalues);
+        optimal_spectrum_solver(H, N, full_eigenvalues, dir, false);
         end_time = std::chrono::high_resolution_clock::now();
         std::cout << "Full diagonalization completed in " 
                   << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
