@@ -362,7 +362,7 @@ def fit_nlc_model(initial_params, reference_data_file, dir_path,
     
     return opt_params, min_error
 
-def plot_fit_results(opt_params, reference_data_file, dir_path):
+def plot_fit_results(opt_params, dir_path, reference_data_file=""):
     """
     Plot the fitted results against reference data.
     
@@ -382,15 +382,20 @@ def plot_fit_results(opt_params, reference_data_file, dir_path):
         List of cluster names to include in NLC sum
     """
     # Load reference data
-    temp_data, heat_data = load_reference_data(reference_data_file)
-    
-    # Calculate fitted model    
-    nlc_sum = NLC_compute(opt_params, temp_data, dir_path)
+    if reference_data_file == "":
+        temp_data = np.logspace(-2, 1, 1000)
+        nlc_sum = NLC_compute(opt_params, temp_data, dir_path)
+    else:
+        temp_data, heat_data = load_reference_data(reference_data_file)
+        
+        # Calculate fitted model    
+        nlc_sum = NLC_compute(opt_params, temp_data, dir_path)
 
     
     # Plot results
     plt.figure(figsize=(10, 6))
-    plt.plot(temp_data, heat_data, 'o', label='Reference Data')
+    if reference_data_file != "":
+        plt.plot(temp_data, heat_data, 'o', label='Reference Data')
     plt.plot(temp_data, nlc_sum, '-', label='Fitted Model')
     plt.xlabel('Temperature')
     plt.ylabel('Specific Heat')
@@ -416,15 +421,16 @@ def plot_spec_heat_from_file(dir, temperatures):
     plt.show()
 
 
-opt_params, min_error = fit_nlc_model(
-    initial_params=[0.2, 0.2, 1.0],
-    reference_data_file='specific_heat_Pr2Zr2O7.txt',
-    dir_path='./data',
-    temperatures=np.linspace(0.01, 10, 100),
-    cluster_names=['1', '2', '3', '4a', '4b'],
-    bounds=((0, None), (0, None), (0, None))
-)
 
-plot_fit_results(opt_params,'specific_heat_Pr2Zr2O7.txt', './data')
+# opt_params, min_error = fit_nlc_model(
+#     initial_params=[0.2, 0.2, 1.0],
+#     reference_data_file='specific_heat_Pr2Zr2O7.txt',
+#     dir_path='./data',
+#     temperatures=np.linspace(0.01, 10, 100),
+#     cluster_names=['1', '2', '3', '4a', '4b'],
+#     bounds=((0, None), (0, None), (0, None))
+# )
+
+plot_fit_results([0.2, 0.2, 1.0], './data')
 
 # plot_spec_heat_from_file("ED_XXZ_test/", np.logspace(-2, 1, 100))

@@ -17,6 +17,7 @@
 #include <stack>
 #include <fstream>
 #include <set>
+#include "CG.h"
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -3549,6 +3550,380 @@ ThermodynamicData finite_temperature_lanczos_method(
     return results;
 }
 
+// Krylov-Schur algorithm for eigenvalue calculation
+void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+                  double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                  bool eigenvectors = false) {
+    
+    // Create directory for basis vectors
+    std::string temp_dir = dir + "/krylov_schur_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+
+    // Initialize random starting vector
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v_current(N);
+    
+    for (int i = 0; i < N; i++) {
+        v_current[i] = Complex(dist(gen), dist(gen));
+    }
+    
+    // Normalize
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Helper functions for file I/O
+    auto write_basis_vector = [&temp_dir](int index, const ComplexVector& vec) {
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ofstream outfile(filename, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            return;
+        }
+        outfile.write(reinterpret_cast<const char*>(vec.data()), vec.size() * sizeof(Complex));
+        outfile.close();
+    };
+    
+    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        return vec;
+    };
+    
+    // Write initial vector to file
+    write_basis_vector(0, v_current);
+    
+    // Krylov-Schur parameters
+    const int krylov_dim = std::min(max_iter, N);  // Maximum dimension of Krylov subspace
+    const int wanted = std::min(exct, N);          // Number of wanted eigenvalues
+    const int max_restarts = 50;                   // Maximum number of restarts
+    const int restart_dim = std::min(2 * wanted + 10, krylov_dim);  // Restart dimension
+    
+    // Storage for Hessenberg matrix H (stored as dense for simplicity)
+    std::vector<Complex> H_matrix(krylov_dim * krylov_dim, Complex(0.0, 0.0));
+    
+    // Main Krylov-Schur loop
+    bool converged = false;
+    int current_dim = 0;  // Current dimension of Krylov subspace
+    
+    for (int restart = 0; restart < max_restarts && !converged; restart++) {
+        std::cout << "Krylov-Schur: Restart cycle " << restart + 1 << std::endl;
+        
+        // Build/expand Krylov subspace using Arnoldi/Lanczos
+        for (int j = current_dim; j < krylov_dim; j++) {
+            std::cout << "  Building Krylov subspace: vector " << j + 1 << " of " << krylov_dim << std::endl;
+            
+            // Apply matrix to current vector: w = H*v_j
+            ComplexVector w(N);
+            H(v_current.data(), w.data(), N);
+            
+            // Modified Gram-Schmidt orthogonalization
+            for (int i = 0; i <= j; i++) {
+                ComplexVector v_i = read_basis_vector(i, N);
+                
+                // h_ij = <v_i, w>
+                Complex h_ij;
+                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &h_ij);
+                
+                // Store in Hessenberg matrix
+                H_matrix[j * krylov_dim + i] = h_ij;
+                
+                // w = w - h_ij * v_i
+                Complex neg_h_ij = -h_ij;
+                cblas_zaxpy(N, &neg_h_ij, v_i.data(), 1, w.data(), 1);
+            }
+            
+            // Check for convergence or breakdown
+            norm = cblas_dznrm2(N, w.data(), 1);
+            
+            if (norm < tol) {
+                // Lucky breakdown - invariant subspace found
+                std::cout << "  Invariant subspace detected at iteration " << j + 1 << std::endl;
+                current_dim = j + 1;
+                break;
+            }
+            
+            // Set h_{j+1,j} = ||w||
+            if (j < krylov_dim - 1) {
+                H_matrix[(j + 1) * krylov_dim + j] = Complex(norm, 0.0);
+            }
+            
+            // v_{j+1} = w / ||w||
+            ComplexVector v_next(N);
+            for (int i = 0; i < N; i++) {
+                v_next[i] = w[i] / norm;
+            }
+            
+            // Store new basis vector
+            if (j < krylov_dim - 1) {
+                write_basis_vector(j + 1, v_next);
+                v_current = v_next;
+            }
+        }
+        
+        // If first iteration, update current_dim
+        if (restart == 0) {
+            current_dim = krylov_dim;
+        }
+        
+        // Compute Schur decomposition of the Hessenberg matrix
+        std::cout << "  Computing Schur decomposition of " << current_dim << "x" << current_dim << " matrix" << std::endl;
+        
+        // Extract current Hessenberg submatrix
+        std::vector<Complex> H_sub(current_dim * current_dim);
+        for (int i = 0; i < current_dim; i++) {
+            for (int j = 0; j < current_dim; j++) {
+                H_sub[i * current_dim + j] = H_matrix[i * krylov_dim + j];
+            }
+        }
+        
+        // Use LAPACK to compute Schur form
+        std::vector<Complex> schur_T(current_dim * current_dim);  // Schur form
+        std::vector<Complex> schur_Z(current_dim * current_dim);  // Schur vectors
+        std::vector<Complex> w(current_dim);                     // Eigenvalues
+        
+        // Initialize Schur vectors to identity
+        for (int i = 0; i < current_dim; i++) {
+            for (int j = 0; j < current_dim; j++) {
+                schur_Z[i * current_dim + j] = (i == j) ? Complex(1.0, 0.0) : Complex(0.0, 0.0);
+            }
+        }
+        
+        // Copy Hessenberg matrix to schur_T
+        schur_T = H_sub;
+        
+        // Call LAPACK to compute Schur form
+        char jobvs = 'V';  // Compute Schur vectors
+        char sort = 'N';   // Don't sort Schur form
+        int sdim = 0;      // Number of eigenvalues in top-left block
+        lapack_int info;
+        
+        info = LAPACKE_zgees(LAPACK_COL_MAJOR, jobvs, sort, nullptr, current_dim,
+                          reinterpret_cast<lapack_complex_double*>(schur_T.data()), current_dim,
+                          &sdim, reinterpret_cast<lapack_complex_double*>(w.data()),
+                          reinterpret_cast<lapack_complex_double*>(schur_Z.data()), current_dim);
+        
+        if (info != 0) {
+            std::cerr << "  LAPACKE_zgees failed with error code " << info << std::endl;
+            break;
+        }
+        
+        // Extract eigenvalues from Schur form (diagonal of T)
+        std::vector<double> ritz_values(current_dim);
+        for (int i = 0; i < current_dim; i++) {
+            ritz_values[i] = std::real(schur_T[i * current_dim + i]);
+        }
+        
+        // Sort eigenvalues and corresponding Schur vectors
+        std::vector<size_t> indices(current_dim);
+        for (size_t i = 0; i < current_dim; i++) {
+            indices[i] = i;
+        }
+        
+        // Sort indices by eigenvalue (ascending order)
+        std::sort(indices.begin(), indices.end(),
+                 [&ritz_values](size_t a, size_t b) {
+                     return ritz_values[a] < ritz_values[b];
+                 });
+        
+        // Reorder eigenvalues
+        std::vector<double> sorted_ritz(current_dim);
+        for (int i = 0; i < current_dim; i++) {
+            sorted_ritz[i] = ritz_values[indices[i]];
+        }
+        ritz_values = sorted_ritz;
+        
+        // Check for convergence
+        if (restart > 0) {
+            bool all_converged = true;
+            for (int i = 0; i < wanted; i++) {
+                double residual = std::abs(H_matrix[(i + 1) * krylov_dim + i]);
+                if (residual > tol) {
+                    all_converged = false;
+                    break;
+                }
+            }
+            
+            if (all_converged) {
+                std::cout << "  All wanted eigenvalues converged!" << std::endl;
+                converged = true;
+                break;
+            }
+        }
+        
+        // If we've reached max iterations or converged, exit
+        if (converged || restart == max_restarts - 1) {
+            break;
+        }
+        
+        // Prepare for restart: select which Schur vectors to keep
+        std::cout << "  Preparing for restart, keeping " << restart_dim << " vectors" << std::endl;
+        
+        // Compute the restart basis: V * Z(:,1:restart_dim)
+        std::vector<ComplexVector> restart_basis(restart_dim, ComplexVector(N, Complex(0.0, 0.0)));
+        
+        for (int j = 0; j < restart_dim; j++) {
+            int schur_idx = indices[j];  // Index of j-th smallest eigenvalue
+            
+            for (int i = 0; i < current_dim; i++) {
+                ComplexVector v_i = read_basis_vector(i, N);
+                Complex z_ij = schur_Z[schur_idx * current_dim + i];
+                
+                // Add contribution to restart basis
+                for (int k = 0; k < N; k++) {
+                    restart_basis[j][k] += z_ij * v_i[k];
+                }
+            }
+            
+            // Normalize
+            norm = cblas_dznrm2(N, restart_basis[j].data(), 1);
+            scale_factor = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale_factor, restart_basis[j].data(), 1);
+            
+            // Write to file
+            write_basis_vector(j, restart_basis[j]);
+        }
+        
+        // Update current basis vector to the last restart vector
+        v_current = restart_basis[restart_dim - 1];
+        
+        // Reset Hessenberg matrix with the projected submatrix
+        for (int i = 0; i < restart_dim; i++) {
+            for (int j = 0; j < restart_dim; j++) {
+                // Get the (i,j) element from the sorted Schur form
+                int orig_i = indices[i];
+                int orig_j = indices[j];
+                H_matrix[i * krylov_dim + j] = schur_T[orig_i * current_dim + orig_j];
+            }
+        }
+        
+        // Set the next off-diagonal element for continuation
+        ComplexVector v_restart = restart_basis[restart_dim - 1];
+        ComplexVector w_restart(N);
+        
+        // w = H * v_restart
+        H(v_restart.data(), w_restart.data(), N);
+        
+        // Orthogonalize against the restart basis
+        for (int i = 0; i < restart_dim; i++) {
+            Complex h_i;
+            cblas_zdotc_sub(N, restart_basis[i].data(), 1, w_restart.data(), 1, &h_i);
+            
+            Complex neg_h_i = -h_i;
+            cblas_zaxpy(N, &neg_h_i, restart_basis[i].data(), 1, w_restart.data(), 1);
+        }
+        
+        // Compute the new off-diagonal element
+        norm = cblas_dznrm2(N, w_restart.data(), 1);
+        H_matrix[restart_dim * krylov_dim + (restart_dim - 1)] = Complex(norm, 0.0);
+        
+        // Next basis vector
+        if (norm > tol) {
+            ComplexVector v_next(N);
+            for (int i = 0; i < N; i++) {
+                v_next[i] = w_restart[i] / norm;
+            }
+            
+            write_basis_vector(restart_dim, v_next);
+            v_current = v_next;
+        }
+        
+        // Update current dimension
+        current_dim = restart_dim;
+    }
+    
+    // Extract final eigenvalues
+    std::cout << "Krylov-Schur: Extracting final eigenvalues" << std::endl;
+    
+    // Get eigenvalues from Hessenberg matrix
+    std::vector<Complex> evals(current_dim);
+    std::vector<Complex> evecs;
+    
+    if (eigenvectors) {
+        evecs.resize(current_dim * current_dim);
+    }
+    
+    // Use LAPACK for eigendecomposition
+    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 
+                           eigenvectors ? 'V' : 'N', 
+                           'U', 
+                           current_dim, 
+                           reinterpret_cast<lapack_complex_double*>(H_matrix.data()), 
+                           krylov_dim, 
+                           reinterpret_cast<double*>(evals.data()));
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues to output
+    int num_evals = std::min(wanted, current_dim);
+    eigenvalues.resize(num_evals);
+    for (int i = 0; i < num_evals; i++) {
+        eigenvalues[i] = std::real(evals[i]);
+    }
+    
+    // Compute eigenvectors if requested
+    if (eigenvectors) {
+        std::string evec_dir = dir + "/krylov_schur_eigenvectors";
+        std::string cmd_mkdir = "mkdir -p " + evec_dir;
+        system(cmd_mkdir.c_str());
+        
+        // Save eigenvalues
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (eval_outfile) {
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << n_evals << " eigenvalues to " << eigenvalue_file << std::endl;
+        }
+        
+        // Compute and save eigenvectors in the original basis
+        for (int i = 0; i < num_evals; i++) {
+            ComplexVector full_vector(N, Complex(0.0, 0.0));
+            
+            // Transform Krylov eigenvector to full space
+            for (int j = 0; j < current_dim; j++) {
+                ComplexVector basis_j = read_basis_vector(j, N);
+                Complex coef = H_matrix[i * krylov_dim + j];
+                
+                cblas_zaxpy(N, &coef, basis_j.data(), 1, full_vector.data(), 1);
+            }
+            
+            // Normalize
+            double norm = cblas_dznrm2(N, full_vector.data(), 1);
+            Complex scale = Complex(1.0 / norm, 0.0);
+            cblas_zscal(N, &scale, full_vector.data(), 1);
+            
+            // Save eigenvector to file
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            if (evec_outfile) {
+                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
+                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Clean up temporary files
+    system(("rm -rf " + temp_dir).c_str());
+    
+    std::cout << "Krylov-Schur algorithm completed" << std::endl;
+}
+
+
 
 #include <chrono>
 int main(int argc, char* argv[]) {
@@ -3579,17 +3954,6 @@ int main(int argc, char* argv[]) {
 
     op.loadFromFile(dir + "/Trans.dat");
     op.loadFromInterAllFile(dir + "/InterAll.dat");
-    
-    // Matrix Ham = op.returnMatrix();
-    // std::cout << "Loaded operator from " << dir << std::endl;
-    // std::cout << "Matrix size: " << Ham.size() << " x " << Ham[0].size() << std::endl;
-    // std::cout << "Matrix elements: " << std::endl;
-    // for (const auto& row : Ham) {
-    //     for (const auto& elem : row) {
-    //         std::cout << elem << " ";
-    //     }
-    //     std::cout << std::endl;
-    // }
 
     // Create Hamiltonian function
     auto H = [&op](const Complex* v, Complex* Hv, int N) {
@@ -3611,121 +3975,104 @@ int main(int argc, char* argv[]) {
     
     // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
     // full_diagonalization(H, N, eigenvalues);
-
-    lanczos(H, N, N, N, 1e-10, eigenvalues, dir, eigenvector);
-
-    std::vector<double> block_eigenvalues;
+    // lanczos(H, N, N, N, 1e-10, eigenvalues, dir, eigenvector);
+    // Compare different diagonalization methods
+    std::cout << "Comparing different diagonalization methods..." << std::endl;
+    
+    std::vector<double> lanczos_eigenvalues;
+    std::vector<double> ks_eigenvalues;
+    std::vector<double> lobpcg_eigenvalues;
+    std::vector<double> irl_eigenvalues;
     std::vector<double> full_eigenvalues;
-
-    lanczos_selective_reorth(H, N, N, N, 1e-10, block_eigenvalues, dir, eigenvector);
-    // block_lanczos_biorthogonal(H, N, N, 4, N, 1e-10, block_eigenvalues, dir, eigenvector);
-    full_diagonalization(H, N, full_eigenvalues);
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-
-    std::cout << "Diagonalization methods completed in " << elapsed.count() << " seconds" << std::endl;
-
-    // Create output directory if it doesn't exist
-    std::string output_dir = dir + "/output/";
-    std::string mkdir_cmd = "mkdir -p " + output_dir;
-    system(mkdir_cmd.c_str());
-
-    // Compare eigenvalues from different methods
-    std::cout << "\nComparing eigenvalues from different diagonalization methods:" << std::endl;
-
-    // Determine the number of eigenvalues to compare (minimum of the three sizes)
-    int num_compare = std::min({eigenvalues.size(), block_eigenvalues.size(), full_eigenvalues.size()});
-    std::cout << "Comparing first " << num_compare << " eigenvalues" << std::endl;
-
-    // Sort eigenvalues in ascending order
-    std::sort(eigenvalues.begin(), eigenvalues.end());
-    std::sort(block_eigenvalues.begin(), block_eigenvalues.end());
-    std::sort(full_eigenvalues.begin(), full_eigenvalues.end());
-
-    // Calculate differences
-    std::vector<double> lanczos_vs_full_diff(num_compare);
-    std::vector<double> block_vs_full_diff(num_compare);
-    std::vector<double> lanczos_vs_block_diff(num_compare);
-
-    double max_lanczos_vs_full_diff = 0.0;
-    double max_block_vs_full_diff = 0.0;
-    double max_lanczos_vs_block_diff = 0.0;
-
-    double avg_lanczos_vs_full_diff = 0.0;
-    double avg_block_vs_full_diff = 0.0;
-    double avg_lanczos_vs_block_diff = 0.0;
-
-    for (int i = 0; i < num_compare; i++) {
-        lanczos_vs_full_diff[i] = std::abs(eigenvalues[i] - full_eigenvalues[i]);
-        block_vs_full_diff[i] = std::abs(block_eigenvalues[i] - full_eigenvalues[i]);
-        lanczos_vs_block_diff[i] = std::abs(eigenvalues[i] - block_eigenvalues[i]);
-        
-        max_lanczos_vs_full_diff = std::max(max_lanczos_vs_full_diff, lanczos_vs_full_diff[i]);
-        max_block_vs_full_diff = std::max(max_block_vs_full_diff, block_vs_full_diff[i]);
-        max_lanczos_vs_block_diff = std::max(max_lanczos_vs_block_diff, lanczos_vs_block_diff[i]);
-        
-        avg_lanczos_vs_full_diff += lanczos_vs_full_diff[i];
-        avg_block_vs_full_diff += block_vs_full_diff[i];
-        avg_lanczos_vs_block_diff += lanczos_vs_block_diff[i];
-    }
-
-    avg_lanczos_vs_full_diff /= num_compare;
-    avg_block_vs_full_diff /= num_compare;
-    avg_lanczos_vs_block_diff /= num_compare;
-
-    // Output statistics
-    std::cout << "\nDifference Statistics:" << std::endl;
-    std::cout << "Lanczos vs. Full Diagonalization:" << std::endl;
-    std::cout << "  Average difference: " << avg_lanczos_vs_full_diff << std::endl;
-    std::cout << "  Maximum difference: " << max_lanczos_vs_full_diff << std::endl;
-
-    std::cout << "Block Lanczos vs. Full Diagonalization:" << std::endl;
-    std::cout << "  Average difference: " << avg_block_vs_full_diff << std::endl;
-    std::cout << "  Maximum difference: " << max_block_vs_full_diff << std::endl;
-
-    std::cout << "Lanczos vs. Block Lanczos:" << std::endl;
-    std::cout << "  Average difference: " << avg_lanczos_vs_block_diff << std::endl;
-    std::cout << "  Maximum difference: " << max_lanczos_vs_block_diff << std::endl;
-
-    // Save comparison to file
-    std::ofstream compare_file(output_dir + "eigenvalue_comparison.dat");
-    if (compare_file.is_open()) {
-        compare_file << "# Index Lanczos BlockLanczos FullDiag Lanczos-Full Block-Full Lanczos-Block" << std::endl;
-        for (int i = 0; i < num_compare; i++) {
-            compare_file << i << " " 
-                       << eigenvalues[i] << " " 
-                       << block_eigenvalues[i] << " " 
-                       << full_eigenvalues[i] << " "
-                       << lanczos_vs_full_diff[i] << " "
-                       << block_vs_full_diff[i] << " "
-                       << lanczos_vs_block_diff[i] << std::endl;
-        }
-        compare_file.close();
-        std::cout << "\nComparison data saved to " << output_dir + "eigenvalue_comparison.dat" << std::endl;
+    
+    int num_eigs = N; // Compare just a few eigenvalues for larger systems
+    
+    // Record execution times
+    auto start_time = std::chrono::high_resolution_clock::now();
+    auto end_time = std::chrono::high_resolution_clock::now();
+    
+    // Lanczos method
+    start_time = std::chrono::high_resolution_clock::now();
+    lanczos(H, N, N, num_eigs, 1e-10, lanczos_eigenvalues, dir, false);
+    end_time = std::chrono::high_resolution_clock::now();
+    std::cout << "Lanczos completed in " 
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
+              << " ms" << std::endl;
+    
+    // Krylov-Schur method
+    start_time = std::chrono::high_resolution_clock::now();
+    krylov_schur(H, N, N, num_eigs, 1e-10, ks_eigenvalues, dir, false);
+    end_time = std::chrono::high_resolution_clock::now();
+    std::cout << "Krylov-Schur completed in " 
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
+              << " ms" << std::endl;
+    
+    // LOBPCG method (works best for a few eigenvalues)
+    start_time = std::chrono::high_resolution_clock::now();
+    cg_diagonalization(H, N, N, num_eigs, 1e-10, lobpcg_eigenvalues, dir, false);
+    end_time = std::chrono::high_resolution_clock::now();
+    std::cout << "LOBPCG completed in " 
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
+              << " ms" << std::endl;
+    
+    // Implicitly Restarted Lanczos
+    start_time = std::chrono::high_resolution_clock::now();
+    implicitly_restarted_lanczos(H, N, N, num_eigs, N, 1e-10, irl_eigenvalues, dir, false);
+    end_time = std::chrono::high_resolution_clock::now();
+    std::cout << "Implicitly Restarted Lanczos completed in " 
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
+              << " ms" << std::endl;
+    
+    // Full diagonalization (only for small matrices)
+    if (N <= 10000) {
+        start_time = std::chrono::high_resolution_clock::now();
+        full_diagonalization(H, N, full_eigenvalues);
+        end_time = std::chrono::high_resolution_clock::now();
+        std::cout << "Full diagonalization completed in " 
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
+                  << " ms" << std::endl;
     } else {
-        std::cerr << "Error: Could not open comparison file for writing" << std::endl;
+        std::cout << "Full diagonalization skipped (matrix too large)" << std::endl;
     }
-
-    // Print detailed comparison for first few eigenvalues
-    const int num_detail = std::min(10, num_compare);
-    std::cout << "\nDetailed comparison of first " << num_detail << " eigenvalues:" << std::endl;
-    std::cout << std::setw(5) << "Index" 
+    
+    // Print comparison of first few eigenvalues from each method
+    std::cout << "\nComparison of computed eigenvalues:" << std::endl;
+    std::cout << std::setw(10) << "Index" 
               << std::setw(20) << "Lanczos" 
-              << std::setw(20) << "Block Lanczos" 
-              << std::setw(20) << "Full Diag" 
-              << std::setw(20) << "Lanczos-Full"
-              << std::setw(20) << "Block-Full" << std::endl;
-
-    for (int i = 0; i < num_detail; i++) {
-        std::cout << std::fixed << std::setprecision(10)
-                  << std::setw(5) << i 
-                  << std::setw(20) << eigenvalues[i]
-                  << std::setw(20) << block_eigenvalues[i]
-                  << std::setw(20) << full_eigenvalues[i]
-                  << std::setw(20) << lanczos_vs_full_diff[i]
-                  << std::setw(20) << block_vs_full_diff[i] << std::endl;
+              << std::setw(20) << "Krylov-Schur"
+              << std::setw(20) << "LOBPCG"
+              << std::setw(20) << "IRL";
+    if (N <= 10000) std::cout << std::setw(20) << "Full";
+    std::cout << std::endl;
+    
+    int eigs_to_show = std::min(10, num_eigs);
+    for (int i = 0; i < eigs_to_show; i++) {
+        std::cout << std::setw(10) << i 
+                  << std::setw(20) << std::setprecision(10) << lanczos_eigenvalues[i] 
+                  << std::setw(20) << std::setprecision(10) << ks_eigenvalues[i];
+        
+        if (i < lobpcg_eigenvalues.size())
+            std::cout << std::setw(20) << std::setprecision(10) << lobpcg_eigenvalues[i];
+        else
+            std::cout << std::setw(20) << "N/A";
+            
+        std::cout << std::setw(20) << std::setprecision(10) << irl_eigenvalues[i];
+        
+        if (N <= 10000)
+            std::cout << std::setw(20) << std::setprecision(10) << full_eigenvalues[i];
+        
+        std::cout << std::endl;
     }
+    
+    // Use the eigenvalues from the most appropriate method based on system size
+    // if (eigenvector) {
+    //     eigenvalues = (N <= 10000) ? full_eigenvalues : lanczos_eigenvalues;
+    // }
+
+    // for(int i = 0; i < eigenvalues.size(); i++) {
+    //     eigenvalues[i] /= num_site;
+    // }
+
     // auto end = std::chrono::high_resolution_clock::now();
     // std::chrono::duration<double> elapsed = end - start;
 
@@ -3747,26 +4094,10 @@ int main(int argc, char* argv[]) {
     //     eigenvalue_file.close();
     //     std::cout << "Full spectrum saved to ED_test_full_spectrum.dat" << std::endl;
     // }
-    
-    // std::cout << "Reading eigenvalues from ED_test_full_spectrum.dat..." << std::endl;
-    // std::ifstream eigenvalue_input("ED_test_full_spectrum.dat");
-    // eigenvalues.clear();
-
-    // if (eigenvalue_input.is_open()) {
-    //     double value;
-    //     while (eigenvalue_input >> value) {
-    //         eigenvalues.push_back(value);
-    //     }
-    //     eigenvalue_input.close();
-    //     std::cout << "Read " << eigenvalues.size() << " eigenvalues from file" << std::endl;
-    // } else {
-    //     std::cerr << "Failed to open ED_test_full_spectrum.dat" << std::endl;
-    //     return 1;
-    // }
 
     // // Calculate thermodynamics from spectrum
     // std::cout << "Calculating thermodynamic properties and expectation values of observables..." << std::endl;
-    // double T_min = 0.01;
+    // double T_min = 0.001;
     // double T_max = 20.0;
     // int num_points = 2000;
 
@@ -3944,5 +4275,5 @@ int main(int argc, char* argv[]) {
     // std::cout << "  Maximum energy: " << eigenvalues.back() << std::endl;
     // std::cout << "  Energy span: " << eigenvalues.back() - eigenvalues.front() << std::endl;
     
-    // return 0;
+    return 0;
 }
