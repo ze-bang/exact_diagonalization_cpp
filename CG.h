@@ -1,3 +1,6 @@
+#ifndef CG_H
+#define CG_H
+
 #pragma once
 
 #include <vector>
@@ -1663,3 +1666,5 @@ void lobpcg_eigenvalues(
         }
     }
 }
+
+#endif  // CG_H

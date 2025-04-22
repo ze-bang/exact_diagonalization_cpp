@@ -5756,10 +5756,115 @@ void compute_spin_expectations(
 }
 
 
-#include <chrono>
+// #include <chrono>
+// int main(int argc, char* argv[]) {
+//     // Load the operator from ED_test directory
+//     std::string dir = argv[1];
+
+//     // Read num_site from the second line of Trans.dat
+//     std::ifstream trans_file(dir + "/Trans.dat");
+//     if (!trans_file.is_open()) {
+//         std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
+//         return 1;
+//     }
+
+//     // Skip the first line
+//     std::string dummy_line;
+//     std::getline(trans_file, dummy_line);
+
+//     // Read the second line to get num_site
+//     std::string dum;
+//     int num_site;
+//     trans_file >> dum >> num_site;
+//     trans_file.close();
+
+//     std::cout << "Number of sites: " << num_site << std::endl;
+
+//     Operator op(num_site);
+//     int eigenvector = std::atoi(argv[2]);
+
+//     op.loadFromFile(dir + "/Trans.dat");
+//     op.loadFromInterAllFile(dir + "/InterAll.dat");
+
+//     // Create Hamiltonian function
+//     auto H = [&op](const Complex* v, Complex* Hv, int N) {
+//         std::vector<Complex> vec(v, v + N);
+//         std::vector<Complex> result = op.apply(vec);
+//         std::copy(result.begin(), result.end(), Hv);
+//     };
+    
+//     // Hilbert space dimension
+//     int N = 1 << num_site;  // 2^num_site
+    
+//     std::cout << "Hilbert space dimension: " << N << std::endl;
+    
+//     // Calculate full spectrum using full diagonalization
+//     std::cout << "Starting full diagonalization..." << std::endl;
+//     std::vector<double> eigenvalues;
+    
+//     auto start = std::chrono::high_resolution_clock::now();
+    
+//     // optimal_spectrum_solver(H, N, eigenvalues, dir, true);
+//     spectrum_slicing_solver(H, N, eigenvalues, dir, true);
+
+
+//     auto end = std::chrono::high_resolution_clock::now();
+//     std::chrono::duration<double> elapsed = end - start;
+//     std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+
+//     // Calculate thermodynamic quantities from the eigenvalues
+//     std::cout << "Calculating thermodynamic quantities..." << std::endl;
+//     ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+//         eigenvalues,
+//         0.01,    // T_min
+//         10.0,    // T_max
+//         100      // num_points
+//     );
+
+//     // Create output directory
+//     std::string output_dir = dir + "/output";
+//     std::string mkdir_cmd = "mkdir -p " + output_dir;
+//     system(mkdir_cmd.c_str());
+//     std::cout << "Created output directory: " << output_dir << std::endl;
+
+//     // Save thermodynamic data to file
+//     std::string thermo_file = dir + "output/thermodynamics.dat";
+//     std::ofstream thermo_out(thermo_file);
+//     if (thermo_out.is_open()) {
+//         thermo_out << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+//         for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+//             thermo_out << thermo.temperatures[i] << " "
+//                       << thermo.energy[i] << " "
+//                       << thermo.specific_heat[i] << " "
+//                       << thermo.entropy[i] << " "
+//                       << thermo.free_energy[i] << std::endl;
+//         }
+//         thermo_out.close();
+//         std::cout << "Thermodynamic data saved to " << thermo_file << std::endl;
+//     }
+
+//     // Compute spin expectation values at different temperatures
+//     std::vector<double> temperatures = {0.1, 0.5, 1.0, 2.0, 5.0};
+//     for (double T : temperatures) {
+//         std::cout << "\nComputing spin expectations at T = " << T << std::endl;
+//         compute_spin_expectations(dir + "/optimal_solver/eigenvectors", dir + "/output", num_site, T);
+//     }
+
+//     std::cout << "All computations completed successfully" << std::endl;
+
+//     return 0;
+// }
+
+#include <iostream>
+#include "construct_ham.h"
+#include <fstream>
+#include <string>
+
+
 int main(int argc, char* argv[]) {
-    // Load the operator from ED_test directory
-    std::string dir = argv[1];
+    // Test parameters
+    const std::string dir = argv[1];
+    // Read num_site from the second line of Trans.dat
 
     // Read num_site from the second line of Trans.dat
     std::ifstream trans_file(dir + "/Trans.dat");
@@ -5780,77 +5885,108 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Number of sites: " << num_site << std::endl;
 
+    // Create operator with correct number of sites
     Operator op(num_site);
-    int eigenvector = std::atoi(argv[2]);
-
+    op.generateSymmetrizedBasis(dir);
+    // Load operator definitions
     op.loadFromFile(dir + "/Trans.dat");
     op.loadFromInterAllFile(dir + "/InterAll.dat");
 
-    // Create Hamiltonian function
-    auto H = [&op](const Complex* v, Complex* Hv, int N) {
-        std::vector<Complex> vec(v, v + N);
-        std::vector<Complex> result = op.apply(vec);
-        std::copy(result.begin(), result.end(), Hv);
-    };
+    // Print the regular matrix representation
+    std::cout << "\nRegular matrix representation:" << std::endl;
+    Matrix regular_matrix = op.returnMatrix();
+    int dim = 1 << num_site;
     
-    // Hilbert space dimension
-    int N = 1 << num_site;  // 2^num_site
+    // Determine max width for formatting
+    int max_dim = std::min(20, dim); // Limit display size for large matrices
     
-    std::cout << "Hilbert space dimension: " << N << std::endl;
-    
-    // Calculate full spectrum using full diagonalization
-    std::cout << "Starting full diagonalization..." << std::endl;
-    std::vector<double> eigenvalues;
-    
-    auto start = std::chrono::high_resolution_clock::now();
-    
-    // optimal_spectrum_solver(H, N, eigenvalues, dir, true);
-    spectrum_slicing_solver(H, N, eigenvalues, dir, true);
-
-
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
-
-    // Calculate thermodynamic quantities from the eigenvalues
-    std::cout << "Calculating thermodynamic quantities..." << std::endl;
-    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
-        eigenvalues,
-        0.01,    // T_min
-        10.0,    // T_max
-        100      // num_points
-    );
-
-    // Create output directory
-    std::string output_dir = dir + "/output";
-    std::string mkdir_cmd = "mkdir -p " + output_dir;
-    system(mkdir_cmd.c_str());
-    std::cout << "Created output directory: " << output_dir << std::endl;
-
-    // Save thermodynamic data to file
-    std::string thermo_file = dir + "output/thermodynamics.dat";
-    std::ofstream thermo_out(thermo_file);
-    if (thermo_out.is_open()) {
-        thermo_out << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
-            thermo_out << thermo.temperatures[i] << " "
-                      << thermo.energy[i] << " "
-                      << thermo.specific_heat[i] << " "
-                      << thermo.entropy[i] << " "
-                      << thermo.free_energy[i] << std::endl;
+    if (dim <= max_dim) {
+        // Print full matrix
+        for (int i = 0; i < dim; i++) {
+            std::cout << "[";
+            for (int j = 0; j < dim; j++) {
+                Complex val = regular_matrix[i][j];
+                if (std::abs(val) < 1e-10) {
+                    std::cout << " 0 ";
+                } else if (std::abs(val.imag()) < 1e-10) {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
+                } else {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
+                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
+                }
+                if (j < dim - 1) std::cout << ",";
+            }
+            std::cout << "]" << std::endl;
         }
-        thermo_out.close();
-        std::cout << "Thermodynamic data saved to " << thermo_file << std::endl;
+    } else {
+        std::cout << "Matrix too large to display fully (" << dim << "x" << dim << "). Showing top-left " 
+                 << max_dim << "x" << max_dim << " corner:" << std::endl;
+        for (int i = 0; i < max_dim; i++) {
+            std::cout << "[";
+            for (int j = 0; j < max_dim; j++) {
+                Complex val = regular_matrix[i][j];
+                if (std::abs(val) < 1e-10) {
+                    std::cout << " 0 ";
+                } else if (std::abs(val.imag()) < 1e-10) {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
+                } else {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
+                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
+                }
+                if (j < max_dim - 1) std::cout << ",";
+            }
+            std::cout << "]" << std::endl;
+        }
+        std::cout << "..." << std::endl;
     }
 
-    // Compute spin expectation values at different temperatures
-    std::vector<double> temperatures = {0.1, 0.5, 1.0, 2.0, 5.0};
-    for (double T : temperatures) {
-        std::cout << "\nComputing spin expectations at T = " << T << std::endl;
-        compute_spin_expectations(dir + "/optimal_solver/eigenvectors", dir + "/output", num_site, T);
+    // Print the symmetrized matrix representation
+    std::cout << "\nSymmetrized matrix representation:" << std::endl;
+    Matrix sym_matrix = op.returnSymmetrizedMatrix(dir);
+    int sym_dim = sym_matrix.size();
+    max_dim = std::min(20, sym_dim); // Limit display size for large matrices
+    
+    if (sym_dim <= max_dim) {
+        // Print full matrix
+        for (int i = 0; i < sym_dim; i++) {
+            std::cout << "[";
+            for (int j = 0; j < sym_matrix[i].size(); j++) {
+                Complex val = sym_matrix[i][j];
+                if (std::abs(val) < 1e-10) {
+                    std::cout << " 0.00 ";
+                } else if (std::abs(val.imag()) < 1e-10) {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
+                } else {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
+                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
+                }
+                if (j < sym_matrix[i].size() - 1) std::cout << ",";
+            }
+            std::cout << "]" << std::endl;
+        }
+    } else {
+        std::cout << "Matrix too large to display fully (" << sym_dim << "x" << sym_dim << "). Showing top-left " 
+                 << max_dim << "x" << max_dim << " corner:" << std::endl;
+        for (int i = 0; i < max_dim; i++) {
+            std::cout << "[";
+            int cols = std::min(max_dim, (int)sym_matrix[i].size());
+            for (int j = 0; j < cols; j++) {
+                Complex val = sym_matrix[i][j];
+                if (std::abs(val) < 1e-10) {
+                    std::cout << " 0.00 ";
+                } else if (std::abs(val.imag()) < 1e-10) {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
+                } else {
+                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
+                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
+                }
+                if (j < cols - 1) std::cout << ",";
+            }
+            if (sym_matrix[i].size() > max_dim) std::cout << ", ...";
+            std::cout << "]" << std::endl;
+        }
+        std::cout << "..." << std::endl;
     }
-
-    std::cout << "All computations completed successfully" << std::endl;
 
     return 0;
 }
