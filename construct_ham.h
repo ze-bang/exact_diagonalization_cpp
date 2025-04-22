@@ -258,6 +258,44 @@ private:
 
 
 /**
+ * SingleSiteOperator class represents a Pauli operator (X, Y, or Z) acting on a single site
+ */
+class SingleSiteOperator : public Operator {
+public:
+    /**
+     * Constructor for a single site operator
+     * @param num_site Total number of sites/qubits
+     * @param op Operator type: 0 for X, 1 for Y, 2 for Z
+     * @param site_j Site index to apply the operator to
+     */
+    SingleSiteOperator(int num_site, int op, int site_j) : Operator(num_site) {
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for X, 1 for Y, 2 for Z");
+        }
+        
+        if (site_j < 0 || site_j >= num_site) {
+            throw std::invalid_argument("Site index out of range");
+        }
+        
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+        // Check if all bits match their expected values
+            if (op == 2){
+                return {basis, 0.5*pow(-1,(basis >> site_j) & 1)};
+            }
+            else{
+                if (((basis >> site_j) & 1) != op) {
+                    // Flip the A bit
+                    int flipped_basis = basis ^ (1 << site_j);
+                    return {flipped_basis, Complex(1.0, 0)};                    
+                }
+            }
+        // Default case: no transformation applies
+        return {basis, Complex(0.0, 0.0)};
+        });
+    }
+};
+
+/**
  * Creates a graphical representation of interactions between quantum sites
  * based on the interall.def file
  */

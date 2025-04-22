@@ -3129,8 +3129,17 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
 
 // Full diagonalization using LAPACK for Hermitian matrices
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N,
-                          std::vector<double>& eigenvalues, 
-                          std::vector<ComplexVector>* eigenvectors = nullptr) {
+                          std::vector<double>& eigenvalues, std::string dir = "",
+                          bool compute_eigenvectors = false) {
+    
+    std::cout << "Full diagonalization: Starting for matrix of dimension " << N << std::endl;
+    
+    // Create directory for output if needed
+    std::string evec_dir = dir;
+    if (compute_eigenvectors && !dir.empty()) {
+        std::string cmd = "mkdir -p " + evec_dir;
+        system(cmd.c_str());
+    }
     
     // Construct the full matrix representation
     std::vector<Complex> full_matrix(N * N, Complex(0.0, 0.0));
@@ -3155,18 +3164,12 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     // Allocate array for eigenvalues
     eigenvalues.resize(N);
     
-    // Prepare working space for eigenvectors if requested
-    std::vector<Complex> work_eigenvectors;
-    if (eigenvectors) {
-        work_eigenvectors = full_matrix; // Copy the matrix since LAPACK overwrites it
-    }
-    
     // Call LAPACK eigensolver
     int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 
-                           eigenvectors ? 'V' : 'N', // 'V' to compute eigenvectors, 'N' for eigenvalues only
-                           'U',                      // Upper triangular part of the matrix is used
+                           compute_eigenvectors ? 'V' : 'N', // 'V' to compute eigenvectors, 'N' for eigenvalues only
+                           'U',                              // Upper triangular part of the matrix is used
                            N, 
-                           reinterpret_cast<lapack_complex_double*>(eigenvectors ? work_eigenvectors.data() : full_matrix.data()), 
+                           reinterpret_cast<lapack_complex_double*>(full_matrix.data()), 
                            N, 
                            eigenvalues.data());
     
@@ -3175,16 +3178,50 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         return;
     }
     
-    // Convert eigenvectors if requested
-    if (eigenvectors) {
-        eigenvectors->resize(N);
+    // Save eigenvectors to files if requested
+    if (compute_eigenvectors && !dir.empty()) {
+        std::cout << "Full diagonalization: Saving eigenvectors to " << evec_dir << std::endl;
+        
         for (int i = 0; i < N; i++) {
-            (*eigenvectors)[i].resize(N);
+            // Extract eigenvector from column of full_matrix
+            ComplexVector eigenvector(N);
             for (int j = 0; j < N; j++) {
-                (*eigenvectors)[i][j] = work_eigenvectors[i*N + j];
+                eigenvector[j] = full_matrix[i*N + j];
+            }
+            
+            // Save to file
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            if (!evec_outfile) {
+                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                continue;
+            }
+            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            evec_outfile.close();
+            
+            // Print progress occasionally
+            if (i % 10 == 0 || i == N - 1) {
+                std::cout << "  Saved eigenvector " << i + 1 << " of " << N << std::endl;
             }
         }
+        
+        // Save eigenvalues to a single file
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (!eval_outfile) {
+            std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+        } else {
+            // Write the number of eigenvalues first
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            // Write all eigenvalues
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), N * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << N << " eigenvalues to " << eigenvalue_file << std::endl;
+        }
     }
+    
+    std::cout << "Full diagonalization completed successfully" << std::endl;
 }
 
 // The Krylov-Schur algorithm is an advanced eigenvalue computation method that extends the traditional Lanczos algorithm with better stability and convergence properties. Here's an explanation of how it works:
@@ -3290,12 +3327,12 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
             cblas_zaxpy(N, &neg_alpha, V[j].data(), 1, w.data(), 1);
             
             // Full reorthogonalization for numerical stability
-            for (int i = 0; i <= j; i++) {
-                Complex ip;
-                cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &ip);
-                Complex neg_ip = -ip;
-                cblas_zaxpy(N, &neg_ip, V[i].data(), 1, w.data(), 1);
-            }
+            // for (int i = 0; i <= j; i++) {
+            //     Complex ip;
+            //     cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &ip);
+            //     Complex neg_ip = -ip;
+            //     cblas_zaxpy(N, &neg_ip, V[i].data(), 1, w.data(), 1);
+            // }
             
             // beta_{j+1} = ||w||
             beta[j+1] = cblas_dznrm2(N, w.data(), 1);
@@ -3821,24 +3858,40 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
 }
 
 // Optimal solver for full spectrum with degenerate eigenvalues
-// Combines block Lanczos, Chebyshev filtering, and spectrum slicing
+// Combines block Lanczos, Chebyshev filtering, and spectrum slicing with MPI parallelization
 void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> H, int N, 
                              std::vector<double>& eigenvalues, std::string dir = "",
                              bool compute_eigenvectors = true, double tol = 1e-10) {
-    std::cout << "Starting optimal spectrum solver for matrix of dimension " << N << std::endl;
+    // Initialize MPI variables
+    int mpi_rank = 0, mpi_size = 1;
     
-    // Create directories for output
+    #ifdef USE_MPI
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+    #endif
+    
+    // Only the root process should print
+    if (mpi_rank == 0) {
+        std::cout << "Starting optimal spectrum solver for matrix of dimension " << N << std::endl;
+        std::cout << "Using " << mpi_size << " MPI processes for parallelization" << std::endl;
+    }
+    
+    // Create directories for output (only root process)
     std::string solver_dir = dir + "/optimal_solver";
     std::string evec_dir = solver_dir + "/eigenvectors";
     std::string temp_dir = solver_dir + "/temp";
     
-    system(("mkdir -p " + evec_dir).c_str());
-    system(("mkdir -p " + temp_dir).c_str());
+    if (mpi_rank == 0) {
+        system(("mkdir -p " + evec_dir).c_str());
+        system(("mkdir -p " + temp_dir).c_str());
+    }
     
-    // For very small matrices, just use full diagonalization
+    // For very small matrices, just use full diagonalization (only on root)
     if (N <= 1000) {
-        std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
-        full_diagonalization(H, N, eigenvalues, compute_eigenvectors ? new std::vector<ComplexVector>() : nullptr);
+        if (mpi_rank == 0) {
+            std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
+            full_diagonalization(H, N, eigenvalues, evec_dir, compute_eigenvectors);
+        }
         return;
     }
     
@@ -3847,216 +3900,347 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     const int overlap = 50;           // Overlap between slices to ensure continuity
     const int num_slices = (N + max_slice_size - 1) / max_slice_size;
     
-    std::cout << "Using spectrum slicing with " << num_slices << " slices" << std::endl;
+    if (mpi_rank == 0) {
+        std::cout << "Using spectrum slicing with " << num_slices << " slices" << std::endl;
+    }
     
-    // Estimate spectral bounds using Lanczos
+    // Estimate spectral bounds using Lanczos (only on root process)
     std::vector<double> boundary_evals;
-    std::cout << "Estimating spectral bounds..." << std::endl;
-    lanczos(H, N, 100, 2, tol, boundary_evals, temp_dir, false);
+    double lambda_min, lambda_max, safety_margin;
     
-    double lambda_min = boundary_evals[0];
-    double lambda_max = boundary_evals[1];
-    double safety_margin = 0.05 * (lambda_max - lambda_min);
+    if (mpi_rank == 0) {
+        std::cout << "Estimating spectral bounds..." << std::endl;
+        lanczos(H, N, 100, 100, tol, boundary_evals, temp_dir, false);
+        
+        lambda_min = boundary_evals[0];
+        lambda_max = boundary_evals[99];
+        safety_margin = 0.05 * (lambda_max - lambda_min);
+        
+        lambda_min -= safety_margin;
+        lambda_max += safety_margin;
+        
+        std::cout << "Estimated spectral range: [" << lambda_min << ", " << lambda_max << "]" << std::endl;
+    }
     
-    lambda_min -= safety_margin;
-    lambda_max += safety_margin;
+    // Broadcast spectral bounds to all processes
+    #ifdef USE_MPI
+    MPI_Bcast(&lambda_min, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&lambda_max, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    #endif
     
-    std::cout << "Estimated spectral range: [" << lambda_min << ", " << lambda_max << "]" << std::endl;
+    // Initialize local result vector for each process
+    std::vector<double> local_eigenvalues;
+    std::vector<int> local_slice_sizes; // To keep track of eigenvalues per slice for this process
     
-    // Initialize result vector
-    eigenvalues.clear();
-    
-    // Process each slice
+    // Assign slices to processes for load balancing
     for (int slice = 0; slice < num_slices; slice++) {
-        double slice_start, slice_end;
-        
-        if (num_slices == 1) {
-            slice_start = lambda_min;
-            slice_end = lambda_max;
-        } else {
-            double slice_width = (lambda_max - lambda_min) / num_slices;
-            slice_start = lambda_min + slice * slice_width - (slice > 0 ? overlap * slice_width / max_slice_size : 0);
-            slice_end = lambda_min + (slice + 1) * slice_width + (slice < num_slices - 1 ? overlap * slice_width / max_slice_size : 0);
-        }
-        
-        std::cout << "Processing slice " << slice + 1 << "/" << num_slices 
-                  << " range [" << slice_start << ", " << slice_end << "]" << std::endl;
-        
-        // Choose optimal method for this slice based on its position in spectrum
-        std::vector<double> slice_eigenvalues;
-        std::string slice_dir = temp_dir + "/slice_" + std::to_string(slice);
-        system(("mkdir -p " + slice_dir).c_str());
-        
-        // For the lowest part of the spectrum, use Krylov-Schur which works well for smallest eigenvalues
-        if (slice == 0) {
-            std::cout << "Using Krylov-Schur for lowest eigenvalues" << std::endl;
-            krylov_schur(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
-        }
-        // For the highest part of the spectrum, use IRL with spectral transformation
-        else if (slice == num_slices - 1) {
-            std::cout << "Using IRL for highest eigenvalues" << std::endl;
-            implicitly_restarted_lanczos(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+        // Simple round-robin assignment of slices to processes
+        if (slice % mpi_size == mpi_rank) {
+            double slice_start, slice_end;
             
-            // Reverse transformation if needed
-            // (IRL gives lowest eigenvalues by default, but we want highest for this slice)
-        }
-        // For middle slices, use shift-invert Lanczos with a shift in the middle of the slice
-        else {
-            double sigma = (slice_start + slice_end) / 2.0;
-            std::cout << "Using shift-invert Lanczos with shift σ = " << sigma << std::endl;
-            shift_invert_lanczos_robust(H, N, max_slice_size, max_slice_size, sigma, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
-        }
-        
-        // Filter eigenvalues to the current slice
-        std::vector<double> filtered_eigenvalues;
-        for (double eval : slice_eigenvalues) {
-            if (eval >= slice_start && eval <= slice_end) {
-                filtered_eigenvalues.push_back(eval);
-            }
-        }
-        
-        std::cout << "Found " << filtered_eigenvalues.size() << " eigenvalues in slice " << slice + 1 << std::endl;
-        
-        // Add to global eigenvalue list
-        eigenvalues.insert(eigenvalues.end(), filtered_eigenvalues.begin(), filtered_eigenvalues.end());
-        
-        // If computing eigenvectors, move them to the final directory
-        if (compute_eigenvectors) {
-            std::string src_dir = slice_dir;
-            if (slice == 0) {
-                src_dir += "/krylov_schur_eigenvectors";
-            } else if (slice == num_slices - 1) {
-                src_dir += "/irl_eigenvectors";
+            if (num_slices == 1) {
+                slice_start = lambda_min;
+                slice_end = lambda_max;
             } else {
-                src_dir += "/shift_invert_lanczos_results";
+                double slice_width = (lambda_max - lambda_min) / num_slices;
+                slice_start = lambda_min + slice * slice_width - (slice > 0 ? overlap * slice_width / max_slice_size : 0);
+                slice_end = lambda_min + (slice + 1) * slice_width + (slice < num_slices - 1 ? overlap * slice_width / max_slice_size : 0);
             }
             
-            // Copy eigenvectors to final directory
-            int offset = eigenvalues.size() - filtered_eigenvalues.size();
-            for (size_t i = 0; i < filtered_eigenvalues.size(); i++) {
-                std::string src_file = src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                std::string dst_file = evec_dir + "/eigenvector_" + std::to_string(offset + i) + ".bin";
+            std::cout << "Process " << mpi_rank << ": Processing slice " << slice + 1 << "/" << num_slices 
+                      << " range [" << slice_start << ", " << slice_end << "]" << std::endl;
+            
+            // Choose optimal method for this slice based on its position in spectrum
+            std::vector<double> slice_eigenvalues;
+            std::string slice_dir = temp_dir + "/slice_" + std::to_string(slice) + "_proc_" + std::to_string(mpi_rank);
+            system(("mkdir -p " + slice_dir).c_str());
+            
+            // For the lowest part of the spectrum, use Krylov-Schur which works well for smallest eigenvalues
+            if (slice == 0) {
+                std::cout << "Process " << mpi_rank << ": Using Krylov-Schur for lowest eigenvalues" << std::endl;
+                krylov_schur(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+            }
+            // For the highest part of the spectrum, use IRL with spectral transformation
+            else if (slice == num_slices - 1) {
+                std::cout << "Process " << mpi_rank << ": Using IRL for highest eigenvalues" << std::endl;
+                implicitly_restarted_lanczos(H, N, max_slice_size, max_slice_size, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+            }
+            // For middle slices, use shift-invert Lanczos with a shift in the middle of the slice
+            else {
+                double sigma = (slice_start + slice_end) / 2.0;
+                std::cout << "Process " << mpi_rank << ": Using shift-invert Lanczos with shift σ = " << sigma << std::endl;
+                shift_invert_lanczos_robust(H, N, max_slice_size, max_slice_size, sigma, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+            }
+            
+            // Filter eigenvalues to the current slice
+            std::vector<double> filtered_eigenvalues;
+            for (double eval : slice_eigenvalues) {
+                if (eval >= slice_start && eval <= slice_end) {
+                    filtered_eigenvalues.push_back(eval);
+                }
+            }
+            
+            std::cout << "Process " << mpi_rank << ": Found " << filtered_eigenvalues.size() << " eigenvalues in slice " << slice + 1 << std::endl;
+            
+            // Keep track of slice size
+            local_slice_sizes.push_back(filtered_eigenvalues.size());
+            
+            // Add to local eigenvalue list
+            local_eigenvalues.insert(local_eigenvalues.end(), filtered_eigenvalues.begin(), filtered_eigenvalues.end());
+            
+            // If computing eigenvectors, store the location for later gathering
+            if (compute_eigenvectors) {
+                std::string src_dir = slice_dir;
+                if (slice == 0) {
+                    src_dir += "/krylov_schur_eigenvectors";
+                } else if (slice == num_slices - 1) {
+                    src_dir += "/irl_eigenvectors";
+                } else {
+                    src_dir += "/shift_invert_lanczos_results";
+                }
                 
-                // Use system command to copy file
-                std::string copy_cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
-                system(copy_cmd.c_str());
+                // Create a metadata file to record the source directory and eigenvalue count
+                std::string meta_file = slice_dir + "/metadata.txt";
+                std::ofstream meta_out(meta_file);
+                if (meta_out) {
+                    meta_out << src_dir << "\n";
+                    meta_out << filtered_eigenvalues.size() << "\n";
+                    meta_out.close();
+                }
             }
         }
     }
     
-    // Sort all eigenvalues
-    std::sort(eigenvalues.begin(), eigenvalues.end());
+    // Synchronize all processes
+    #ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
     
-    // Remove duplicates from overlapping slices
-    if (num_slices > 1) {
-        auto new_end = std::unique(eigenvalues.begin(), eigenvalues.end(), 
-                                  [tol](double a, double b) { return std::abs(a - b) < tol; });
-        eigenvalues.erase(new_end, eigenvalues.end());
-    }
+    // Gather all eigenvalues to the root process
+    #ifdef USE_MPI
+    // First, gather the number of eigenvalues from each process
+    int local_count = local_eigenvalues.size();
+    std::vector<int> all_counts(mpi_size);
+    MPI_Gather(&local_count, 1, MPI_INT, all_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
     
-    std::cout << "Final eigenvalue count: " << eigenvalues.size() << std::endl;
-    
-    // Perform post-processing to identify and refine degenerate eigenvalues
-    std::cout << "Performing post-processing for degenerate eigenspaces..." << std::endl;
-    
-    std::vector<std::pair<double, int>> degeneracy_groups;
-    double current_eval = eigenvalues[0];
-    int current_count = 1;
-    
-    for (size_t i = 1; i < eigenvalues.size(); i++) {
-        if (std::abs(eigenvalues[i] - current_eval) < 10*tol) {
-            current_count++;
-        } else {
-            degeneracy_groups.push_back({current_eval, current_count});
-            current_eval = eigenvalues[i];
-            current_count = 1;
-        }
-    }
-    degeneracy_groups.push_back({current_eval, current_count});
-    
-    // Report degeneracy statistics
-    std::cout << "Degeneracy analysis:" << std::endl;
-    int max_degeneracy = 0;
-    double max_degen_eval = 0;
-    int num_degenerate_groups = 0;
-    
-    for (const auto& group : degeneracy_groups) {
-        if (group.second > 1) {
-            num_degenerate_groups++;
-            if (group.second > max_degeneracy) {
-                max_degeneracy = group.second;
-                max_degen_eval = group.first;
-            }
+    // Calculate displacements for gatherv
+    std::vector<int> displacements(mpi_size, 0);
+    if (mpi_rank == 0) {
+        for (int i = 1; i < mpi_size; i++) {
+            displacements[i] = displacements[i-1] + all_counts[i-1];
         }
     }
     
-    std::cout << "Found " << num_degenerate_groups << " degenerate eigenvalue groups" << std::endl;
-    std::cout << "Maximum degeneracy: " << max_degeneracy << " at eigenvalue " << max_degen_eval << std::endl;
+    // Resize the global eigenvalues vector on root
+    int total_count = 0;
+    if (mpi_rank == 0) {
+        for (int count : all_counts) {
+            total_count += count;
+        }
+        eigenvalues.resize(total_count);
+    }
     
-    // If eigenvectors are computed, fix degenerate subspaces for better numerical stability
-    if (compute_eigenvectors && num_degenerate_groups > 0) {
-        std::cout << "Refining eigenvectors for degenerate subspaces..." << std::endl;
+    // Gather all eigenvalues
+    MPI_Gatherv(local_eigenvalues.data(), local_count, MPI_DOUBLE,
+                eigenvalues.data(), all_counts.data(), displacements.data(), MPI_DOUBLE,
+                0, MPI_COMM_WORLD);
+    #else
+    // If not using MPI, just copy local to global
+    eigenvalues = local_eigenvalues;
+    #endif
+    
+    // The root process performs the final steps
+    if (mpi_rank == 0) {
+        // Sort all eigenvalues
+        std::sort(eigenvalues.begin(), eigenvalues.end());
         
-        int index_offset = 0;
+        // Remove duplicates from overlapping slices
+        if (num_slices > 1) {
+            auto new_end = std::unique(eigenvalues.begin(), eigenvalues.end(), 
+                                      [tol](double a, double b) { return std::abs(a - b) < tol; });
+            eigenvalues.erase(new_end, eigenvalues.end());
+        }
+        
+        std::cout << "Final eigenvalue count: " << eigenvalues.size() << std::endl;
+        
+        // If computing eigenvectors, gather them from all processes
+        if (compute_eigenvectors) {
+            std::cout << "Gathering eigenvectors from all processes..." << std::endl;
+            
+            // Create a mapping from eigenvalue to index in the final sorted array
+            std::map<double, int> eigenvalue_indices;
+            for (size_t i = 0; i < eigenvalues.size(); i++) {
+                eigenvalue_indices[eigenvalues[i]] = i;
+            }
+            
+            // Loop through slices to collect eigenvectors
+            for (int slice = 0; slice < num_slices; slice++) {
+                int slice_proc = slice % mpi_size;  // Process that handled this slice
+                
+                std::string slice_dir = temp_dir + "/slice_" + std::to_string(slice) + "_proc_" + std::to_string(slice_proc);
+                std::string meta_file = slice_dir + "/metadata.txt";
+                
+                std::ifstream meta_in(meta_file);
+                if (!meta_in) {
+                    continue;  // Skip if metadata not found
+                }
+                
+                std::string src_dir;
+                int evec_count;
+                meta_in >> src_dir >> evec_count;
+                meta_in.close();
+                
+                // Read the eigenvalues from this slice for mapping
+                std::string eval_file = src_dir + "/eigenvalues.bin";
+                std::ifstream eval_in(eval_file, std::ios::binary);
+                if (!eval_in) {
+                    continue;
+                }
+                
+                size_t n_evals;
+                eval_in.read(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+                std::vector<double> slice_evals(n_evals);
+                eval_in.read(reinterpret_cast<char*>(slice_evals.data()), n_evals * sizeof(double));
+                eval_in.close();
+                
+                // Copy eigenvectors to final directory
+                for (size_t i = 0; i < n_evals; i++) {
+                    // Find the closest eigenvalue in the global list
+                    double closest_match = eigenvalues[0];
+                    double min_diff = std::abs(slice_evals[i] - eigenvalues[0]);
+                    
+                    for (double eval : eigenvalues) {
+                        double diff = std::abs(slice_evals[i] - eval);
+                        if (diff < min_diff) {
+                            min_diff = diff;
+                            closest_match = eval;
+                        }
+                    }
+                    
+                    if (min_diff > 10*tol) {
+                        continue;  // Skip if no good match found
+                    }
+                    
+                    // Get target index
+                    int target_idx = eigenvalue_indices[closest_match];
+                    
+                    // Copy the eigenvector
+                    std::string src_file = src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                    std::string dst_file = evec_dir + "/eigenvector_" + std::to_string(target_idx) + ".bin";
+                    
+                    std::string copy_cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
+                    system(copy_cmd.c_str());
+                }
+            }
+        }
+        
+        // Perform post-processing to identify and refine degenerate eigenvalues
+        std::cout << "Performing post-processing for degenerate eigenspaces..." << std::endl;
+        
+        std::vector<std::pair<double, int>> degeneracy_groups;
+        double current_eval = eigenvalues[0];
+        int current_count = 1;
+        
+        for (size_t i = 1; i < eigenvalues.size(); i++) {
+            if (std::abs(eigenvalues[i] - current_eval) < 10*tol) {
+                current_count++;
+            } else {
+                degeneracy_groups.push_back({current_eval, current_count});
+                current_eval = eigenvalues[i];
+                current_count = 1;
+            }
+        }
+        degeneracy_groups.push_back({current_eval, current_count});
+        
+        // Report degeneracy statistics
+        std::cout << "Degeneracy analysis:" << std::endl;
+        int max_degeneracy = 0;
+        double max_degen_eval = 0;
+        int num_degenerate_groups = 0;
+        
         for (const auto& group : degeneracy_groups) {
             if (group.second > 1) {
-                // Load group of degenerate eigenvectors
-                std::vector<ComplexVector> degenerate_vectors;
-                for (int i = 0; i < group.second; i++) {
-                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
-                    std::ifstream infile(evec_file, std::ios::binary);
-                    if (!infile) {
-                        std::cerr << "Error: Cannot open file " << evec_file << " for reading" << std::endl;
-                        continue;
-                    }
-                    
-                    ComplexVector vec(N);
-                    infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-                    infile.close();
-                    
-                    degenerate_vectors.push_back(vec);
-                }
-                
-                // Refine degenerate subspace
-                refine_degenerate_eigenvectors(H, degenerate_vectors, group.first, N, tol);
-                
-                // Save refined vectors
-                for (int i = 0; i < group.second; i++) {
-                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
-                    std::ofstream outfile(evec_file, std::ios::binary);
-                    if (!outfile) {
-                        std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                        continue;
-                    }
-                    
-                    outfile.write(reinterpret_cast<char*>(degenerate_vectors[i].data()), N * sizeof(Complex));
-                    outfile.close();
+                num_degenerate_groups++;
+                if (group.second > max_degeneracy) {
+                    max_degeneracy = group.second;
+                    max_degen_eval = group.first;
                 }
             }
-            
-            index_offset += group.second;
         }
+        
+        std::cout << "Found " << num_degenerate_groups << " degenerate eigenvalue groups" << std::endl;
+        std::cout << "Maximum degeneracy: " << max_degeneracy << " at eigenvalue " << max_degen_eval << std::endl;
+        
+        // If eigenvectors are computed, fix degenerate subspaces for better numerical stability
+        if (compute_eigenvectors && num_degenerate_groups > 0) {
+            std::cout << "Refining eigenvectors for degenerate subspaces..." << std::endl;
+            
+            int index_offset = 0;
+            for (const auto& group : degeneracy_groups) {
+                if (group.second > 1) {
+                    // Load group of degenerate eigenvectors
+                    std::vector<ComplexVector> degenerate_vectors;
+                    for (int i = 0; i < group.second; i++) {
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                        std::ifstream infile(evec_file, std::ios::binary);
+                        if (!infile) {
+                            std::cerr << "Error: Cannot open file " << evec_file << " for reading" << std::endl;
+                            continue;
+                        }
+                        
+                        ComplexVector vec(N);
+                        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+                        infile.close();
+                        
+                        degenerate_vectors.push_back(vec);
+                    }
+                    
+                    // Refine degenerate subspace
+                    refine_degenerate_eigenvectors(H, degenerate_vectors, group.first, N, tol);
+                    
+                    // Save refined vectors
+                    for (int i = 0; i < group.second; i++) {
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                        std::ofstream outfile(evec_file, std::ios::binary);
+                        if (!outfile) {
+                            std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                            continue;
+                        }
+                        
+                        outfile.write(reinterpret_cast<char*>(degenerate_vectors[i].data()), N * sizeof(Complex));
+                        outfile.close();
+                    }
+                }
+                
+                index_offset += group.second;
+            }
+        }
+        
+        // Save eigenvalues to a file
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (eval_outfile) {
+            // Write the number of eigenvalues first
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            // Write all eigenvalues
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << n_evals << " eigenvalues to " << eigenvalue_file << std::endl;
+        }
+        
+        // Cleanup temporary files
+        if (!dir.empty()) {
+            system(("rm -rf " + temp_dir).c_str());
+        }
+        
+        std::cout << "Optimal spectrum solver completed successfully" << std::endl;
     }
     
-    // Save eigenvalues to a file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (eval_outfile) {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_evals << " eigenvalues to " << eigenvalue_file << std::endl;
-    }
-    
-    // Cleanup temporary files
-    if (!dir.empty()) {
-        system(("rm -rf " + temp_dir).c_str());
-    }
-    
-    std::cout << "Optimal spectrum solver completed successfully" << std::endl;
+    // Synchronize all processes before returning
+    #ifdef USE_MPI
+    MPI_Barrier(MPI_COMM_WORLD);
+    #endif
 }
 
 
@@ -5047,6 +5231,150 @@ ThermodynamicData finite_temperature_lanczos_method(
     return results;
 }
 
+// Compute thermal expectation values of S^+, S^-, S^z operators at each site
+void compute_spin_expectations(
+    const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
+    const std::string output_dir, // Directory for output files
+    int num_sites,              // Number of sites
+    double temperature,         // Temperature T (in energy units)
+    bool print_output = true    // Whether to print the results to console
+) {
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+    
+    // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
+    std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
+    
+    // Load eigenvalues
+    std::vector<double> eigenvalues;
+    std::ifstream eigenvalue_file(eigdir + "/eigenvalues.bin", std::ios::binary);
+    if (!eigenvalue_file) {
+        std::cerr << "Error: Cannot open eigenvalue file " << eigdir + "/eigenvalues.bin" << std::endl;
+        return;
+    }
+    
+    size_t num_eigenvalues;
+    eigenvalue_file.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
+    eigenvalues.resize(num_eigenvalues);
+    eigenvalue_file.read(reinterpret_cast<char*>(eigenvalues.data()), num_eigenvalues * sizeof(double));
+    eigenvalue_file.close();
+    
+    std::cout << "Loaded " << num_eigenvalues << " eigenvalues from " << eigdir + "/eigenvalues.bin" << std::endl;
+    
+    // Calculate beta = 1/kT
+    double beta = 1.0 / temperature;
+    
+    // Using the log-sum-exp trick for numerical stability
+    double max_exp = -beta * eigenvalues[0];
+    for (size_t i = 1; i < eigenvalues.size(); i++) {
+        max_exp = std::max(max_exp, -beta * eigenvalues[i]);
+    }
+    
+    // Calculate partition function Z
+    double Z = 0.0;
+    for (size_t i = 0; i < eigenvalues.size(); i++) {
+        Z += std::exp(-beta * eigenvalues[i] - max_exp);
+    }
+    
+    // Create S operators for each site
+    std::vector<SingleSiteOperator> Sp_ops;
+    std::vector<SingleSiteOperator> Sm_ops;
+    std::vector<SingleSiteOperator> Sz_ops;
+    
+    for (int site = 0; site < num_sites; site++) {
+        Sp_ops.emplace_back(num_sites, 0, site);
+        Sm_ops.emplace_back(num_sites, 1, site);
+        Sz_ops.emplace_back(num_sites, 2, site);
+    }
+    
+    // Process each eigenvector
+    for (size_t idx = 0; idx < num_eigenvalues; idx++) {
+        // Load eigenvector
+        std::string evec_file = eigdir + "/eigenvector_" + std::to_string(idx) + ".bin";
+        std::ifstream evec_stream(evec_file, std::ios::binary);
+        if (!evec_stream) {
+            std::cerr << "Error: Cannot open eigenvector file " << evec_file << std::endl;
+            continue;
+        }
+        
+        ComplexVector psi(N);
+        evec_stream.read(reinterpret_cast<char*>(psi.data()), N * sizeof(Complex));
+        evec_stream.close();
+        
+        // Calculate Boltzmann factor
+        double boltzmann = std::exp(-beta * eigenvalues[idx] - max_exp) / Z;
+        
+        // For each site, compute the expectation values
+        for (int site = 0; site < num_sites; site++) {
+            // Apply operators
+            std::vector<Complex> Sp_psi = Sp_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
+            std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
+            std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(psi.begin(), psi.end()));
+            
+            // Calculate expectation values
+            Complex Sp_exp = Complex(0.0, 0.0);
+            Complex Sm_exp = Complex(0.0, 0.0);
+            Complex Sz_exp = Complex(0.0, 0.0);
+            
+            for (int i = 0; i < N; i++) {
+                Sp_exp += std::conj(psi[i]) * Sp_psi[i];
+                Sm_exp += std::conj(psi[i]) * Sm_psi[i];
+                Sz_exp += std::conj(psi[i]) * Sz_psi[i];
+            }
+            
+            // Add weighted contribution to thermal average
+            expectations[0][site] += boltzmann * Sp_exp;
+            expectations[1][site] += boltzmann * Sm_exp;
+            expectations[2][site] += boltzmann * Sz_exp;
+        }
+        
+        // Progress reporting
+        if ((idx + 1) % 10 == 0 || idx == num_eigenvalues - 1) {
+            std::cout << "Processed " << idx + 1 << "/" << num_eigenvalues << " eigenvectors" << std::endl;
+        }
+    }
+    
+    // Print results if requested
+    if (print_output) {
+        std::cout << "\nSpin Expectation Values at T = " << temperature << ":" << std::endl;
+        std::cout << std::setw(5) << "Site" 
+                << std::setw(20) << "S^+ (real)" 
+                << std::setw(20) << "S^+ (imag)" 
+                << std::setw(20) << "S^- (real)"
+                << std::setw(20) << "S^- (imag)"
+                << std::setw(20) << "S^z (real)"
+                << std::setw(20) << "S^z (imag)" << std::endl;
+        
+        for (int site = 0; site < num_sites; site++) {
+            std::cout << std::setw(5) << site 
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+        }
+    }
+    
+    // Save to file
+    std::string outfile = output_dir + "/spin_expectations_T" + std::to_string(temperature) + ".dat";
+    std::ofstream out(outfile);
+    if (out.is_open()) {
+        out << "# Site S+_real S+_imag S-_real S-_imag Sz_real Sz_imag" << std::endl;
+        for (int site = 0; site < num_sites; site++) {
+            out << site << " "
+                << std::setprecision(10) << expectations[0][site].real() << " "
+                << std::setprecision(10) << expectations[0][site].imag() << " "
+                << std::setprecision(10) << expectations[1][site].real() << " "
+                << std::setprecision(10) << expectations[1][site].imag() << " "
+                << std::setprecision(10) << expectations[2][site].real() << " "
+                << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+        }
+        out.close();
+        std::cout << "Spin expectations saved to " << outfile << std::endl;
+    }
+}
+
 
 #include <chrono>
 int main(int argc, char* argv[]) {
@@ -5096,96 +5424,51 @@ int main(int argc, char* argv[]) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    // arpack_diagonalization(H, N, 2e4, true, eigenvalues);
-    // full_diagonalization(H, N, eigenvalues);
-    // lanczos(H, N, N, N, 1e-10, eigenvalues, dir, eigenvector);
-    // Compare different diagonalization methods
-    std::cout << "Comparing different diagonalization methods..." << std::endl;
-    
-    std::vector<double> lanczos_eigenvalues;
-    std::vector<double> ks_eigenvalues;
-    std::vector<double> lobpcg_eigenvalues;
-    std::vector<double> irl_eigenvalues;
-    std::vector<double> full_eigenvalues;
-    
-    int num_eigs = N; // Compare just a few eigenvalues for larger systems
-    
-    // Record execution times
-    auto start_time = std::chrono::high_resolution_clock::now();
-    auto end_time = std::chrono::high_resolution_clock::now();
-    
-    // Lanczos method
-    start_time = std::chrono::high_resolution_clock::now();
-    lanczos(H, N, N, num_eigs, 1e-10, lanczos_eigenvalues, dir, false);
-    end_time = std::chrono::high_resolution_clock::now();
-    std::cout << "Lanczos completed in " 
-              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
-              << " ms" << std::endl;
-    
-    // Krylov-Schur method
-    start_time = std::chrono::high_resolution_clock::now();
-    krylov_schur(H, N, N, num_eigs, 1e-10, ks_eigenvalues, dir, false);
-    end_time = std::chrono::high_resolution_clock::now();
-    std::cout << "Krylov-Schur completed in " 
-              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
-              << " ms" << std::endl;
-    
-    // LOBPCG method (works best for a few eigenvalues)
-    start_time = std::chrono::high_resolution_clock::now();
-    cg_diagonalization(H, N, N, num_eigs, 1e-10, lobpcg_eigenvalues, dir, false);
-    end_time = std::chrono::high_resolution_clock::now();
-    std::cout << "LOBPCG completed in " 
-              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
-              << " ms" << std::endl;
-    
-    // Implicitly Restarted Lanczos
-    start_time = std::chrono::high_resolution_clock::now();
-    implicitly_restarted_lanczos(H, N, N, num_eigs, 1e-10, irl_eigenvalues, dir, false);
-    end_time = std::chrono::high_resolution_clock::now();
-    std::cout << "Implicitly Restarted Lanczos completed in " 
-              << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
-              << " ms" << std::endl;
-    
-    // Full diagonalization (only for small matrices)
-    if (N <= 10000) {
-        start_time = std::chrono::high_resolution_clock::now();
-        // full_diagonalization(H, N, full_eigenvalues);
-        optimal_spectrum_solver(H, N, full_eigenvalues, dir, false);
-        end_time = std::chrono::high_resolution_clock::now();
-        std::cout << "Full diagonalization completed in " 
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() 
-                  << " ms" << std::endl;
-    } else {
-        std::cout << "Full diagonalization skipped (matrix too large)" << std::endl;
+    optimal_spectrum_solver(H, N, eigenvalues, dir, true);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> elapsed = end - start;
+    std::cout << "Full diagonalization completed in " << elapsed.count() << " seconds" << std::endl;
+
+    // Calculate thermodynamic quantities from the eigenvalues
+    std::cout << "Calculating thermodynamic quantities..." << std::endl;
+    ThermodynamicData thermo = calculate_thermodynamics_from_spectrum(
+        eigenvalues,
+        0.01,    // T_min
+        10.0,    // T_max
+        100      // num_points
+    );
+
+    // Create output directory
+    std::string output_dir = dir + "/output";
+    std::string mkdir_cmd = "mkdir -p " + output_dir;
+    system(mkdir_cmd.c_str());
+    std::cout << "Created output directory: " << output_dir << std::endl;
+
+    // Save thermodynamic data to file
+    std::string thermo_file = dir + "output/thermodynamics.dat";
+    std::ofstream thermo_out(thermo_file);
+    if (thermo_out.is_open()) {
+        thermo_out << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+        for (size_t i = 0; i < thermo.temperatures.size(); i++) {
+            thermo_out << thermo.temperatures[i] << " "
+                      << thermo.energy[i] << " "
+                      << thermo.specific_heat[i] << " "
+                      << thermo.entropy[i] << " "
+                      << thermo.free_energy[i] << std::endl;
+        }
+        thermo_out.close();
+        std::cout << "Thermodynamic data saved to " << thermo_file << std::endl;
     }
-    
-    // Print comparison of first few eigenvalues from each method
-    std::cout << "\nComparison of computed eigenvalues:" << std::endl;
-    std::cout << std::setw(10) << "Index" 
-              << std::setw(20) << "Lanczos" 
-              << std::setw(20) << "Krylov-Schur"
-              << std::setw(20) << "LOBPCG"
-              << std::setw(20) << "IRL";
-    if (N <= 10000) std::cout << std::setw(20) << "Full";
-    std::cout << std::endl;
-    
-    int eigs_to_show = std::min(10, num_eigs);
-    for (int i = 0; i < eigs_to_show; i++) {
-        std::cout << std::setw(10) << i 
-                  << std::setw(20) << std::setprecision(10) << lanczos_eigenvalues[i] 
-                  << std::setw(20) << std::setprecision(10) << ks_eigenvalues[i];
-        
-        if (i < lobpcg_eigenvalues.size())
-            std::cout << std::setw(20) << std::setprecision(10) << lobpcg_eigenvalues[i];
-        else
-            std::cout << std::setw(20) << "N/A";
-            
-        std::cout << std::setw(20) << std::setprecision(10) << irl_eigenvalues[i];
-        
-        if (N <= 10000)
-            std::cout << std::setw(20) << std::setprecision(10) << full_eigenvalues[i];
-        
-        std::cout << std::endl;
+
+    // Compute spin expectation values at different temperatures
+    std::vector<double> temperatures = {0.1, 0.5, 1.0, 2.0, 5.0};
+    for (double T : temperatures) {
+        std::cout << "\nComputing spin expectations at T = " << T << std::endl;
+        compute_spin_expectations(dir + "/optimal_solver/eigenvectors", dir + "/output", num_site, T);
     }
+
+    std::cout << "All computations completed successfully" << std::endl;
+
     return 0;
 }
