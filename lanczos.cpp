@@ -2261,16 +2261,16 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
         // Full reorthogonalization
-        for (int k = 0; k <= j; k++) {
-            // Read basis vector k from file
-            ComplexVector basis_k = read_basis_vector(k, N);
+        // for (int k = 0; k <= j; k++) {
+        //     // Read basis vector k from file
+        //     ComplexVector basis_k = read_basis_vector(k, N);
             
-            Complex overlap;
-            cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+        //     Complex overlap;
+        //     cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
             
-            Complex neg_overlap = -overlap;
-            cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-        }
+        //     Complex neg_overlap = -overlap;
+        //     cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+        // }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
@@ -4443,7 +4443,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
         if (slice_idx == 0) {
             // First slice - use standard Lanczos for smallest eigenvalues
             int max_evals_in_slice = static_cast<int>(N / num_slices * 1.5); // Add 50% buffer
-            lanczos(H, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
+            lanczos_no_ortho(H, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
                    current_slice_dir, compute_eigenvectors);
             
             // Filter eigenvalues to this slice
@@ -4471,7 +4471,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
                 }
             };
             
-            lanczos(H_transformed, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
+            lanczos_no_ortho(H_transformed, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
                    current_slice_dir, compute_eigenvectors);
             
             // Convert eigenvalues back to original spectrum
