@@ -18,6 +18,7 @@
 #include <fstream>
 #include <set>
 #include "CG.h"
+#include <thread>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -3273,6 +3274,32 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     int m = std::min(2*num_eigs + 20, max_iter);  // Maximum size of Krylov subspace
     int k = num_eigs;                            // Number of wanted eigenvalues
     
+    // Helper functions to read/write vectors from/to disk
+    auto write_vector = [&temp_dir, N](int index, const ComplexVector& vec) {
+        std::string filename = temp_dir + "/krylov_vector_" + std::to_string(index) + ".bin";
+        std::ofstream outfile(filename, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            return false;
+        }
+        outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
+        outfile.close();
+        return true;
+    };
+    
+    auto read_vector = [&temp_dir, N](int index) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/krylov_vector_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        infile.close();
+        return vec;
+    };
+    
     // Initialize random starting vector
     ComplexVector v(N);
     std::mt19937 gen(std::random_device{}());
@@ -3287,9 +3314,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     Complex scale(1.0/norm, 0.0);
     cblas_zscal(N, &scale, v.data(), 1);
     
-    // Allocate storage for Krylov basis
-    std::vector<ComplexVector> V(m+1, ComplexVector(N));
-    V[0] = v;
+    // Write initial vector to disk
+    write_vector(0, v);
     
     // Storage for tridiagonal matrix
     std::vector<double> alpha(m, 0.0);  // Diagonal
@@ -3307,32 +3333,37 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         int j_start = (iter == 0) ? 0 : k;
         
         for (int j = j_start; j < m; j++) {
-            // w = H * V[j]
+            // Read vector from disk
+            ComplexVector v_j = read_vector(j);
+            
+            // w = H * v_j
             ComplexVector w(N);
-            H(V[j].data(), w.data(), N);
+            H(v_j.data(), w.data(), N);
             
             // Orthogonalize against previous vectors (for Lanczos/Hermitian case)
             if (j > 0) {
+                ComplexVector v_j_minus_1 = read_vector(j-1);
                 Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, V[j-1].data(), 1, w.data(), 1);
+                cblas_zaxpy(N, &neg_beta, v_j_minus_1.data(), 1, w.data(), 1);
             }
             
-            // alpha_j = <V[j], w>
+            // alpha_j = <v_j, w>
             Complex dot;
-            cblas_zdotc_sub(N, V[j].data(), 1, w.data(), 1, &dot);
+            cblas_zdotc_sub(N, v_j.data(), 1, w.data(), 1, &dot);
             alpha[j] = std::real(dot);  // For Hermitian case, alpha is real
             
-            // w = w - alpha_j * V[j]
+            // w = w - alpha_j * v_j
             Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, V[j].data(), 1, w.data(), 1);
+            cblas_zaxpy(N, &neg_alpha, v_j.data(), 1, w.data(), 1);
             
             // Full reorthogonalization for numerical stability
-            // for (int i = 0; i <= j; i++) {
-            //     Complex ip;
-            //     cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &ip);
-            //     Complex neg_ip = -ip;
-            //     cblas_zaxpy(N, &neg_ip, V[i].data(), 1, w.data(), 1);
-            // }
+            for (int i = 0; i <= j; i++) {
+                ComplexVector v_i = read_vector(i);
+                Complex ip;
+                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &ip);
+                Complex neg_ip = -ip;
+                cblas_zaxpy(N, &neg_ip, v_i.data(), 1, w.data(), 1);
+            }
             
             // beta_{j+1} = ||w||
             beta[j+1] = cblas_dznrm2(N, w.data(), 1);
@@ -3344,11 +3375,11 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                 break;
             }
             
-            // V[j+1] = w / beta_{j+1}
+            // v_{j+1} = w / beta_{j+1}
             if (j < m-1) {
                 scale = Complex(1.0/beta[j+1], 0.0);
-                V[j+1] = w;
-                cblas_zscal(N, &scale, V[j+1].data(), 1);
+                cblas_zscal(N, &scale, w.data(), 1);
+                write_vector(j+1, w);
             }
         }
         
@@ -3424,8 +3455,9 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     // Compute Ritz vector: u = V * z_i
                     ComplexVector ritz_vector(N, Complex(0.0, 0.0));
                     for (int j = 0; j < m; j++) {
+                        ComplexVector v_j = read_vector(j);
                         Complex coef(sorted_evecs[i*m + j], 0.0);
-                        cblas_zaxpy(N, &coef, V[j].data(), 1, ritz_vector.data(), 1);
+                        cblas_zaxpy(N, &coef, v_j.data(), 1, ritz_vector.data(), 1);
                     }
                     
                     // Normalize eigenvector
@@ -3461,13 +3493,23 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         // Krylov-Schur restart
         
-        // Step 1: Compute new basis V_new = V * Z_k (first k sorted eigenvectors)
-        std::vector<ComplexVector> V_new(k+1, ComplexVector(N));
+        // Step 1: Compute new basis vectors and write to temporary files
+        std::string new_temp_dir = temp_dir + "_new";
+        system(("mkdir -p " + new_temp_dir).c_str());
+        
         for (int i = 0; i < k; i++) {
-            V_new[i].assign(N, Complex(0.0, 0.0));
+            ComplexVector v_new(N, Complex(0.0, 0.0));
             for (int j = 0; j < m; j++) {
+                ComplexVector v_j = read_vector(j);
                 Complex coef(sorted_evecs[i*m + j], 0.0);
-                cblas_zaxpy(N, &coef, V[j].data(), 1, V_new[i].data(), 1);
+                cblas_zaxpy(N, &coef, v_j.data(), 1, v_new.data(), 1);
+            }
+            // Write to temporary location
+            std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(i) + ".bin";
+            std::ofstream outfile(filename, std::ios::binary);
+            if (outfile) {
+                outfile.write(reinterpret_cast<const char*>(v_new.data()), N * sizeof(Complex));
+                outfile.close();
             }
         }
         
@@ -3478,28 +3520,43 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         }
         
         // Step 3: Compute the k+1 vector - initialize with a random vector orthogonal to basis
-        V_new[k].assign(N, Complex(0.0, 0.0));
+        ComplexVector v_k_plus_1(N);
         for (int i = 0; i < N; i++) {
-            V_new[k][i] = Complex(dist(gen), dist(gen));
+            v_k_plus_1[i] = Complex(dist(gen), dist(gen));
         }
         
-        // Orthogonalize against the current basis
+        // Orthogonalize against the new basis
         for (int j = 0; j < k; j++) {
-            Complex ip;
-            cblas_zdotc_sub(N, V_new[j].data(), 1, V_new[k].data(), 1, &ip);
-            Complex neg_ip = -ip;
-            cblas_zaxpy(N, &neg_ip, V_new[j].data(), 1, V_new[k].data(), 1);
+            std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(j) + ".bin";
+            std::ifstream infile(filename, std::ios::binary);
+            if (infile) {
+                ComplexVector v_j(N);
+                infile.read(reinterpret_cast<char*>(v_j.data()), N * sizeof(Complex));
+                infile.close();
+                
+                Complex ip;
+                cblas_zdotc_sub(N, v_j.data(), 1, v_k_plus_1.data(), 1, &ip);
+                Complex neg_ip = -ip;
+                cblas_zaxpy(N, &neg_ip, v_j.data(), 1, v_k_plus_1.data(), 1);
+            }
         }
         
         // Normalize
-        norm = cblas_dznrm2(N, V_new[k].data(), 1);
+        norm = cblas_dznrm2(N, v_k_plus_1.data(), 1);
         scale = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale, V_new[k].data(), 1);
+        cblas_zscal(N, &scale, v_k_plus_1.data(), 1);
         
-        // Copy new basis to V
-        for (int i = 0; i <= k; i++) {
-            V[i] = V_new[i];
+        // Write the k+1 vector to temporary location
+        std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(k) + ".bin";
+        std::ofstream outfile(filename, std::ios::binary);
+        if (outfile) {
+            outfile.write(reinterpret_cast<const char*>(v_k_plus_1.data()), N * sizeof(Complex));
+            outfile.close();
         }
+        
+        // Replace old vectors with new ones
+        system(("rm -rf " + temp_dir).c_str());
+        system(("mv " + new_temp_dir + " " + temp_dir).c_str());
         
         iter++;
     }
@@ -3532,23 +3589,48 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     }
     system(("mkdir -p " + temp_dir).c_str());
     
+    // Helper functions to read/write vectors from/to disk
+    auto write_vector = [&temp_dir, N](int index, const ComplexVector& vec) {
+        std::string filename = temp_dir + "/lanczos_vector_" + std::to_string(index) + ".bin";
+        std::ofstream outfile(filename, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            return false;
+        }
+        outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
+        outfile.close();
+        return true;
+    };
+    
+    auto read_vector = [&temp_dir, N](int index) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/lanczos_vector_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        infile.close();
+        return vec;
+    };
+    
     // Initialize random starting vector
-    ComplexVector v(N);
+    ComplexVector v_current(N);
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
     for (int i = 0; i < N; i++) {
-        v[i] = Complex(dist(gen), dist(gen));
+        v_current[i] = Complex(dist(gen), dist(gen));
     }
     
     // Normalize
-    double norm = cblas_dznrm2(N, v.data(), 1);
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
     Complex scale(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v.data(), 1);
+    cblas_zscal(N, &scale, v_current.data(), 1);
     
-    // Allocate storage for Lanczos vectors
-    std::vector<ComplexVector> V(m+1, ComplexVector(N));
-    V[0] = v;
+    // Write initial vector to disk
+    write_vector(0, v_current);
     
     // Storage for tridiagonal matrix
     std::vector<double> alpha(m, 0.0);  // Diagonal
@@ -3565,32 +3647,46 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Build or extend Lanczos factorization
         int j_start = (iter == 0) ? 0 : p;
         
+        ComplexVector v_prev, v_curr, v_next;
+        if (j_start > 0) {
+            v_curr = read_vector(j_start - 1);
+            if (j_start > 1) {
+                v_prev = read_vector(j_start - 2);
+            } else {
+                v_prev.resize(N, Complex(0.0, 0.0));
+            }
+        } else {
+            v_curr = read_vector(0);
+            v_prev.resize(N, Complex(0.0, 0.0));
+        }
+        
         for (int j = j_start; j < m; j++) {
             // Apply H to current Lanczos vector
             ComplexVector w(N);
-            H(V[j].data(), w.data(), N);
+            H(v_curr.data(), w.data(), N);
             
             // Orthogonalize against previous vectors
             if (j > 0) {
                 Complex neg_beta(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, V[j-1].data(), 1, w.data(), 1);
+                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
             }
             
             // alpha_j = <V[j], w>
             Complex dot;
-            cblas_zdotc_sub(N, V[j].data(), 1, w.data(), 1, &dot);
+            cblas_zdotc_sub(N, v_curr.data(), 1, w.data(), 1, &dot);
             alpha[j] = std::real(dot);  // For Hermitian case, alpha is real
             
             // w = w - alpha_j * V[j]
             Complex neg_alpha(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, V[j].data(), 1, w.data(), 1);
+            cblas_zaxpy(N, &neg_alpha, v_curr.data(), 1, w.data(), 1);
             
             // Full reorthogonalization for numerical stability
             for (int i = 0; i <= j; i++) {
+                ComplexVector v_i = read_vector(i);
                 Complex ip;
-                cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &ip);
+                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &ip);
                 Complex neg_ip = -ip;
-                cblas_zaxpy(N, &neg_ip, V[i].data(), 1, w.data(), 1);
+                cblas_zaxpy(N, &neg_ip, v_i.data(), 1, w.data(), 1);
             }
             
             // beta_{j+1} = ||w||
@@ -3617,9 +3713,14 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             // V[j+1] = w / beta_{j+1}
             if (j < m-1) {
                 scale = Complex(1.0/beta[j+1], 0.0);
-                V[j+1] = w;
-                cblas_zscal(N, &scale, V[j+1].data(), 1);
+                v_next = w;
+                cblas_zscal(N, &scale, v_next.data(), 1);
+                write_vector(j+1, v_next);
             }
+            
+            // Update for next iteration
+            v_prev = v_curr;
+            v_curr = v_next;
         }
         
         // Compute eigendecomposition of the tridiagonal matrix
@@ -3687,8 +3788,9 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                     // Compute Ritz vector: x = V * z_i
                     ComplexVector ritz_vector(N, Complex(0.0, 0.0));
                     for (int j = 0; j < m; j++) {
+                        ComplexVector v_j = read_vector(j);
                         Complex coef(z[idx*m + j], 0.0);
-                        cblas_zaxpy(N, &coef, V[j].data(), 1, ritz_vector.data(), 1);
+                        cblas_zaxpy(N, &coef, v_j.data(), 1, ritz_vector.data(), 1);
                     }
                     
                     // Normalize
@@ -3784,11 +3886,19 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         }
         
         // Update Lanczos vectors using the accumulated Givens rotations
-        std::vector<ComplexVector> V_new(p+1, ComplexVector(N));
+        // We'll create new vectors in a temp directory, then rename them back
+        std::string new_temp_dir = temp_dir + "_new";
+        system(("mkdir -p " + new_temp_dir).c_str());
         
-        // Apply rotations to get first p Lanczos vectors of updated factorization
+        // Initialize the first p+1 vectors in the new basis
+        std::vector<ComplexVector> v_new(p+1);
+        for (int i = 0; i < p+1; i++) {
+            v_new[i].resize(N, Complex(0.0, 0.0));
+        }
+        
+        // Copy initial vectors (will be updated by rotations)
         for (int i = 0; i < p; i++) {
-            V_new[i] = V[i];
+            v_new[i] = read_vector(i);
         }
         
         // Apply each Givens rotation
@@ -3800,43 +3910,50 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 double c = cs[i];
                 double s = sn[i];
                 
+                ComplexVector v_i_plus_1;
+                if (i+1 < p) {
+                    v_i_plus_1 = v_new[i+1];
+                } else {
+                    v_i_plus_1 = read_vector(i+1);
+                }
+                
                 // Apply rotation to vectors
+                ComplexVector v_i_new(N), v_ip1_new(N);
                 for (int j = 0; j < N; j++) {
-                    Complex vi = V_new[i][j];
-                    Complex vip1 = (i+1 < p+1) ? V_new[i+1][j] : V[i+1][j];
-                    
-                    if (i < p) {
-                        V_new[i][j] = c*vi + s*vip1;
-                    }
-                    if (i+1 < p) {
-                        V_new[i+1][j] = -s*vi + c*vip1;
-                    }
+                    v_i_new[j] = c * v_new[i][j] + s * v_i_plus_1[j];
+                    v_ip1_new[j] = -s * v_new[i][j] + c * v_i_plus_1[j];
+                }
+                
+                v_new[i] = v_i_new;
+                if (i+1 < p) {
+                    v_new[i+1] = v_ip1_new;
                 }
             }
         }
         
-        // Move new vectors to V
+        // Write the updated vectors to disk
         for (int i = 0; i < p; i++) {
-            V[i] = V_new[i];
+            write_vector(i, v_new[i]);
         }
         
-        // Compute the p+1 vector by orthogonalizing against V[0:p]
+        // Compute the p+1 vector by orthogonalizing against v_new[0:p]
         ComplexVector w(N);
-        H(V[p-1].data(), w.data(), N);
+        H(v_new[p-1].data(), w.data(), N);
         
         for (int i = 0; i < p; i++) {
             Complex ip;
-            cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &ip);
+            cblas_zdotc_sub(N, v_new[i].data(), 1, w.data(), 1, &ip);
             Complex neg_ip = -ip;
-            cblas_zaxpy(N, &neg_ip, V[i].data(), 1, w.data(), 1);
+            cblas_zaxpy(N, &neg_ip, v_new[i].data(), 1, w.data(), 1);
         }
         
-        // Set beta[p] and V[p]
+        // Set beta[p] and v_new[p]
         beta[p] = cblas_dznrm2(N, w.data(), 1);
         if (beta[p] > tol) {
             scale = Complex(1.0/beta[p], 0.0);
-            V[p] = w;
-            cblas_zscal(N, &scale, V[p].data(), 1);
+            v_new[p] = w;
+            cblas_zscal(N, &scale, v_new[p].data(), 1);
+            write_vector(p, v_new[p]);
         } else {
             // Invariant subspace found
             std::cout << "Invariant subspace found during restart" << std::endl;
@@ -4243,7 +4360,270 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     #endif
 }
 
-
+// Full spectrum solver that divides the spectrum for faster computation
+void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> H, int N, 
+                            std::vector<double>& eigenvalues, std::string dir = "",
+                            bool compute_eigenvectors = false, double tol = 1e-10) {
+    std::cout << "Starting spectrum slicing solver for matrix of dimension " << N << std::endl;
+    
+    // Create output directories
+    std::string solver_dir = dir + "/spectrum_slicing";
+    std::string slice_dir = solver_dir + "/slices";
+    std::string result_dir = solver_dir + "/results";
+    
+    system(("mkdir -p " + slice_dir).c_str());
+    system(("mkdir -p " + result_dir).c_str());
+    
+    // For very small matrices, just use full diagonalization
+    if (N <= 1000) {
+        std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
+        full_diagonalization(H, N, eigenvalues, result_dir, compute_eigenvectors);
+        return;
+    }
+    
+    // Step 1: Estimate spectral bounds using standard Lanczos
+    std::cout << "Estimating spectral bounds..." << std::endl;
+    std::vector<double> boundary_evals;
+    lanczos(H, N, 100, 100, tol, boundary_evals, dir, false);
+    
+    double lambda_min = boundary_evals[0];
+    double lambda_max = boundary_evals[boundary_evals.size()-1];
+    
+    // Add safety margin to ensure we cover the full spectrum
+    double margin = 0.05 * (lambda_max - lambda_min);
+    lambda_min -= margin;
+    lambda_max += margin;
+    
+    std::cout << "Estimated spectral range: [" << lambda_min << ", " << lambda_max << "]" << std::endl;
+    
+    // Step 2: Determine slice configuration
+    // Choose number of slices based on matrix size
+    int num_slices;
+    if (N < 5000) num_slices = 4;
+    else if (N < 10000) num_slices = 8;
+    else if (N < 20000) num_slices = 16;
+    else num_slices = 32;
+    
+    // Adjust based on available hardware threads
+    int hardware_threads = std::thread::hardware_concurrency();
+    num_slices = std::min(num_slices, hardware_threads * 2);
+    
+    std::cout << "Dividing spectrum into " << num_slices << " slices" << std::endl;
+    
+    // Create slices with slight overlap to catch eigenvalues at boundaries
+    double slice_width = (lambda_max - lambda_min) / num_slices;
+    double overlap = 0.05 * slice_width; // 5% overlap between slices
+    
+    std::vector<std::pair<double, double>> slices;
+    for (int i = 0; i < num_slices; i++) {
+        double slice_start = lambda_min + i * slice_width - (i > 0 ? overlap : 0);
+        double slice_end = lambda_min + (i+1) * slice_width + (i < num_slices-1 ? overlap : 0);
+        slices.push_back({slice_start, slice_end});
+    }
+    
+    // Step 3: Process each slice (potentially in parallel)
+    std::vector<std::vector<double>> slice_eigenvalues(num_slices);
+    
+    #pragma omp parallel for schedule(dynamic)
+    for (int slice_idx = 0; slice_idx < num_slices; slice_idx++) {
+        double slice_start = slices[slice_idx].first;
+        double slice_end = slices[slice_idx].second;
+        double slice_mid = (slice_start + slice_end) / 2.0;
+        
+        std::cout << "Processing slice " << slice_idx + 1 << "/" << num_slices 
+                  << " [" << slice_start << ", " << slice_end << "]" << std::endl;
+        
+        std::string current_slice_dir = slice_dir + "/slice_" + std::to_string(slice_idx);
+        system(("mkdir -p " + current_slice_dir).c_str());
+        
+        // Choose appropriate method based on slice position
+        std::vector<double> evals;
+        
+        // For edge slices, use standard Lanczos
+        if (slice_idx == 0) {
+            // First slice - use standard Lanczos for smallest eigenvalues
+            int max_evals_in_slice = static_cast<int>(N / num_slices * 1.5); // Add 50% buffer
+            lanczos(H, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
+                   current_slice_dir, compute_eigenvectors);
+            
+            // Filter eigenvalues to this slice
+            std::vector<double> filtered_evals;
+            for (double eval : evals) {
+                if (eval <= slice_end) {
+                    filtered_evals.push_back(eval);
+                }
+            }
+            evals = filtered_evals;
+        } 
+        else if (slice_idx == num_slices - 1) {
+            // Last slice - transform to find largest eigenvalues
+            // We can use standard Lanczos with a spectral transformation to find largest eigenvalues
+            int max_evals_in_slice = static_cast<int>(N / num_slices * 1.5);
+            
+            // Define a transformed operator to find largest eigenvalues
+            auto H_transformed = [&H, lambda_min, lambda_max, N](const Complex* v, Complex* result, int size) {
+                // Apply H to v
+                H(v, result, size);
+                
+                // Apply transformation: -(H - lambda_max*I) to reverse the spectrum
+                for (int i = 0; i < size; i++) {
+                    result[i] = lambda_max * v[i] - result[i];
+                }
+            };
+            
+            lanczos(H_transformed, N, max_evals_in_slice * 2, max_evals_in_slice, tol, evals, 
+                   current_slice_dir, compute_eigenvectors);
+            
+            // Convert eigenvalues back to original spectrum
+            for (double& eval : evals) {
+                eval = lambda_max - eval;
+            }
+            
+            // Filter eigenvalues to this slice
+            std::vector<double> filtered_evals;
+            for (double eval : evals) {
+                if (eval >= slice_start) {
+                    filtered_evals.push_back(eval);
+                }
+            }
+            evals = filtered_evals;
+        } 
+        else {
+            // Interior slice - use shift-invert Lanczos centered at the slice midpoint
+            int max_evals_in_slice = static_cast<int>(N / num_slices * 2.0); // Add 100% buffer for interior
+            shift_invert_lanczos(H, N, max_evals_in_slice, max_evals_in_slice, 
+                                      slice_mid, tol, evals, current_slice_dir, compute_eigenvectors);
+            
+            // Filter eigenvalues to this slice
+            std::vector<double> filtered_evals;
+            for (double eval : evals) {
+                if (eval >= slice_start && eval <= slice_end) {
+                    filtered_evals.push_back(eval);
+                }
+            }
+            evals = filtered_evals;
+        }
+        
+        std::cout << "Found " << evals.size() << " eigenvalues in slice " << slice_idx + 1 << std::endl;
+        
+        // Save slice eigenvalues for merging
+        #pragma omp critical
+        {
+            slice_eigenvalues[slice_idx] = evals;
+        }
+    }
+    
+    // Step 4: Merge eigenvalues from all slices and remove duplicates
+    std::cout << "Merging results from all slices..." << std::endl;
+    
+    std::vector<double> all_eigenvalues;
+    for (const auto& slice_evals : slice_eigenvalues) {
+        all_eigenvalues.insert(all_eigenvalues.end(), slice_evals.begin(), slice_evals.end());
+    }
+    
+    // Sort all eigenvalues
+    std::sort(all_eigenvalues.begin(), all_eigenvalues.end());
+    
+    // Remove duplicates (from overlapping slices)
+    auto new_end = std::unique(all_eigenvalues.begin(), all_eigenvalues.end(), 
+                              [tol](double a, double b) { return std::abs(a - b) < tol; });
+    all_eigenvalues.erase(new_end, all_eigenvalues.end());
+    
+    // Store the final result
+    eigenvalues = all_eigenvalues;
+    
+    std::cout << "Spectrum slicing completed. Found " << eigenvalues.size() << " eigenvalues." << std::endl;
+    
+    // If eigenvectors were computed, organize them 
+    if (compute_eigenvectors) {
+        std::cout << "Organizing eigenvectors..." << std::endl;
+        
+        // Create a mapping from eigenvalue to index in the final sorted array
+        std::map<double, int> eigenvalue_indices;
+        for (size_t i = 0; i < eigenvalues.size(); i++) {
+            eigenvalue_indices[eigenvalues[i]] = i;
+        }
+        
+        // Loop through slices to collect eigenvectors
+        for (int slice_idx = 0; slice_idx < num_slices; slice_idx++) {
+            std::string current_slice_dir = slice_dir + "/slice_" + std::to_string(slice_idx);
+            
+            // Read the eigenvalues from this slice for mapping
+            std::string eval_file;
+            if (slice_idx == 0 || slice_idx == num_slices - 1) {
+                eval_file = current_slice_dir + "/lanczos_eigenvectors/eigenvalues.bin";
+            } else {
+                eval_file = current_slice_dir + "/shift_invert_lanczos_results/eigenvalues.bin";
+            }
+            
+            std::ifstream eval_in(eval_file, std::ios::binary);
+            if (!eval_in) {
+                std::cerr << "Could not open " << eval_file << " for reading" << std::endl;
+                continue;
+            }
+            
+            size_t n_evals;
+            eval_in.read(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            std::vector<double> slice_evals(n_evals);
+            eval_in.read(reinterpret_cast<char*>(slice_evals.data()), n_evals * sizeof(double));
+            eval_in.close();
+            
+            // Determine the source directory for eigenvectors
+            std::string evec_src_dir;
+            if (slice_idx == 0 || slice_idx == num_slices - 1) {
+                evec_src_dir = current_slice_dir + "/lanczos_eigenvectors";
+            } else {
+                evec_src_dir = current_slice_dir + "/shift_invert_lanczos_results";
+            }
+            
+            // Copy eigenvectors to the result directory
+            for (size_t i = 0; i < slice_evals.size(); i++) {
+                double eval = slice_evals[i];
+                
+                // Find the closest eigenvalue in the final list
+                double min_diff = std::numeric_limits<double>::max();
+                int target_idx = -1;
+                
+                for (size_t j = 0; j < eigenvalues.size(); j++) {
+                    double diff = std::abs(eigenvalues[j] - eval);
+                    if (diff < min_diff && diff < tol) {
+                        min_diff = diff;
+                        target_idx = j;
+                    }
+                }
+                
+                if (target_idx >= 0) {
+                    // Copy the eigenvector file
+                    std::string src_file = evec_src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                    std::string dst_file = result_dir + "/eigenvector_" + std::to_string(target_idx) + ".bin";
+                    
+                    std::string cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
+                    system(cmd.c_str());
+                }
+            }
+        }
+        
+        // Save the final eigenvalues
+        std::string eigenvalue_file = result_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (eval_outfile) {
+            // Write the number of eigenvalues first
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            // Write all eigenvalues
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << n_evals << " eigenvalues to " << eigenvalue_file << std::endl;
+        }
+    }
+    
+    // Cleanup temporary directories
+    if (!dir.empty()) {
+        system(("rm -rf " + slice_dir).c_str());
+    }
+    
+    std::cout << "Spectrum slicing solver completed successfully" << std::endl;
+}
 
 // // Diagonalization using ezARPACK
 // void arpack_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, 
@@ -5424,7 +5804,9 @@ int main(int argc, char* argv[]) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    optimal_spectrum_solver(H, N, eigenvalues, dir, true);
+    // optimal_spectrum_solver(H, N, eigenvalues, dir, true);
+    spectrum_slicing_solver(H, N, eigenvalues, dir, true);
+
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> elapsed = end - start;
