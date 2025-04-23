@@ -14,33 +14,6 @@ A C++ library for exact diagonalization of quantum many-body systems with compre
 ### Diagonalization Methods
 - Support for multiple diagonalization algorithms:
     - Full diagonalization for smaller systems
-    - Lanczos algorithm for sparse Hamiltonians (finding extremal eigenvalues)
-    - Integration with ARPACK for high-performance sparse matrix eigensolvers
+    - Various Lanczos algorithm and their variants
+    - Various CG algorithms and their variants
     - Support for symmetric, asymmetric, and complex eigenproblems
-
-### Visualization Tools
-- Hamiltonian structure visualization with GraphViz integration
-- Symmetry group visualization and analysis
-- Interactive exploration of symmetry relationships
-
-### Input/Output
-- Flexible file format support for Hamiltonian specification
-- Symmetry-block output for further analysis
-- Support for standard quantum many-body model formats
-
-## Performance Optimization
-
-This library dramatically reduces computational requirements for exact diagonalization by:
-1. Leveraging symmetries to block-diagonalize Hamiltonians
-2. Employing sparse matrix techniques for memory efficiency
-3. Utilizing high-performance ARPACK routines for eigenvalue calculations
-4. Providing parallelized implementations for multi-core systems
-
-## Applications
-
-Ideal for studying:
-- Quantum spin systems and magnetic materials
-- Strongly correlated electronic systems
-- Topological phases of matter
-- Quantum circuits and algorithms
-- Non-equilibrium quantum dynamics
