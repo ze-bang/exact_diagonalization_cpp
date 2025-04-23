@@ -12,6 +12,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/Dense>
 #include <set>
+#include <queue>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
