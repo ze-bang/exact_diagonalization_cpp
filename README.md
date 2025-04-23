@@ -1,6 +1,6 @@
 # Exact Diagonalization C++
 
-A C++ library for exact diagonalization of quantum many-body systems with comprehensive symmetry analysis capabilities. This project provides efficient tools for studying quantum Hamiltonians with a focus on symmetry exploitation to reduce computational complexity.
+A C++ library for exact diagonalization of spin systems with comprehensive symmetry analysis capabilities. This project provides efficient tools for studying quantum Hamiltonians with a focus on symmetry exploitation to reduce computational complexity.
 
 ## Key Features
 
