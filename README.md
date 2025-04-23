@@ -1,6 +1,6 @@
 # Exact Diagonalization C++
 
-A C++ library for exact diagonalization of spin systems with comprehensive symmetry analysis capabilities. This project provides efficient tools for studying quantum Hamiltonians with a focus on symmetry exploitation to reduce computational complexity.
+A C++ library for exact diagonalization of spin systems with comprehensive symmetry analysis capabilities. This project provides efficient tools for studying quantum Hamiltonians with a focus on symmetry exploitation to reduce computational complexity. This library focuses primarily on reducing run time load.
 
 ## Key Features
 
@@ -17,3 +17,7 @@ A C++ library for exact diagonalization of spin systems with comprehensive symme
     - Various Lanczos algorithm and their variants
     - Various CG algorithms and their variants
     - Support for symmetric, asymmetric, and complex eigenproblems
+
+### Observable Computations
+- Computations of common thermodynamical properties
+- Support for expectation values of any custom operators
