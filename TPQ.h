@@ -1,3 +1,7 @@
+#ifndef TPQ_H
+#define TPQ_H
+
+
 #include <iostream>
 #include <complex>
 #include <vector>
@@ -15,8 +19,9 @@
 #include <fstream>
 #include <set>
 
-#ifdef TPQ_H
-#define TPQ_H
+using Complex = std::complex<double>;
+using ComplexVector = std::vector<Complex>;
+
 // Thermal Pure Quantum (TPQ) state methods for thermodynamic calculations
 
 // Generate a canonical TPQ state by applying (H - E)^k to a random vector

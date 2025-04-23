@@ -1019,6 +1019,18 @@ public:
     
     Operator(int n_bits) : n_bits_(n_bits) {}
 
+    // Copy assignment operator
+    Operator& operator=(const Operator& other) {
+        if (this != &other) {  // Check for self-assignment
+            n_bits_ = other.n_bits_;
+            transforms_ = other.transforms_;
+            sparseMatrix_ = other.sparseMatrix_;
+            matrixBuilt_ = other.matrixBuilt_;
+            symmetrized_block_ham_sizes = other.symmetrized_block_ham_sizes;
+        }
+        return *this;
+    }
+
     // Mark matrix as needing rebuild when new transform is added
     void addTransform(TransformFunction transform) {
         transforms_.push_back(transform);
@@ -1053,7 +1065,6 @@ public:
         
         return resultVec;
     }
-
 
     // Print the operator as a matrix
     Matrix returnSymmetrizedMatrix(const std::string& dir){
@@ -1137,23 +1148,19 @@ public:
         finder.loadVerticesFromFile(site_ops_file);
 
         std::vector<std::vector<int>> automorphism_groups = finder.findAllAutomorphisms();
-        std::cout << "Automorphism groups:\n";
-        for (const auto& group : automorphism_groups) {
-            std::cout << "Group: ";
-            for (int index : group) {
-                std::cout << index << " ";
-            }
-            std::cout << std::endl;
-        }
+        std::cout << "Found " << automorphism_groups.size() << " automorphisms.\n";
 
         AutomorphismCliqueAnalyzer analyzer;
         auto cliques = analyzer.findMaximumClique(automorphism_groups);
         std::vector<std::vector<int>> max_clique_here;
-        std::cout << "Maximum cliques:\n";
         for (const auto& clique : cliques) {
-            std::cout << "Clique: ";
             max_clique_here.push_back(automorphism_groups[clique]);
-            for (int index : automorphism_groups[clique]) {
+        }
+        std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
+        std::cout << "Maximum clique:\n";
+        for (const auto& clique : max_clique_here) {
+            std::cout << "Clique: ";
+            for (int index : clique) {
                 std::cout << index << " ";
             }
             std::cout << std::endl;
@@ -1166,31 +1173,30 @@ public:
         std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
         
         std::cout << "Minimal generators:\n";
+        int count_temp = 0;
         for (const auto& generator : minimal_generators.first) {
             std::cout << "Generator: ";
             for (int index : generator) {
                 std::cout << index << " ";
             }
             std::cout << "with order: ";
-            for (int order : minimal_generators.second) {
-                std::cout << order << " ";
-            }
+            std::cout << minimal_generators.second[count_temp] << " ";
+            count_temp++;
             std::cout << std::endl;
         }
 
         AutomorphismPowerRepresentation automorphism_power_representation;
         std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
+        std::cout << "Power representation generated.\n";
         std::cout << "Power representation:\n";
-        for (const auto& representation : power_representation) {
-            std::cout << "Representation: ";
-            for (int index : representation) {
-                std::cout << index << " ";
+        for (const auto& powers : power_representation) {
+            for (int power : powers) {
+                std::cout << power << " ";
             }
             std::cout << std::endl;
         }
-
-        std::cout << "Hamiltonian construction and visualization complete.\n";
-
+        std::cout << "Symmetrized Hamiltonain generated.\n";
+        
         // Generate all possible combinations of quantum numbers
         std::vector<std::vector<int>> all_quantum_numbers;
         std::vector<int> current_qnums(minimal_generators.first.size(), 0);
@@ -1223,8 +1229,7 @@ public:
         symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
         int count = 0;
         // For each symmetry sector (combination of quantum numbers)
-        for (const auto& e_i : all_quantum_numbers) {
-            // Create a set to store unique symmetrized basis vectors
+        for (const auto& e_i : all_quantum_numbers) {            
             
 
             // Total number of basis states in the Hilbert space
@@ -1234,11 +1239,6 @@ public:
             for (size_t basis = 0; basis < total_basis_states; basis++) {
                 // Generate the symmetrized basis vector for this state
                 std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
-                std::cout << "Symmetrized basis vector for basis " << basis << ": ";
-                for (const auto& val : sym_basis_vec) {
-                    std::cout << val << " ";
-                }
-                std::cout << std::endl;
                 // Check if this symmetrized basis vector is zero (can happen in some symmetry sectors)
                 double norm_squared = 0.0;
                 for (const auto& val : sym_basis_vec) {
@@ -1474,6 +1474,83 @@ public:
             lineCount++;
         }
         std::cout << "File read complete." << std::endl;    
+    }
+
+    // Build symmetrized sparse matrices for each block and save them to files
+    void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
+        if (symmetrized_block_ham_sizes.empty()) {
+            throw std::runtime_error("Symmetrized basis must be generated first with generateSymmetrizedBasis()");
+        }
+        
+        std::cout << "Building and saving symmetrized Hamiltonian blocks..." << std::endl;
+        
+        // Create a directory for the block matrices
+        std::string block_dir = dir + "/sym_blocks";
+        std::string mkdir_command = "mkdir -p " + block_dir;
+        system(mkdir_command.c_str());
+        
+        int dim = 1 << n_bits_;
+        int block_start = 0;
+        
+        // Process each symmetry block
+        for (size_t block = 0; block < symmetrized_block_ham_sizes.size(); block++) {
+            int block_size = symmetrized_block_ham_sizes[block];
+            if (block_size == 0) continue;
+            
+            std::cout << "Processing block " << block << " of size " << block_size << std::endl;
+            
+            // Create a sparse matrix for this block
+            Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            
+            // Build the block matrix
+            for (int i = 0; i < block_size; i++) {
+                std::vector<Complex> basis_i = read_sym_basis(block_start + i, dir);
+                std::vector<Complex> transformed_i = apply(basis_i);
+                
+                for (int j = 0; j < block_size; j++) {
+                    std::vector<Complex> basis_j = read_sym_basis(block_start + j, dir);
+                    
+                    // Calculate matrix element <j|H|i>
+                    Complex element(0.0, 0.0);
+                    for (int k = 0; k < dim; k++) {
+                        element += std::conj(basis_j[k]) * transformed_i[k];
+                    }
+                    
+                    // Add non-zero elements to the sparse matrix
+                    if (std::abs(element) > 1e-10) {
+                        triplets.emplace_back(j, i, element);
+                    }
+                }
+            }
+            
+            blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
+            
+            // Save the block matrix to a file
+            std::string filename = block_dir + "/block_" + std::to_string(block) + ".dat";
+            std::ofstream file(filename);
+            if (!file.is_open()) {
+                throw std::runtime_error("Could not open file for writing: " + filename);
+            }
+            
+            // Write matrix dimensions
+            file << block_size << " " << block_size << std::endl;
+            
+            // Write non-zero elements (row, col, real, imag)
+            for (int k = 0; k < blockMatrix.outerSize(); ++k) {
+                for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
+                    file << it.row() << " " << it.col() << " " 
+                         << it.value().real() << " " << it.value().imag() << std::endl;
+                }
+            }
+            
+            file.close();
+            std::cout << "Saved block " << block << " to " << filename << std::endl;
+            
+            block_start += block_size;
+        }
+        
+        std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
     }
 
 private:

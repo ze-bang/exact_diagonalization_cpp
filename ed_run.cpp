@@ -6,131 +6,158 @@
 
 
 int main(int argc, char* argv[]) {
-    // Test parameters
-    const std::string dir = argv[1];
-    // Read num_site from the second line of Trans.dat
-
-    // Read num_site from the second line of Trans.dat
-    std::ifstream trans_file(dir + "/Trans.dat");
-    if (!trans_file.is_open()) {
-        std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
+    if (argc < 2) {
+        std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
+        std::cout << "Options:" << std::endl;
+        std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, etc.)" << std::endl;
+        std::cout << "  --eigenvalues=<n>    : Number of eigenvalues to compute" << std::endl;
+        std::cout << "  --eigenvectors       : Compute eigenvectors" << std::endl;
+        std::cout << "  --output=<dir>       : Output directory" << std::endl;
+        std::cout << "  --tolerance=<tol>    : Convergence tolerance" << std::endl;
+        std::cout << "  --iterations=<iter>  : Maximum iterations" << std::endl;
         return 1;
     }
 
-    // Skip the first line
-    std::string dummy_line;
-    std::getline(trans_file, dummy_line);
-
-    // Read the second line to get num_site
-    std::string dum;
-    int num_site;
-    trans_file >> dum >> num_site;
-    trans_file.close();
-
-    std::cout << "Number of sites: " << num_site << std::endl;
-
-    // Create operator with correct number of sites
-    Operator op(num_site);
-    op.generateSymmetrizedBasis(dir);
-    // Load operator definitions
-    op.loadFromFile(dir + "/Trans.dat");
-    op.loadFromInterAllFile(dir + "/InterAll.dat");
-
-    // Print the regular matrix representation
-    std::cout << "\nRegular matrix representation:" << std::endl;
-    Matrix regular_matrix = op.returnMatrix();
-    int dim = 1 << num_site;
+    // Directory with Hamiltonian files
+    std::string directory = argv[1];
     
-    // Determine max width for formatting
-    int max_dim = std::min(20, dim); // Limit display size for large matrices
+    // Default parameters
+    EDParameters params;
+    params.num_eigenvalues = (1<<10);
+    params.compute_eigenvectors = false;
+    params.output_dir = "ed_results";
+    params.tolerance = 1e-10;
+    params.max_iterations = (1<<10);
     
-    if (dim <= max_dim) {
-        // Print full matrix
-        for (int i = 0; i < dim; i++) {
-            std::cout << "[";
-            for (int j = 0; j < dim; j++) {
-                Complex val = regular_matrix[i][j];
-                if (std::abs(val) < 1e-10) {
-                    std::cout << " 0 ";
-                } else if (std::abs(val.imag()) < 1e-10) {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
-                } else {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
-                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
-                }
-                if (j < dim - 1) std::cout << ",";
-            }
-            std::cout << "]" << std::endl;
+    // Default method
+    DiagonalizationMethod method = DiagonalizationMethod::LANCZOS;
+    
+    // Parse command line options
+    for (int i = 2; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        if (arg.find("--method=") == 0) {
+            std::string method_str = arg.substr(9);
+            if (method_str == "LANCZOS") method = DiagonalizationMethod::LANCZOS;
+            else if (method_str == "FULL") method = DiagonalizationMethod::FULL;
+            else if (method_str == "TPQ") method = DiagonalizationMethod::TPQ;
+            // Add other methods as needed
+        }
+        else if (arg.find("--eigenvalues=") == 0) {
+            params.num_eigenvalues = std::stoi(arg.substr(14));
+        }
+        else if (arg == "--eigenvectors") {
+            params.compute_eigenvectors = true;
+        }
+        else if (arg.find("--output=") == 0) {
+            params.output_dir = arg.substr(9);
+        }
+        else if (arg.find("--tolerance=") == 0) {
+            params.tolerance = std::stod(arg.substr(12));
+        }
+        else if (arg.find("--iterations=") == 0) {
+            params.max_iterations = std::stoi(arg.substr(13));
+        }
+    }
+    
+    // Create output directories
+    params.output_dir = params.output_dir + "/standard";
+    std::string symmetrized_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/symmetrized";
+    std::string cmd = "mkdir -p " + params.output_dir + " " + symmetrized_output;
+    system(cmd.c_str());
+    
+    std::cout << "==========================================" << std::endl;
+    std::cout << "Starting Standard Exact Diagonalization" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Run standard diagonalization
+    auto start_time = std::chrono::high_resolution_clock::now();
+    
+    EDResults results;
+    try {
+        results = exact_diagonalization_from_directory(
+            directory, method, params, HamiltonianFileFormat::STANDARD
+        );
+        
+        // Display eigenvalues
+        std::cout << "Eigenvalues (standard):" << std::endl;
+        for (size_t i = 0; i < results.eigenvalues.size(); i++) {
+            std::cout << i << ": " << results.eigenvalues[i] << std::endl;
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error in standard ED: " << e.what() << std::endl;
+    }
+    
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+    std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
+    
+    // Save eigenvalues to file
+    std::ofstream standard_file(params.output_dir + "/eigenvalues.txt");
+    if (standard_file.is_open()) {
+        for (const auto& val : results.eigenvalues) {
+            standard_file << val << std::endl;
+        }
+        standard_file.close();
+    }
+    
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "Starting Symmetrized Exact Diagonalization" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    // Set up parameters for symmetrized diagonalization
+    EDParameters sym_params = params;
+    sym_params.output_dir = symmetrized_output;
+    
+    // Run symmetrized diagonalization
+    start_time = std::chrono::high_resolution_clock::now();
+    
+    EDResults sym_results;
+    try {
+        sym_results = exact_diagonalization_from_directory_symmetrized(
+            directory, method, sym_params, HamiltonianFileFormat::STANDARD
+        );
+        
+        // Display eigenvalues
+        std::cout << "Eigenvalues (symmetrized):" << std::endl;
+        for (size_t i = 0; i < sym_results.eigenvalues.size(); i++) {
+            std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
+        }
+    }
+    catch (const std::exception& e) {
+        std::cerr << "Error in symmetrized ED: " << e.what() << std::endl;
+    }
+    
+    end_time = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+    std::cout << "Symmetrized ED completed in " << duration / 1000.0 << " seconds" << std::endl;
+    
+    // Save eigenvalues to file
+    std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
+    if (sym_file.is_open()) {
+        for (const auto& val : sym_results.eigenvalues) {
+            sym_file << val << std::endl;
+        }
+        sym_file.close();
+    }
+    
+    // Compare results
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "Comparing Results" << std::endl;
+    std::cout << "==========================================" << std::endl;
+    
+    int compare_count = std::min(results.eigenvalues.size(), sym_results.eigenvalues.size());
+    if (compare_count > 0) {
+        std::cout << "    Standard      Symmetrized    Difference" << std::endl;
+        for (int i = 0; i < compare_count; i++) {
+            double diff = std::abs(results.eigenvalues[i] - sym_results.eigenvalues[i]);
+            std::cout << i << ": " << results.eigenvalues[i] << "  " 
+                      << sym_results.eigenvalues[i] << "  " << diff << std::endl;
         }
     } else {
-        std::cout << "Matrix too large to display fully (" << dim << "x" << dim << "). Showing top-left " 
-                 << max_dim << "x" << max_dim << " corner:" << std::endl;
-        for (int i = 0; i < max_dim; i++) {
-            std::cout << "[";
-            for (int j = 0; j < max_dim; j++) {
-                Complex val = regular_matrix[i][j];
-                if (std::abs(val) < 1e-10) {
-                    std::cout << " 0 ";
-                } else if (std::abs(val.imag()) < 1e-10) {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
-                } else {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
-                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
-                }
-                if (j < max_dim - 1) std::cout << ",";
-            }
-            std::cout << "]" << std::endl;
-        }
-        std::cout << "..." << std::endl;
+        std::cout << "No eigenvalues to compare." << std::endl;
     }
-
-    // Print the symmetrized matrix representation
-    std::cout << "\nSymmetrized matrix representation:" << std::endl;
-    Matrix sym_matrix = op.returnSymmetrizedMatrix(dir);
-    int sym_dim = sym_matrix.size();
-    max_dim = std::min(20, sym_dim); // Limit display size for large matrices
     
-    if (sym_dim <= max_dim) {
-        // Print full matrix
-        for (int i = 0; i < sym_dim; i++) {
-            std::cout << "[";
-            for (int j = 0; j < sym_matrix[i].size(); j++) {
-                Complex val = sym_matrix[i][j];
-                if (std::abs(val) < 1e-10) {
-                    std::cout << " 0.00 ";
-                } else if (std::abs(val.imag()) < 1e-10) {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
-                } else {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
-                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
-                }
-                if (j < sym_matrix[i].size() - 1) std::cout << ",";
-            }
-            std::cout << "]" << std::endl;
-        }
-    } else {
-        std::cout << "Matrix too large to display fully (" << sym_dim << "x" << sym_dim << "). Showing top-left " 
-                 << max_dim << "x" << max_dim << " corner:" << std::endl;
-        for (int i = 0; i < max_dim; i++) {
-            std::cout << "[";
-            int cols = std::min(max_dim, (int)sym_matrix[i].size());
-            for (int j = 0; j < cols; j++) {
-                Complex val = sym_matrix[i][j];
-                if (std::abs(val) < 1e-10) {
-                    std::cout << " 0.00 ";
-                } else if (std::abs(val.imag()) < 1e-10) {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() << " ";
-                } else {
-                    std::cout << " " << std::fixed << std::setprecision(2) << val.real() 
-                              << (val.imag() >= 0 ? "+" : "") << std::setprecision(2) << val.imag() << "i ";
-                }
-                if (j < cols - 1) std::cout << ",";
-            }
-            if (sym_matrix[i].size() > max_dim) std::cout << ", ...";
-            std::cout << "]" << std::endl;
-        }
-        std::cout << "..." << std::endl;
-    }
-
     return 0;
 }
