@@ -665,28 +665,43 @@ private:
 };
 
 /**
- * MinimalGeneratorFinder class to find a minimal generating set for an automorphism group
+ * MinimalGeneratorFinder class to find the minimal set of generators for a group of automorphisms
  */
 class MinimalGeneratorFinder {
 public:
-    MinimalGeneratorFinder() {}
+    // Compose two permutations: result(i) = perm1(perm2[i])
+    std::vector<int> composePermutations(
+        const std::vector<int>& perm1, 
+        const std::vector<int>& perm2) {
+        std::vector<int> result(perm1.size());
+        for (size_t i = 0; i < perm1.size(); ++i) {
+            result[i] = perm1[perm2[i]];
+        }
+        return result;
+    }
     
-    // Find a minimal generating set for the given automorphism group
-    // Helper method to calculate the order of a permutation
-    int calculatePermutationOrder(const std::vector<int>& perm) {
-        // Identity permutation has order 1
-        if (isIdentity(perm)) return 1;
-        
+    // Find the inverse of a permutation
+    std::vector<int> inversePermutation(const std::vector<int>& perm) {
+        std::vector<int> inverse(perm.size());
+        for (size_t i = 0; i < perm.size(); ++i) {
+            inverse[perm[i]] = i;
+        }
+        return inverse;
+    }
+    
+    // Find the order of a permutation
+    int findOrder(const std::vector<int>& perm) {
         // Create identity permutation
         std::vector<int> identity(perm.size());
-        for (size_t i = 0; i < perm.size(); i++) {
+        for (size_t i = 0; i < perm.size(); ++i) {
             identity[i] = i;
         }
         
-        // Apply the permutation repeatedly until we get back to identity
+        // Create a working copy of the permutation
         std::vector<int> current = perm;
         int order = 1;
         
+        // Keep composing with itself until we get the identity
         while (current != identity) {
             current = composePermutations(current, perm);
             order++;
@@ -694,200 +709,97 @@ public:
         
         return order;
     }
-
-    // Modified to return generators and their orders
-    std::pair<std::vector<std::vector<int>>, std::vector<int>> findMinimalGenerators(const std::vector<std::vector<int>>& automorphisms) {
-        // Make a copy of the automorphisms to use as initial generators
-        std::vector<std::vector<int>> minimalGenerators = automorphisms;
-        
-        // The identity permutation is always at index 0 and we don't need it as a generator
-        if (!minimalGenerators.empty()) {
-            minimalGenerators.erase(minimalGenerators.begin());
+    
+    // Find minimal generators and their orders
+    std::pair<std::vector<std::vector<int>>, std::vector<int>> findMinimalGenerators(
+        const std::vector<std::vector<int>>& automorphisms) {
+        if (automorphisms.empty()) {
+            return {std::vector<std::vector<int>>(), std::vector<int>()};
         }
         
-        // Try to remove each generator one by one
-        bool removedAny = true;
-        while (removedAny && !minimalGenerators.empty()) {
-            removedAny = false;
-            
-            for (size_t i = 0; i < minimalGenerators.size(); i++) {
-                // Try removing this generator
-                std::vector<std::vector<int>> candidateGenerators = minimalGenerators;
-                candidateGenerators.erase(candidateGenerators.begin() + i);
-                
-                // Check if we can still generate the whole group
-                if (canGenerateGroup(candidateGenerators, automorphisms)) {
-                    // If yes, update the minimal generators and start over
-                    minimalGenerators = candidateGenerators;
-                    removedAny = true;
-                    break;
-                }
-            }
-        }
-        
-        // Calculate the order of each generator
-        std::vector<int> orders;
-        for (const auto& generator : minimalGenerators) {
-            orders.push_back(calculatePermutationOrder(generator));
-        }
-        
-        return {minimalGenerators, orders};
-    }
-    // Check if a set of generators can generate a specific permutation
-    bool canGenerate(const std::vector<std::vector<int>>& generators, 
-                      const std::vector<int>& target,
-                      int maxDepth = 10) {
-        if (generators.empty()) return isIdentity(target);
-        
-        // Check if target is one of the generators
-        for (const auto& gen : generators) {
-            if (gen == target) return true;
-        }
-        
-        // Use breadth-first search to find if we can generate the target
-        std::set<std::vector<int>> visited;
-        std::queue<std::pair<std::vector<int>, int>> queue;
-        
-        // Add identity as starting point
-        std::vector<int> identity(target.size());
-        for (size_t i = 0; i < identity.size(); i++) {
+        // Create identity permutation
+        std::vector<int> identity(automorphisms[0].size());
+        for (size_t i = 0; i < identity.size(); ++i) {
             identity[i] = i;
         }
-        queue.push({identity, 0});
-        visited.insert(identity);
         
-        while (!queue.empty()) {
-            auto [current, depth] = queue.front();
-            queue.pop();
+        // Make a copy and ensure the identity is included
+        std::set<std::vector<int>> unique_autos(automorphisms.begin(), automorphisms.end());
+        unique_autos.insert(identity);
+        
+        // Convert back to vector and sort for deterministic results
+        std::vector<std::vector<int>> sorted_autos(unique_autos.begin(), unique_autos.end());
+        std::sort(sorted_autos.begin(), sorted_autos.end());
+        
+        // Store the generators and their orders
+        std::vector<std::vector<int>> generators;
+        std::vector<int> orders;
+        
+        // Set of all elements in the generated subgroup
+        std::set<std::vector<int>> generated_elements;
+        generated_elements.insert(identity);
+        
+        // Try each automorphism as a potential generator
+        for (const auto& automorphism : sorted_autos) {
+            // Skip the identity
+            if (automorphism == identity) continue;
             
-            if (depth >= maxDepth) continue;
+            // Skip if we can already generate this automorphism
+            if (generated_elements.find(automorphism) != generated_elements.end()) continue;
             
-            // Try applying each generator
-            for (const auto& gen : generators) {
-                std::vector<int> next = composePermutations(current, gen);
-                
-                if (next == target) return true;
-                
-                if (visited.find(next) == visited.end()) {
-                    visited.insert(next);
-                    queue.push({next, depth + 1});
-                }
-                
-                // Also try the inverse
-                std::vector<int> inverse = inversePermutation(gen);
-                next = composePermutations(current, inverse);
-                
-                if (next == target) return true;
-                
-                if (visited.find(next) == visited.end()) {
-                    visited.insert(next);
-                    queue.push({next, depth + 1});
-                }
+            // Add this automorphism as a generator
+            generators.push_back(automorphism);
+            int order = findOrder(automorphism);
+            orders.push_back(order);
+            
+            // Generate all elements in the subgroup
+            generateSubgroup(generators, generated_elements);
+            
+            // If we've generated the entire group, we're done
+            if (generated_elements.size() == unique_autos.size()) {
+                break;
             }
         }
         
-        return false;
+        return {generators, orders};
     }
     
-    // Check if a set of generators can generate all permutations in the group
-    bool canGenerateGroup(const std::vector<std::vector<int>>& generators, 
-                           const std::vector<std::vector<int>>& group) {
-        if (generators.empty() && group.size() > 1) return false;
-        
-        for (const auto& perm : group) {
-            if (isIdentity(perm)) continue;
-            
-            // Check if we can generate this permutation
-            if (!canGenerate(generators, perm)) {
-                return false;
-            }
-        }
-        
-        return true;
-    }
-    
-    // Compose two permutations: result = p1 ∘ p2 (apply p2 then p1)
-    std::vector<int> composePermutations(const std::vector<int>& p1, const std::vector<int>& p2) const {
-        if (p1.size() != p2.size()) {
-            throw std::invalid_argument("Permutations must have the same size");
-        }
-        
-        std::vector<int> result(p1.size());
-        for (size_t i = 0; i < p1.size(); i++) {
-            result[i] = p1[p2[i]];
-        }
-        
-        return result;
-    }
-    
-    // Calculate the inverse of a permutation
-    std::vector<int> inversePermutation(const std::vector<int>& perm) const {
-        std::vector<int> inverse(perm.size());
-        for (size_t i = 0; i < perm.size(); i++) {
-            inverse[perm[i]] = i;
-        }
-        return inverse;
-    }
-    
-    // Check if a permutation is the identity
-    bool isIdentity(const std::vector<int>& perm) const {
-        for (size_t i = 0; i < perm.size(); i++) {
-            if (perm[i] != i) return false;
-        }
-        return true;
-    }
-    
-    // Visualize the generating relations between group elements
-    void generateGeneratorGraph(
-        const std::vector<std::vector<int>>& allAutomorphisms,
+private:
+    // Helper method to generate the subgroup from a set of generators
+    void generateSubgroup(
         const std::vector<std::vector<int>>& generators,
-        const std::string& filename,
-        const HamiltonianAutomorphismFinder& finder) {
+        std::set<std::vector<int>>& generated_elements) {
         
-        std::ofstream file(filename);
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file for writing: " + filename);
+        // Start with the identity
+        std::vector<int> identity(generators[0].size());
+        for (size_t i = 0; i < identity.size(); ++i) {
+            identity[i] = i;
         }
         
-        file << "digraph GeneratorGraph {\n";
-        file << "  node [shape=box];\n";
+        generated_elements.clear();
+        generated_elements.insert(identity);
         
-        // Create a set for fast lookup of generators
-        std::set<std::vector<int>> generatorSet(generators.begin(), generators.end());
-        
-        // Add nodes (automorphisms)
-        for (size_t i = 0; i < allAutomorphisms.size(); ++i) {
-            if (generatorSet.find(allAutomorphisms[i]) != generatorSet.end()) {
-                // Node is a generator
-                file << "  A" << i << " [label=\"" << finder.permutationToCycleNotation(allAutomorphisms[i]) 
-                     << "\", style=filled, fillcolor=lightgreen];\n";
-            } else {
-                file << "  A" << i << " [label=\"" << finder.permutationToCycleNotation(allAutomorphisms[i]) << "\"];\n";
-            }
-        }
-        
-        // Find which generators contribute to which elements
-        for (size_t i = 0; i < allAutomorphisms.size(); ++i) {
-            if (generatorSet.find(allAutomorphisms[i]) != generatorSet.end()) {
-                continue;  // Skip generators themselves
-            }
+        // Keep adding new elements until no more can be added
+        size_t old_size = 0;
+        while (old_size < generated_elements.size()) {
+            old_size = generated_elements.size();
             
-            // Find all generators that can directly connect to this element
-            for (size_t j = 0; j < allAutomorphisms.size(); ++j) {
+            // Try composing each element with each generator
+            std::vector<std::vector<int>> existing(generated_elements.begin(), generated_elements.end());
+            for (const auto& elem : existing) {
                 for (const auto& gen : generators) {
-                    if (composePermutations(allAutomorphisms[j], gen) == allAutomorphisms[i]) {
-                        file << "  A" << j << " -> A" << i << ";\n";
-                        break;
-                    }
+                    // Compose in both orders
+                    std::vector<int> composed1 = composePermutations(elem, gen);
+                    std::vector<int> composed2 = composePermutations(gen, elem);
+                    
+                    generated_elements.insert(composed1);
+                    generated_elements.insert(composed2);
                 }
             }
         }
-        
-        file << "}\n";
-        
-        std::cout << "Generated generator graph: " << filename << std::endl;
     }
 };
+
 
 /**
  * Represents automorphisms as powers of generators
@@ -1157,14 +1069,14 @@ public:
             max_clique_here.push_back(automorphism_groups[clique]);
         }
         std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
-        std::cout << "Maximum clique:\n";
-        for (const auto& clique : max_clique_here) {
-            std::cout << "Clique: ";
-            for (int index : clique) {
-                std::cout << index << " ";
-            }
-            std::cout << std::endl;
-        }
+        // std::cout << "Maximum clique:\n";
+        // for (const auto& clique : max_clique_here) {
+        //     std::cout << "Clique: ";
+        //     for (int index : clique) {
+        //         std::cout << index << " ";
+        //     }
+        //     std::cout << std::endl;
+        // }
 
         analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
 
@@ -1188,13 +1100,13 @@ public:
         AutomorphismPowerRepresentation automorphism_power_representation;
         std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
         std::cout << "Power representation generated.\n";
-        std::cout << "Power representation:\n";
-        for (const auto& powers : power_representation) {
-            for (int power : powers) {
-                std::cout << power << " ";
-            }
-            std::cout << std::endl;
-        }
+        // std::cout << "Power representation:\n";
+        // for (const auto& powers : power_representation) {
+        //     for (int power : powers) {
+        //         std::cout << power << " ";
+        //     }
+        //     std::cout << std::endl;
+        // }
         std::cout << "Symmetrized Hamiltonain generated.\n";
         
         // Generate all possible combinations of quantum numbers
