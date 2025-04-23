@@ -1,40 +1,46 @@
-# exact_diagonalization_cpp
+# Exact Diagonalization C++
 
-This project implements exact diagonalization techniques for quantum systems, focusing on the Lanczos algorithm and related methods for solving eigenvalue problems in large Hilbert spaces.
+A C++ library for exact diagonalization of quantum many-body systems with comprehensive symmetry analysis capabilities. This project provides efficient tools for studying quantum Hamiltonians with a focus on symmetry exploitation to reduce computational complexity.
 
-## Files Overview
+## Key Features
 
-### `lanczos.cpp`
-This file contains the implementation of the Lanczos algorithm and its variants for solving eigenvalue problems. The Lanczos algorithm is a powerful iterative method for finding a few eigenvalues and eigenvectors of large sparse matrices. Key features include:
+### Advanced Symmetry Analysis
+- **Automatic symmetry detection** - Identifies all automorphisms of a given Hamiltonian
+- **Symmetry visualization** - Creates graphical representations of symmetry structures
+- **Minimal generator finding** - Reduces symmetry groups to their minimal generating sets
+- **Clique analysis** - Identifies maximal sets of compatible symmetries that can be simultaneously exploited
+- **Symmetrized basis construction** - Generates symmetry-adapted basis states to block-diagonalize Hamiltonians
 
-- **Lanczos Algorithm**: Iteratively constructs an orthonormal basis for the Krylov subspace and reduces the matrix to tridiagonal form.
-- **Shift-Invert Lanczos**: Targets eigenvalues near a specific shift value for better convergence.
-- **Chebyshev Filtered Lanczos**: Enhances convergence by applying a Chebyshev polynomial filter to the starting vector.
-- **Thermodynamic Calculations**: Computes thermodynamic quantities like energy, entropy, and specific heat from the eigenvalue spectrum.
-- **Finite Temperature Lanczos Method (FTLM)**: Estimates thermal averages and dynamical correlation functions at finite temperatures.
-- **Full Diagonalization**: Provides a fallback method for small systems using LAPACK routines.
+### Diagonalization Methods
+- Support for multiple diagonalization algorithms:
+    - Full diagonalization for smaller systems
+    - Lanczos algorithm for sparse Hamiltonians (finding extremal eigenvalues)
+    - Integration with ARPACK for high-performance sparse matrix eigensolvers
+    - Support for symmetric, asymmetric, and complex eigenproblems
 
-The file also includes utility functions for generating random vectors, refining eigenvectors, and handling degenerate subspaces. It supports saving and loading basis vectors and eigenvalues to/from disk for large-scale computations.
+### Visualization Tools
+- Hamiltonian structure visualization with GraphViz integration
+- Symmetry group visualization and analysis
+- Interactive exploration of symmetry relationships
 
-### `construct_ham.h`
-This header file is intended to define the structure and functions for constructing the Hamiltonian matrix of the quantum system. It provides:
+### Input/Output
+- Flexible file format support for Hamiltonian specification
+- Symmetry-block output for further analysis
+- Support for standard quantum many-body model formats
 
-- **Hamiltonian Construction**: Functions to build the Hamiltonian matrix based on the system's parameters, such as interaction terms and external fields.
-- **Operator Definitions**: Definitions for one-body and two-body operators used in the Hamiltonian.
-- **File I/O**: Functions to load and save Hamiltonian data from/to files.
+## Performance Optimization
 
-This file serves as the interface for creating and manipulating the Hamiltonian, which is then used by the Lanczos algorithm in `lanczos.cpp`.
+This library dramatically reduces computational requirements for exact diagonalization by:
+1. Leveraging symmetries to block-diagonalize Hamiltonians
+2. Employing sparse matrix techniques for memory efficiency
+3. Utilizing high-performance ARPACK routines for eigenvalue calculations
+4. Providing parallelized implementations for multi-core systems
 
-## Usage
-1. Construct the Hamiltonian using the functions defined in `construct_ham.h`.
-2. Use the Lanczos algorithm in `lanczos.cpp` to compute eigenvalues and eigenvectors.
-3. Analyze the results to extract physical properties, such as thermodynamic quantities or dynamical correlation functions.
+## Applications
 
-
-## Dependencies
-1. BLAS/LAPACK
-2. CuBLAS (if you want to use lanczos_cuda.cu)
-3. Eigen3
-4. OpenMP
-5. MPI
-6. ezARPACK-ng / arpack-ng
+Ideal for studying:
+- Quantum spin systems and magnetic materials
+- Strongly correlated electronic systems
+- Topological phases of matter
+- Quantum circuits and algorithms
+- Non-equilibrium quantum dynamics
