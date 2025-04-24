@@ -20,12 +20,12 @@ int main(int argc, char* argv[]) {
 
     // Directory with Hamiltonian files
     std::string directory = argv[1];
-    
+
     // Default parameters
     EDParameters params;
     params.num_eigenvalues = (1<<10);
     params.compute_eigenvectors = false;
-    params.output_dir = "ed_results";
+    params.output_dir = directory + "/output";
     params.tolerance = 1e-10;
     params.max_iterations = (1<<10);
     
@@ -35,12 +35,22 @@ int main(int argc, char* argv[]) {
     // Parse command line options
     for (int i = 2; i < argc; i++) {
         std::string arg = argv[i];
-        
         if (arg.find("--method=") == 0) {
             std::string method_str = arg.substr(9);
             if (method_str == "LANCZOS") method = DiagonalizationMethod::LANCZOS;
             else if (method_str == "FULL") method = DiagonalizationMethod::FULL;
             else if (method_str == "TPQ") method = DiagonalizationMethod::TPQ;
+            else if (method_str == "KRYLOV_SCHUR") method = DiagonalizationMethod::KRYLOV_SCHUR;
+            else if (method_str == "DAVIDSON") method = DiagonalizationMethod::DAVIDSON;
+            else if (method_str == "BICG") method = DiagonalizationMethod::BICG;
+            else if (method_str == "LOBPCG") method = DiagonalizationMethod::LOBPCG;
+            else if (method_str == "CG") method = DiagonalizationMethod::CG;
+            else if (method_str == "BLOCK_CG") method = DiagonalizationMethod::BLOCK_CG;
+            else if (method_str == "LANCZOS_SELECTIVE") method = DiagonalizationMethod::LANCZOS_SELECTIVE;
+            else if (method_str == "LANCZOS_NO_ORTHO") method = DiagonalizationMethod::LANCZOS_NO_ORTHO;
+            else if (method_str == "SHIFT_INVERT") method = DiagonalizationMethod::SHIFT_INVERT;
+            else if (method_str == "SHIFT_INVERT_ROBUST") method = DiagonalizationMethod::SHIFT_INVERT_ROBUST;
+            else std::cerr << "Unknown method: " << method_str << std::endl;
             // Add other methods as needed
         }
         else if (arg.find("--eigenvalues=") == 0) {
@@ -61,46 +71,46 @@ int main(int argc, char* argv[]) {
     }
     
     // Create output directories
-    params.output_dir = params.output_dir + "/standard";
+    // params.output_dir = params.output_dir + "/standard";
     std::string symmetrized_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/symmetrized";
     std::string cmd = "mkdir -p " + params.output_dir + " " + symmetrized_output;
     system(cmd.c_str());
     
-    std::cout << "==========================================" << std::endl;
-    std::cout << "Starting Standard Exact Diagonalization" << std::endl;
-    std::cout << "==========================================" << std::endl;
+    // std::cout << "==========================================" << std::endl;
+    // std::cout << "Starting Standard Exact Diagonalization" << std::endl;
+    // std::cout << "==========================================" << std::endl;
     
     // Run standard diagonalization
     auto start_time = std::chrono::high_resolution_clock::now();
     
-    EDResults results;
-    try {
-        results = exact_diagonalization_from_directory(
-            directory, method, params, HamiltonianFileFormat::STANDARD
-        );
+    // EDResults results;
+    // try {
+    //     results = exact_diagonalization_from_directory(
+    //         directory, method, params, HamiltonianFileFormat::STANDARD
+    //     );
         
-        // Display eigenvalues
-        std::cout << "Eigenvalues (standard):" << std::endl;
-        for (size_t i = 0; i < results.eigenvalues.size(); i++) {
-            std::cout << i << ": " << results.eigenvalues[i] << std::endl;
-        }
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error in standard ED: " << e.what() << std::endl;
-    }
+    //     // Display eigenvalues
+    //     std::cout << "Eigenvalues (standard):" << std::endl;
+    //     for (size_t i = 0; i < results.eigenvalues.size(); i++) {
+    //         std::cout << i << ": " << results.eigenvalues[i] << std::endl;
+    //     }
+    // }
+    // catch (const std::exception& e) {
+    //     std::cerr << "Error in standard ED: " << e.what() << std::endl;
+    // }
     
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-    std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
+    // std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
     
-    // Save eigenvalues to file
-    std::ofstream standard_file(params.output_dir + "/eigenvalues.txt");
-    if (standard_file.is_open()) {
-        for (const auto& val : results.eigenvalues) {
-            standard_file << val << std::endl;
-        }
-        standard_file.close();
-    }
+    // // Save eigenvalues to file
+    // std::ofstream standard_file(params.output_dir + "/eigenvalues.txt");
+    // if (standard_file.is_open()) {
+    //     for (const auto& val : results.eigenvalues) {
+    //         standard_file << val << std::endl;
+    //     }
+    //     standard_file.close();
+    // }
     
     std::cout << "\n==========================================" << std::endl;
     std::cout << "Starting Symmetrized Exact Diagonalization" << std::endl;
@@ -142,22 +152,22 @@ int main(int argc, char* argv[]) {
         sym_file.close();
     }
     
-    // Compare results
-    std::cout << "\n==========================================" << std::endl;
-    std::cout << "Comparing Results" << std::endl;
-    std::cout << "==========================================" << std::endl;
+    // // Compare results
+    // std::cout << "\n==========================================" << std::endl;
+    // std::cout << "Comparing Results" << std::endl;
+    // std::cout << "==========================================" << std::endl;
     
-    int compare_count = std::min(results.eigenvalues.size(), sym_results.eigenvalues.size());
-    if (compare_count > 0) {
-        std::cout << "    Standard      Symmetrized    Difference" << std::endl;
-        for (int i = 0; i < compare_count; i++) {
-            double diff = std::abs(results.eigenvalues[i] - sym_results.eigenvalues[i]);
-            std::cout << i << ": " << results.eigenvalues[i] << "  " 
-                      << sym_results.eigenvalues[i] << "  " << diff << std::endl;
-        }
-    } else {
-        std::cout << "No eigenvalues to compare." << std::endl;
-    }
+    // int compare_count = std::min(results.eigenvalues.size(), sym_results.eigenvalues.size());
+    // if (compare_count > 0) {
+    //     std::cout << "    Standard      Symmetrized    Difference" << std::endl;
+    //     for (int i = 0; i < compare_count; i++) {
+    //         double diff = std::abs(results.eigenvalues[i] - sym_results.eigenvalues[i]);
+    //         std::cout << i << ": " << results.eigenvalues[i] << "  " 
+    //                   << sym_results.eigenvalues[i] << "  " << diff << std::endl;
+    //     }
+    // } else {
+    //     std::cout << "No eigenvalues to compare." << std::endl;
+    // }
     
     return 0;
 }

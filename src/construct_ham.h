@@ -29,6 +29,7 @@ std::array<double, 2> operator* (const std::array<double, 4>& a, const std::arra
 }
 
 
+
 /**
  * HamiltonianVisualizer class for creating graphical representations of Hamiltonians
  */
@@ -1542,7 +1543,6 @@ public:
         });
     }
 };
-
 
 
 #endif // CONSTRUCT_HAM_H
