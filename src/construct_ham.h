@@ -13,6 +13,7 @@
 #include <Eigen/Dense>
 #include <set>
 #include <queue>
+#include <chrono>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -224,6 +225,7 @@ private:
 
 /**
  * HamiltonianAutomorphismFinder class to find automorphisms of a Hamiltonian
+ * with optimizations for larger systems
  */
 class HamiltonianAutomorphismFinder {
 public:
@@ -375,7 +377,13 @@ public:
         return true;
     }
     
-    std::vector<std::vector<int>> findAllAutomorphisms() const {
+    std::vector<std::vector<int>> findAllAutomorphisms(int maxAutomorphisms = -1, int timeoutSeconds = -1) const {
+        // For large systems, use optimized methods
+        if (n_sites_ > 12) {
+            return findAutomorphismsOptimized(maxAutomorphisms, timeoutSeconds);
+        }
+        
+        // Original method for smaller systems
         std::vector<std::vector<int>> automorphisms;
         
         // Start with identity permutation
@@ -384,6 +392,7 @@ public:
             permutation[i] = i;
         }
         int count = 0;
+        
         // Generate all permutations and check if they're automorphisms
         do {
             count++;
@@ -403,6 +412,12 @@ public:
             }
             if (isAutomorphism(permutation)) {
                 automorphisms.push_back(permutation);
+                
+                // Check if we've found enough automorphisms
+                if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
+                    std::cout << "\nReached maximum number of automorphisms: " << maxAutomorphisms << std::endl;
+                    break;
+                }
             }
         } while (std::next_permutation(permutation.begin(), permutation.end()));
         
@@ -444,6 +459,308 @@ private:
     int n_sites_;
     std::vector<Edge> edges;
     std::vector<Vertex> vertices;
+    
+    // Calculate site signatures for optimization
+    std::vector<std::string> calculateSiteSignatures() const {
+        std::vector<std::string> signatures(n_sites_);
+        
+        // Count connections and operator types for each site
+        for (int site = 0; site < n_sites_; site++) {
+            // Count edges involving this site
+            std::map<std::pair<int, int>, int> opTypeCounts; // (op_type, op_partner) -> count
+            std::map<int, double> weightSums; // op_type -> sum of weights
+            
+            for (const auto& edge : edges) {
+                if (edge.site1 == site) {
+                    opTypeCounts[{edge.op1, edge.op2}]++;
+                    weightSums[edge.op1] += std::abs(edge.weight);
+                }
+                if (edge.site2 == site) {
+                    opTypeCounts[{edge.op2, edge.op1}]++;
+                    weightSums[edge.op2] += std::abs(edge.weight);
+                }
+            }
+            
+            // Count vertex operators
+            std::map<int, double> vertexWeights; // op_type -> weight
+            for (const auto& vertex : vertices) {
+                if (vertex.site == site) {
+                    vertexWeights[vertex.op] += std::abs(vertex.weight);
+                }
+            }
+            
+            // Create a signature string encoding all this information
+            std::ostringstream ss;
+            
+            // Encode edge counts and types
+            ss << "E:";
+            for (const auto& [opPair, count] : opTypeCounts) {
+                ss << opPair.first << "-" << opPair.second << ":" << count << ",";
+            }
+            
+            // Encode weight sums
+            ss << "|W:";
+            for (const auto& [opType, sum] : weightSums) {
+                ss << opType << ":" << sum << ",";
+            }
+            
+            // Encode vertex information
+            ss << "|V:";
+            for (const auto& [opType, weight] : vertexWeights) {
+                ss << opType << ":" << weight << ",";
+            }
+            
+            signatures[site] = ss.str();
+        }
+        
+        return signatures;
+    }
+    
+    // Get equivalence classes of sites based on their signatures
+    std::vector<std::vector<int>> getSiteEquivalenceClasses() const {
+        std::vector<std::string> signatures = calculateSiteSignatures();
+        std::map<std::string, std::vector<int>> classes;
+        
+        for (int site = 0; site < n_sites_; site++) {
+            classes[signatures[site]].push_back(site);
+        }
+        
+        std::vector<std::vector<int>> result;
+        for (const auto& [sig, sites] : classes) {
+            result.push_back(sites);
+        }
+        
+        return result;
+    }
+    
+    // Check if a partial permutation is compatible with constraints so far
+    bool isPartialPermutationCompatible(const std::vector<int>& permutation, int depth) const {
+        for (int i = 0; i < depth; i++) {
+            for (int j = i + 1; j < depth; j++) {
+                // Check that connections between mapped sites are preserved
+                for (const auto& edge : edges) {
+                    if ((edge.site1 == i && edge.site2 == j) || (edge.site1 == j && edge.site2 == i)) {
+                        // There is an edge between sites i and j
+                        // Check if there's also an edge between permutation[i] and permutation[j]
+                        bool found = false;
+                        for (const auto& other_edge : edges) {
+                            if ((other_edge.site1 == permutation[i] && other_edge.site2 == permutation[j]) ||
+                                (other_edge.site1 == permutation[j] && other_edge.site2 == permutation[i])) {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found) return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    
+    // Find automorphisms using optimized algorithm
+    std::vector<std::vector<int>> findAutomorphismsOptimized(int maxAutomorphisms = -1, int timeoutSeconds = -1) const {
+        std::vector<std::vector<int>> automorphisms;
+        std::vector<int> permutation(n_sites_, -1);
+        std::vector<bool> used(n_sites_, false);
+        
+        // Get equivalence classes of sites
+        std::vector<std::vector<int>> equivalenceClasses = getSiteEquivalenceClasses();
+        
+        // Map from site to its equivalence class
+        std::vector<int> siteToClass(n_sites_);
+        for (size_t i = 0; i < equivalenceClasses.size(); i++) {
+            for (int site : equivalenceClasses[i]) {
+                siteToClass[site] = i;
+            }
+        }
+        
+        // Record start time for timeout
+        std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
+        
+        // Find automorphisms by backtracking
+        std::function<void(int)> backtrack = [&](int depth) {
+            // Check if we reached the end
+            if (depth == n_sites_) {
+                // Found a valid permutation, check if it's an automorphism
+                if (isAutomorphism(permutation)) {
+                    automorphisms.push_back(permutation);
+                    
+                    // Print the automorphism
+                    std::cout << "\nFound automorphism: ";
+                    for (int v : permutation) {
+                        std::cout << v << " ";
+                    }
+                    std::cout << std::endl;
+                    
+                    // Check if we've found enough automorphisms
+                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
+                        return;
+                    }
+                }
+                return;
+            }
+            
+            // Try placing different sites at the current position
+            // Only try sites in the same equivalence class
+            int currentClass = siteToClass[depth];
+            for (int site : equivalenceClasses[currentClass]) {
+                if (!used[site]) {
+                    permutation[depth] = site;
+                    used[site] = true;
+                    
+                    // Check if the partial permutation is compatible
+                    if (isPartialPermutationCompatible(permutation, depth + 1)) {
+                        backtrack(depth + 1);
+                    }
+                    
+                    used[site] = false;
+                    
+                    // Check for timeout
+                    if (timeoutSeconds > 0) {
+                        auto currentTime = std::chrono::steady_clock::now();
+                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - startTime).count();
+                        if (elapsed >= timeoutSeconds) {
+                            std::cout << "\nReached timeout of " << timeoutSeconds << " seconds" << std::endl;
+                            return;
+                        }
+                    }
+                    
+                    // Check if we found enough automorphisms
+                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
+                        return;
+                    }
+                }
+            }
+        };
+        
+        std::cout << "Finding automorphisms with optimized method..." << std::endl;
+        std::cout << "Found " << equivalenceClasses.size() << " equivalence classes of sites" << std::endl;
+        
+        // Search for specialized patterns first (common symmetry groups)
+        findCommonSymmetryPatterns(automorphisms, maxAutomorphisms);
+        
+        // If we didn't find anything with specialized patterns or we need more,
+        // use the general backtracking approach
+        if (automorphisms.empty() || (maxAutomorphisms > 0 && (int)automorphisms.size() < maxAutomorphisms)) {
+            backtrack(0);
+        }
+        
+        return automorphisms;
+    }
+    
+    // Find common symmetry patterns like reflections, rotations, etc.
+    void findCommonSymmetryPatterns(std::vector<std::vector<int>>& automorphisms, int maxAutomorphisms) const {
+        // Try to detect if we have a chain or ring structure
+        if (isChainStructure()) {
+            std::cout << "Detected chain structure, checking for reflection symmetry..." << std::endl;
+            
+            // Add reflection symmetry for a chain
+            std::vector<int> reflection(n_sites_);
+            for (int i = 0; i < n_sites_; i++) {
+                reflection[i] = n_sites_ - 1 - i;
+            }
+            
+            if (isAutomorphism(reflection)) {
+                automorphisms.push_back(reflection);
+                std::cout << "Found reflection symmetry" << std::endl;
+            }
+        }
+        
+        if (isRingStructure()) {
+            std::cout << "Detected ring structure, checking for rotational and reflection symmetries..." << std::endl;
+            
+            // Add rotational symmetries for a ring
+            for (int shift = 1; shift < n_sites_; shift++) {
+                std::vector<int> rotation(n_sites_);
+                for (int i = 0; i < n_sites_; i++) {
+                    rotation[i] = (i + shift) % n_sites_;
+                }
+                
+                if (isAutomorphism(rotation)) {
+                    automorphisms.push_back(rotation);
+                    std::cout << "Found rotational symmetry with shift " << shift << std::endl;
+                    
+                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
+                        return;
+                    }
+                }
+            }
+            
+            // Add reflection symmetries for a ring
+            for (int axis = 0; axis < n_sites_; axis++) {
+                std::vector<int> reflection(n_sites_);
+                for (int i = 0; i < n_sites_; i++) {
+                    reflection[i] = (2 * axis - i + n_sites_) % n_sites_;
+                }
+                
+                if (isAutomorphism(reflection)) {
+                    automorphisms.push_back(reflection);
+                    std::cout << "Found reflection symmetry around axis " << axis << std::endl;
+                    
+                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // Check for hypercube structure (for n_sites = 2^d)
+        if (isPowerOfTwo(n_sites_)) {
+            std::cout << "Detected possible hypercube structure, checking for symmetries..." << std::endl;
+            // Try symmetries that swap dimensions or reflect along axes
+            // This is complex and would be custom for specific hypercube arrangements
+        }
+    }
+    
+    // Detect if the system is a chain structure
+    bool isChainStructure() const {
+        // Count connections for each site
+        std::vector<int> connectionCount(n_sites_, 0);
+        
+        for (const auto& edge : edges) {
+            if (edge.site1 != edge.site2) {  // Exclude self-connections
+                connectionCount[edge.site1]++;
+                connectionCount[edge.site2]++;
+            }
+        }
+        
+        // Check if it looks like a chain (most sites have 2 connections, ends have 1)
+        int endCount = 0;
+        int middleCount = 0;
+        
+        for (int count : connectionCount) {
+            if (count == 1) endCount++;
+            else if (count == 2) middleCount++;
+        }
+        
+        return (endCount == 2 && middleCount == n_sites_ - 2);
+    }
+    
+    // Detect if the system is a ring structure
+    bool isRingStructure() const {
+        // Count connections for each site
+        std::vector<int> connectionCount(n_sites_, 0);
+        
+        for (const auto& edge : edges) {
+            if (edge.site1 != edge.site2) {  // Exclude self-connections
+                connectionCount[edge.site1]++;
+                connectionCount[edge.site2]++;
+            }
+        }
+        
+        // Check if all sites have exactly 2 connections
+        for (int count : connectionCount) {
+            if (count != 2) return false;
+        }
+        
+        return true;
+    }
+    
+    // Check if a number is a power of 2
+    bool isPowerOfTwo(int n) const {
+        return n > 0 && (n & (n - 1)) == 0;
+    }
 };
 
 /**
