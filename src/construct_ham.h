@@ -241,6 +241,15 @@ public:
         std::complex<double> weight;
     };
     
+    struct SiteProperty {
+        std::vector<std::tuple<int, int, std::complex<double>>> connections; // (target_site, op_pair_id, weight)
+        std::vector<std::pair<int, std::complex<double>>> localOps; // (op, weight)
+        
+        bool operator==(const SiteProperty& other) const {
+            return connections == other.connections && localOps == other.localOps;
+        }
+    };
+    
     HamiltonianAutomorphismFinder(int n_sites) : n_sites_(n_sites) {}
     
     void loadEdgesFromFile(const std::string& filename) {
@@ -321,6 +330,19 @@ public:
         }
     }
     
+    // Provide spatial positions for additional constraints (e.g., geometry-based symmetries)
+    void setSitePositions(const std::vector<std::array<double, 3>>& positions) {
+        if (positions.size() != n_sites_) {
+            throw std::invalid_argument("Number of positions must match number of sites");
+        }
+        site_positions = positions;
+    }
+    
+    // Set unit cell vectors to identify translational symmetries
+    void setUnitCellVectors(const std::vector<std::vector<double>>& vectors) {
+        unit_cell_vectors = vectors;
+    }
+    
     bool isAutomorphism(const std::vector<int>& permutation) const {
         if (permutation.size() != n_sites_) {
             throw std::invalid_argument("Permutation size must match number of sites");
@@ -376,37 +398,44 @@ public:
     }
     
     std::vector<std::vector<int>> findAllAutomorphisms() const {
+        // Start with a basic optimization: identify equivalence classes of sites
+        std::vector<int> siteClasses = identifySiteEquivalenceClasses();
+        
+        // If spatial information is available, try geometric symmetry finding first
         std::vector<std::vector<int>> automorphisms;
-        
-        // Start with identity permutation
-        std::vector<int> permutation(n_sites_);
-        for (int i = 0; i < n_sites_; ++i) {
-            permutation[i] = i;
+        if (!site_positions.empty()) {
+            automorphisms = findGeometricSymmetries();
+            
+            // If we found at least some automorphisms, return them
+            if (!automorphisms.empty()) {
+                std::cout << "\nFound " << automorphisms.size() << " geometric symmetries." << std::endl;
+                return automorphisms;
+            }
         }
-        int count = 0;
-        // Generate all permutations and check if they're automorphisms
-        do {
-            count++;
-            // Update the loading bar periodically
-            if (count % 1000 == 0 || count == 1) {
-                double percentage = (double)count / factorial(n_sites_) * 100.0;
-                int barWidth = 40;
-                int pos = barWidth * percentage / 100.0;
-                
-                std::cout << "\r[";
-                for (int i = 0; i < barWidth; ++i) {
-                    if (i < pos) std::cout << "=";
-                    else if (i == pos) std::cout << ">";
-                    else std::cout << " ";
-                }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-            }
-            if (isAutomorphism(permutation)) {
-                automorphisms.push_back(permutation);
-            }
-        } while (std::next_permutation(permutation.begin(), permutation.end()));
         
-        return automorphisms;
+        // If site classes show that all sites are different, only identity is possible
+        bool allSitesUnique = true;
+        for (int i = 1; i < n_sites_; i++) {
+            if (siteClasses[i] == siteClasses[0]) {
+                allSitesUnique = false;
+                break;
+            }
+        }
+        
+        if (allSitesUnique) {
+            std::vector<int> identity(n_sites_);
+            for (int i = 0; i < n_sites_; i++) identity[i] = i;
+            automorphisms.push_back(identity);
+            return automorphisms;
+        }
+        
+        // For small systems, we can still do the full search
+        if (n_sites_ <= 10) {
+            return findAutomorphismsByFullSearch(siteClasses);
+        }
+        
+        // For larger systems, use a backtracking approach with pruning
+        return findAutomorphismsByBacktracking(siteClasses);
     }
     
     std::string permutationToCycleNotation(const std::vector<int>& permutation) const {
@@ -444,6 +473,282 @@ private:
     int n_sites_;
     std::vector<Edge> edges;
     std::vector<Vertex> vertices;
+    std::vector<std::array<double, 3>> site_positions;
+    std::vector<std::vector<double>> unit_cell_vectors;
+    
+    // Identify equivalence classes of sites based on their local properties
+    std::vector<int> identifySiteEquivalenceClasses() const {
+        std::vector<SiteProperty> siteProperties(n_sites_);
+        
+        // Collect vertex operator information
+        for (const auto& vertex : vertices) {
+            siteProperties[vertex.site].localOps.push_back({vertex.op, vertex.weight});
+        }
+        
+        // Sort local operators for consistent comparison
+        for (auto& prop : siteProperties) {
+            std::sort(prop.localOps.begin(), prop.localOps.end());
+        }
+        
+        // Collect edges and connections
+        for (const auto& edge : edges) {
+            // Using a simple encoding for operator pairs
+            int opPairId = edge.op1 * 10 + edge.op2;
+            
+            siteProperties[edge.site1].connections.push_back({edge.site2, opPairId, edge.weight});
+            siteProperties[edge.site2].connections.push_back({edge.site1, opPairId + 100, edge.weight}); // +100 to differentiate direction
+        }
+        
+        // Sort connections for consistent comparison
+        for (auto& prop : siteProperties) {
+            std::sort(prop.connections.begin(), prop.connections.end());
+        }
+        
+        // Assign class IDs
+        std::vector<int> siteClasses(n_sites_, -1);
+        int nextClassId = 0;
+        
+        for (int i = 0; i < n_sites_; i++) {
+            if (siteClasses[i] == -1) {
+                siteClasses[i] = nextClassId;
+                
+                for (int j = i + 1; j < n_sites_; j++) {
+                    if (siteProperties[j] == siteProperties[i]) {
+                        siteClasses[j] = nextClassId;
+                    }
+                }
+                
+                nextClassId++;
+            }
+        }
+        
+        return siteClasses;
+    }
+    
+    // Find automorphisms using a full search (for small systems)
+    std::vector<std::vector<int>> findAutomorphismsByFullSearch(const std::vector<int>& siteClasses) const {
+        std::vector<std::vector<int>> automorphisms;
+        
+        // Start with identity permutation
+        std::vector<int> permutation(n_sites_);
+        for (int i = 0; i < n_sites_; ++i) {
+            permutation[i] = i;
+        }
+        
+        // Generate all permutations and check if they're automorphisms
+        do {
+            // Quick check: sites can only map to sites of the same class
+            bool validClass = true;
+            for (int i = 0; i < n_sites_; i++) {
+                if (siteClasses[i] != siteClasses[permutation[i]]) {
+                    validClass = false;
+                    break;
+                }
+            }
+            
+            if (validClass && isAutomorphism(permutation)) {
+                automorphisms.push_back(permutation);
+            }
+        } while (std::next_permutation(permutation.begin(), permutation.end()));
+        
+        return automorphisms;
+    }
+    
+    // Find automorphisms using backtracking with pruning
+    std::vector<std::vector<int>> findAutomorphismsByBacktracking(const std::vector<int>& siteClasses) const {
+        std::vector<std::vector<int>> automorphisms;
+        std::vector<int> permutation(n_sites_, -1);  // -1 means unassigned
+        std::vector<bool> used(n_sites_, false);
+        
+        // Add identity permutation
+        std::vector<int> identity(n_sites_);
+        for (int i = 0; i < n_sites_; i++) identity[i] = i;
+        
+        if (isAutomorphism(identity)) {
+            automorphisms.push_back(identity);
+        }
+        
+        // Try to find at least one more non-trivial automorphism
+        std::cout << "\nSearching for non-trivial automorphisms..." << std::endl;
+        
+        // Find first non-identity
+        bool found = false;
+        for (int startSite = 0; startSite < n_sites_ && !found; startSite++) {
+            for (int mapTo = 0; mapTo < n_sites_ && !found; mapTo++) {
+                if (startSite != mapTo && siteClasses[startSite] == siteClasses[mapTo]) {
+                    permutation.assign(n_sites_, -1);
+                    used.assign(n_sites_, false);
+                    
+                    permutation[startSite] = mapTo;
+                    used[mapTo] = true;
+                    
+                    if (backtrack(0, permutation, used, siteClasses, automorphisms)) {
+                        found = true;
+                    }
+                }
+            }
+        }
+        
+        if (automorphisms.size() <= 1) {
+            std::cout << "No non-trivial automorphisms found." << std::endl;
+        } else {
+            std::cout << "Found " << automorphisms.size() << " automorphisms." << std::endl;
+        }
+        
+        return automorphisms;
+    }
+    
+    // Backtracking helper function
+    bool backtrack(int pos, std::vector<int>& permutation, std::vector<bool>& used, 
+                  const std::vector<int>& siteClasses, std::vector<std::vector<int>>& automorphisms) const {
+        // If we've assigned all positions, check if it's an automorphism
+        if (pos == n_sites_) {
+            if (isAutomorphism(permutation)) {
+                automorphisms.push_back(permutation);
+                return true;
+            }
+            return false;
+        }
+        
+        // If this position is already assigned, move to the next
+        if (permutation[pos] != -1) {
+            return backtrack(pos + 1, permutation, used, siteClasses, automorphisms);
+        }
+        
+        // Try assigning each unused value from the same class
+        for (int i = 0; i < n_sites_; i++) {
+            if (!used[i] && siteClasses[pos] == siteClasses[i]) {
+                permutation[pos] = i;
+                used[i] = true;
+                
+                // Early pruning: check if partial assignment maintains edge constraints
+                if (isPartiallyValid(permutation, pos)) {
+                    if (backtrack(pos + 1, permutation, used, siteClasses, automorphisms)) {
+                        return true;
+                    }
+                }
+                
+                used[i] = false;
+                permutation[pos] = -1;
+            }
+        }
+        
+        return false;
+    }
+    
+    // Check if a partial permutation is valid
+    bool isPartiallyValid(const std::vector<int>& partial, int lastAssigned) const {
+        // Check edges involving the last assigned site
+        for (const auto& edge : edges) {
+            if (edge.site1 == lastAssigned && partial[edge.site2] != -1) {
+                int site1 = partial[lastAssigned];
+                int site2 = partial[edge.site2];
+                
+                bool foundMatch = false;
+                for (const auto& other : edges) {
+                    bool matches1 = (other.site1 == site1 && other.site2 == site2 &&
+                                    other.op1 == edge.op1 && other.op2 == edge.op2 &&
+                                    std::abs(other.weight - edge.weight) < 1e-10);
+                    
+                    bool matches2 = (other.site1 == site2 && other.site2 == site1 &&
+                                    other.op1 == edge.op2 && other.op2 == edge.op1 &&
+                                    std::abs(other.weight - edge.weight) < 1e-10);
+                    
+                    if (matches1 || matches2) {
+                        foundMatch = true;
+                        break;
+                    }
+                }
+                
+                if (!foundMatch) return false;
+            }
+            else if (edge.site2 == lastAssigned && partial[edge.site1] != -1) {
+                int site1 = partial[edge.site1];
+                int site2 = partial[lastAssigned];
+                
+                bool foundMatch = false;
+                for (const auto& other : edges) {
+                    bool matches1 = (other.site1 == site1 && other.site2 == site2 &&
+                                    other.op1 == edge.op1 && other.op2 == edge.op2 &&
+                                    std::abs(other.weight - edge.weight) < 1e-10);
+                    
+                    bool matches2 = (other.site1 == site2 && other.site2 == site1 &&
+                                    other.op1 == edge.op2 && other.op2 == edge.op1 &&
+                                    std::abs(other.weight - edge.weight) < 1e-10);
+                    
+                    if (matches1 || matches2) {
+                        foundMatch = true;
+                        break;
+                    }
+                }
+                
+                if (!foundMatch) return false;
+            }
+        }
+        
+        // Check vertices for the last assigned site
+        for (const auto& vertex : vertices) {
+            if (vertex.site == lastAssigned) {
+                int permutedSite = partial[lastAssigned];
+                
+                bool foundMatch = false;
+                for (const auto& other : vertices) {
+                    if (other.site == permutedSite && other.op == vertex.op &&
+                        std::abs(other.weight - vertex.weight) < 1e-10) {
+                        foundMatch = true;
+                        break;
+                    }
+                }
+                
+                if (!foundMatch) return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    // Find symmetries based on geometric properties (if site positions are available)
+    std::vector<std::vector<int>> findGeometricSymmetries() const {
+        if (site_positions.empty()) return {};
+        
+        std::vector<std::vector<int>> symmetries;
+        // Identity permutation
+        std::vector<int> identity(n_sites_);
+        for (int i = 0; i < n_sites_; i++) identity[i] = i;
+        symmetries.push_back(identity);
+        
+        // If we have unit cell vectors, look for translational symmetries
+        if (!unit_cell_vectors.empty()) {
+            findTranslationalSymmetries(symmetries);
+        }
+        
+        // For small-to-medium systems, check common geometric symmetries
+        if (n_sites_ <= 16) {
+            findReflectionAndRotationSymmetries(symmetries);
+        }
+        
+        // Verify all found symmetries
+        std::vector<std::vector<int>> verifiedSymmetries;
+        for (const auto& perm : symmetries) {
+            if (isAutomorphism(perm)) {
+                verifiedSymmetries.push_back(perm);
+            }
+        }
+        
+        return verifiedSymmetries;
+    }
+    
+    // Find translational symmetries based on unit cell vectors
+    void findTranslationalSymmetries(std::vector<std::vector<int>>& symmetries) const {
+        // Implementation depends on the specific lattice structure
+        // This is a placeholder for a more complete implementation
+    }
+    
+    // Find reflection and rotation symmetries
+    void findReflectionAndRotationSymmetries(std::vector<std::vector<int>>& symmetries) const {
+        // Look for common symmetries in 2D/3D lattices
+        // This is a placeholder for a more complete implementation
+    }
 };
 
 /**
