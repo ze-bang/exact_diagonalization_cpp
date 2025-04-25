@@ -21,7 +21,8 @@ enum class DiagonalizationMethod {
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
     FULL,                  // Full diagonalization
-    TPQ                    // Thermal Pure Quantum states
+    TPQ,                    // Thermal Pure Quantum states
+    ARPACK                  // ARPACK
 };
 
 // Structure to hold exact diagonalization results
@@ -176,6 +177,14 @@ EDResults exact_diagonalization_core(
             std::cout << "Using full diagonalization" << std::endl;
             full_diagonalization(H, hilbert_space_dim, results.eigenvalues, 
                                params.output_dir, params.compute_eigenvectors);
+            break;
+        
+        case DiagonalizationMethod::ARPACK:
+            std::cout << "Using ARPACK method" << std::endl;
+            arpack_diagonalization(H, hilbert_space_dim, params.max_iterations, 
+                             params.num_eigenvalues, params.tolerance, 
+                             results.eigenvalues, params.output_dir, 
+                             params.compute_eigenvectors);
             break;
             
         case DiagonalizationMethod::TPQ:

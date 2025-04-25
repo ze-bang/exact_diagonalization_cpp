@@ -13,6 +13,7 @@
 #include <Eigen/Dense>
 #include <set>
 #include <queue>
+#include <random>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -444,6 +445,154 @@ private:
     int n_sites_;
     std::vector<Edge> edges;
     std::vector<Vertex> vertices;
+};
+
+/**
+ * Class for sampling automorphisms in large systems
+ */
+class AutomorphismSampler {
+public:
+    AutomorphismSampler(int n_sites) : n_sites_(n_sites) {}
+    
+    // Find a subset of automorphisms for large systems
+    std::vector<std::vector<int>> sampleAutomorphisms(
+        const HamiltonianAutomorphismFinder& finder, 
+        int max_samples = 10000, 
+        int max_automorphisms = 100) {
+        
+        std::vector<std::vector<int>> result;
+        
+        // Start with identity permutation
+        std::vector<int> identity(n_sites_);
+        for (int i = 0; i < n_sites_; ++i) {
+            identity[i] = i;
+        }
+        result.push_back(identity);
+        
+        // Try common symmetries first
+        tryCommonSymmetries(finder, result);
+        
+        // If we already found enough symmetries, return early
+        if (result.size() >= max_automorphisms) {
+            return result;
+        }
+        
+        // Setup random number generator
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        
+        // Random sampling approach
+        std::cout << "Sampling random permutations for automorphisms..." << std::endl;
+        int attempts = 0;
+        
+        while (attempts < max_samples && result.size() < max_automorphisms) {
+            // Generate a random permutation
+            std::vector<int> perm = identity;
+            std::shuffle(perm.begin(), perm.end(), gen);
+            
+            if (finder.isAutomorphism(perm)) {
+                bool is_new = std::find(result.begin(), result.end(), perm) == result.end();
+                if (is_new) {
+                    result.push_back(perm);
+                    std::cout << "Found automorphism #" << result.size() << std::endl;
+                    
+                    // Also try compositions with existing automorphisms
+                    tryCompositions(finder, result, perm, max_automorphisms);
+                }
+            }
+            
+            // Show progress
+            if (++attempts % 100 == 0) {
+                std::cout << "Sampled " << attempts << "/" << max_samples << " permutations, found " 
+                         << result.size() << " automorphisms" << std::endl;
+            }
+        }
+        
+        return result;
+    }
+    
+private:
+    int n_sites_;
+    
+    // Try common symmetries like reflections, translations, etc.
+    void tryCommonSymmetries(const HamiltonianAutomorphismFinder& finder, std::vector<std::vector<int>>& result) {
+        std::cout << "Checking for common symmetries..." << std::endl;
+        
+        // 1. Reflection symmetry (for chain-like systems)
+        std::vector<int> reflection(n_sites_);
+        for (int i = 0; i < n_sites_; ++i) {
+            reflection[i] = n_sites_ - 1 - i;
+        }
+        if (finder.isAutomorphism(reflection)) {
+            result.push_back(reflection);
+            std::cout << "Found reflection symmetry" << std::endl;
+        }
+        
+        // 2. Translations (for periodic systems)
+        for (int shift = 1; shift < n_sites_; ++shift) {
+            std::vector<int> translation(n_sites_);
+            for (int i = 0; i < n_sites_; ++i) {
+                translation[i] = (i + shift) % n_sites_;
+            }
+            if (finder.isAutomorphism(translation)) {
+                result.push_back(translation);
+                std::cout << "Found translation symmetry with shift " << shift << std::endl;
+            }
+        }
+        
+        // 3. Site swap symmetries
+        for (int i = 0; i < n_sites_; ++i) {
+            for (int j = i + 1; j < n_sites_; ++j) {
+                std::vector<int> swap_perm(n_sites_);
+                for (int k = 0; k < n_sites_; ++k) {
+                    if (k == i) swap_perm[k] = j;
+                    else if (k == j) swap_perm[k] = i;
+                    else swap_perm[k] = k;
+                }
+                
+                if (finder.isAutomorphism(swap_perm)) {
+                    result.push_back(swap_perm);
+                    std::cout << "Found swap symmetry between sites " << i << " and " << j << std::endl;
+                }
+            }
+        }
+    }
+    
+    // Try composing a new automorphism with existing ones
+    void tryCompositions(const HamiltonianAutomorphismFinder& finder, 
+                        std::vector<std::vector<int>>& result, 
+                        const std::vector<int>& perm,
+                        int max_automorphisms) {
+        if (result.size() >= max_automorphisms) return;
+        
+        // Try compositions with existing automorphisms
+        size_t current_size = result.size();
+        for (size_t i = 0; i < current_size && result.size() < max_automorphisms; ++i) {
+            std::vector<int> composed(n_sites_);
+            
+            // Compose: perm ∘ existing
+            for (int j = 0; j < n_sites_; ++j) {
+                composed[j] = perm[result[i][j]];
+            }
+            
+            // Check if this composition is new and valid
+            if (finder.isAutomorphism(composed) && 
+                std::find(result.begin(), result.end(), composed) == result.end()) {
+                result.push_back(composed);
+            }
+            
+            // Compose: existing ∘ perm
+            for (int j = 0; j < n_sites_; ++j) {
+                composed[j] = result[i][perm[j]];
+            }
+            
+            // Check if this composition is new and valid
+            if (finder.isAutomorphism(composed) && 
+                std::find(result.begin(), result.end(), composed) == result.end()) {
+                result.push_back(composed);
+            }
+        }
+    }
 };
 
 /**
@@ -1227,25 +1376,50 @@ public:
         return sym_basis;
     }
 
-    std::vector<Complex> sym_basis_e_(int basis, std::vector<std::vector<int>> max_clique, std::vector<std::vector<int>> power_representation, std::vector<int> minimal_generators, std::vector<int> e_i){
+    std::vector<Complex> sym_basis_e_(int basis, std::vector<std::vector<int>> max_clique, 
+                                    std::vector<std::vector<int>> power_representation, 
+                                    std::vector<int> minimal_generator_orders, 
+                                    std::vector<int> e_i) {
         
         std::vector<Complex> sym_basis = std::vector<Complex>(1 << n_bits_, 0.0);
-        for(size_t i=0; i<max_clique.size(); i++){
-            int rest = applyPermutation(basis, max_clique[i]);
-            Complex factor = Complex(1.0, 0.0);
-            for(size_t j=0; j<power_representation[i].size(); j++){
-                factor *= std::exp(Complex(0.0, 2*M_PI*double(power_representation[i][j])*double(e_i[j])/double(minimal_generators[j])));    // Multiply by the phase factor e^(i*θ)
-            }
-            sym_basis[rest] += factor;
-        }
-
+        
+        // Recursive function to apply all combinations of generator powers
+        std::function<void(int, int, const std::vector<std::vector<int>>&, Complex)> apply_generators = 
+            [&](int current_gen, int current_basis, const std::vector<std::vector<int>>& generators, Complex current_phase) {
+                
+                if (current_gen == generators.size()) {
+                    // We've applied all generators, add to the symmetrized basis
+                    sym_basis[current_basis] += current_phase;
+                    return;
+                }
+                
+                // Apply all powers of the current generator
+                for (int power = 0; power < minimal_generator_orders[current_gen]; power++) {
+                    // Calculate the phase factor for this power
+                    Complex phase_factor = std::exp(Complex(0.0, 2*M_PI*double(power)*double(e_i[current_gen])/
+                                                  double(minimal_generator_orders[current_gen])));
+                    
+                    // Apply the generator 'power' times
+                    int transformed_basis = current_basis;
+                    for (int p = 0; p < power; p++) {
+                        transformed_basis = applyPermutation(transformed_basis, generators[current_gen]);
+                    }
+                    
+                    // Recursively apply the next generator
+                    apply_generators(current_gen + 1, transformed_basis, generators, current_phase * phase_factor);
+                }
+            };
+        
+        // Start the recursive application with the original basis state
+        apply_generators(0, basis, power_representation.empty() ? max_clique : power_representation, Complex(1.0, 0.0));
+        
         // Normalize the sym_basis
         double norm = 0.0;
         for (const auto& val : sym_basis) {
             norm += std::norm(val);
         }
         if (norm < 1e-8) {
-            return sym_basis; // Return unnormalized basis
+            return sym_basis; // Return unnormalized basis if essentially zero
         }
         norm = std::sqrt(norm);
         for (auto& val : sym_basis) {

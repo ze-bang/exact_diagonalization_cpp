@@ -12,9 +12,9 @@
 #include "construct_ham.h"
 #include <iomanip>
 #include <algorithm>
-// #include <ezarpack/arpack_solver.hpp>
-// #include <ezarpack/storages/eigen.hpp>
-// #include <ezarpack/version.hpp>
+#include <ezarpack/arpack_solver.hpp>
+#include <ezarpack/storages/eigen.hpp>
+#include <ezarpack/version.hpp>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <stack>
@@ -3227,38 +3227,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Full diagonalization completed successfully" << std::endl;
 }
 
-// The Krylov-Schur algorithm is an advanced eigenvalue computation method that extends the traditional Lanczos algorithm with better stability and convergence properties. Here's an explanation of how it works:
-
-// ### Core Concept
-
-// The Krylov-Schur algorithm modifies the standard Lanczos method by incorporating a Schur decomposition that improves numerical stability and allows for more efficient restarting.
-
-// ### Key Components
-
-// 1. **Krylov Decomposition**: Similar to Lanczos, it builds a basis for the Krylov subspace K_m(A,v) = span{v, Av, A²v, ..., A^(m-1)v}.
-
-// 2. **Schur Form**: Unlike standard Lanczos which produces a tridiagonal matrix, Krylov-Schur transforms this into a Schur form that preserves eigenvalue information but has better numerical properties.
-
-// 3. **Filtering and Restarting**: The algorithm incorporates sophisticated restarting that allows it to focus on specific parts of the spectrum (typically the smallest or largest eigenvalues).
-
-// ### Advantages over Standard Lanczos
-
-// - Better handling of clustered or multiple eigenvalues
-// - More stable numerical behavior
-// - More efficient restarting mechanism
-// - Less sensitive to loss of orthogonality among Lanczos vectors
-// - Often converges faster, especially for interior eigenvalues
-
-// ### Algorithm Steps
-
-// 1. Construct an initial Lanczos factorization with m steps
-// 2. Compute the Schur decomposition of the tridiagonal matrix
-// 3. Sort the Schur form to focus on wanted eigenvalues
-// 4. Truncate the decomposition to retain only the wanted part
-// 5. Extend the truncated decomposition to continue iterations
-// 6. Repeat steps 2-5 until convergence
-// Krylov-Schur algorithm for computing eigenvalues and eigenvectors
-// Krylov-Schur algorithm for eigenvalue computation
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
                  int num_eigs, double tol, std::vector<double>& eigenvalues, 
                  std::string dir = "", bool compute_eigenvectors = false) {
@@ -4627,61 +4595,112 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
     std::cout << "Spectrum slicing solver completed successfully" << std::endl;
 }
 
-// // Diagonalization using ezARPACK
-// void arpack_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, 
-//                            int nev, bool lowest, 
-//                            std::vector<double>& eigenvalues,
-//                            std::vector<ComplexVector>* eigenvectors = nullptr) {
-
-
-//     using solver_t = ezarpack::arpack_solver<ezarpack::Symmetric, ezarpack::eigen_storage>;
-//     solver_t solver(N);
-
-
-//     auto matrix_op = [&H](solver_t::vector_const_view_t in,
-//         solver_t::vector_view_t out) {
-//         // Convert Eigen types to raw pointers for H
-//         H(reinterpret_cast<const Complex*>(in.data()), 
-//           reinterpret_cast<Complex*>(out.data()), 
-//           in.size());
-//     };
-
-//     nev = std::min(nev, N-1);
-//     // Specify parameters for the solver
-//     using params_t = solver_t::params_t;
-//     params_t params(nev,               // Number of low-lying eigenvalues
-//                     params_t::Smallest, // We want the smallest eigenvalues
-//                     true);              // Yes, we want the eigenvectors
-//                                         // (Ritz vectors) as well
+// Diagonalization using ezARPACK
+// Diagonalization using ezARPACK
+void arpack_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+                           double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                           bool compute_eigenvectors = false) {
     
-//     // Run diagonalization!
-//     solver(matrix_op, params);
-
-//     // Extract the results
-//     // Get eigenvalues and eigenvectors from the solver
-//     auto const& eigenvalues_vector = solver.eigenvalues();
-//     auto const& eigenvectors_matrix = solver.eigenvectors();
-
-//     // Copy eigenvalues to the output vector
-//     eigenvalues.resize(nev);
-//     for(int i = 0; i < nev; i++) {
-//         eigenvalues[i] = eigenvalues_vector(i);
-//     }
-
-//     // Copy eigenvectors if needed
-//     if(eigenvectors) {
-//         eigenvectors->resize(nev, ComplexVector(N));
-//         for(int i = 0; i < nev; i++) {
-//             for(int j = 0; j < N; j++) {
-//                 // With a symmetric solver, eigenvectors are real
-//                 (*eigenvectors)[i][j] = Complex(
-//                     eigenvectors_matrix(j, i),
-//                     0.0
-//                 );
-//             }
-//         }
-//     }
-// }
+    std::cout << "ARPACK diagonalization: Starting for matrix of dimension " << N << std::endl;
+    std::cout << "Computing " << exct << " eigenvalues" << std::endl;
+    
+    // Create directory for output if needed
+    std::string evec_dir = dir;
+    if (compute_eigenvectors && !dir.empty()) {
+        std::string cmd = "mkdir -p " + evec_dir;
+        system(cmd.c_str());
+    }
+    
+    // Use ezARPACK solver with Eigen storage backend
+    using solver_t = ezarpack::arpack_solver<ezarpack::Symmetric, ezarpack::eigen_storage>;
+    solver_t solver(N);
+    
+    // Wrap our matrix-vector product function to match ezARPACK's expected format
+    auto matrix_op = [&H](solver_t::vector_const_view_t in, solver_t::vector_view_t out) {
+        // Convert Eigen types to raw pointers for H
+        H(reinterpret_cast<const Complex*>(in.data()), 
+          reinterpret_cast<Complex*>(out.data()), 
+          in.size());
+    };
+    
+    // Ensure we don't request more eigenvalues than possible
+    exct = std::min(exct, N-1);
+    
+    // Specify parameters for the solver
+    using params_t = solver_t::params_t;
+    params_t params(exct,              // Number of eigenvalues to find
+                   params_t::Smallest, // Find smallest eigenvalues
+                   compute_eigenvectors);  // Whether to compute eigenvectors
+    
+    // Set additional parameters to match other solvers
+    // params.max_iterations = max_iter;
+    // params.tolerance = tol;
+    
+    // Run diagonalization
+    try {
+        solver(matrix_op, params);
+    } catch (std::exception& e) {
+        std::cerr << "ARPACK solver failed: " << e.what() << std::endl;
+        return;
+    }
+    
+    // Extract results
+    auto const& eigenvalues_vector = solver.eigenvalues();
+    
+    // Copy eigenvalues to the output vector
+    eigenvalues.resize(exct);
+    for (int i = 0; i < exct; i++) {
+        eigenvalues[i] = eigenvalues_vector(i);
+    }
+    
+    // If computing eigenvectors and a directory is provided, save to files
+    if (compute_eigenvectors && !dir.empty()) {
+        std::cout << "Saving eigenvectors to " << evec_dir << std::endl;
+        
+        auto const& eigenvectors_matrix = solver.eigenvectors();
+        
+        // Save each eigenvector
+        for (int i = 0; i < exct; i++) {
+            ComplexVector eigenvector(N);
+            for (int j = 0; j < N; j++) {
+                // With a symmetric solver, eigenvectors are real
+                eigenvector[j] = Complex(eigenvectors_matrix(j, i), 0.0);
+            }
+            
+            // Save to file
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            if (!evec_outfile) {
+                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                continue;
+            }
+            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            evec_outfile.close();
+            
+            // Print progress occasionally
+            if (i % 10 == 0 || i == exct - 1) {
+                std::cout << "  Saved eigenvector " << i + 1 << " of " << exct << std::endl;
+            }
+        }
+        
+        // Save eigenvalues to a single file
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
+        if (!eval_outfile) {
+            std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
+        } else {
+            // Write the number of eigenvalues first
+            size_t n_evals = eigenvalues.size();
+            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+            // Write all eigenvalues
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), exct * sizeof(double));
+            eval_outfile.close();
+            std::cout << "Saved " << exct << " eigenvalues to " << eigenvalue_file << std::endl;
+        }
+    }
+    
+    std::cout << "ARPACK diagonalization completed successfully" << std::endl;
+}
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //// Observables
