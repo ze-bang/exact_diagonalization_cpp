@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
             // Add other methods as needed
         }
         else if (arg.find("--eigenvalues=") == 0) {
-            params.num_eigenvalues = std::stoi(arg.substr(14));
+            params.num_eigenvalues = (1 << std::stoi(arg.substr(14)));
         }
         else if (arg == "--eigenvectors") {
             params.compute_eigenvectors = true;

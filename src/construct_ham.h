@@ -13,11 +13,6 @@
 #include <Eigen/Dense>
 #include <set>
 #include <queue>
-#include <chrono>
-#include <unordered_map>
-#include <unordered_set>
-#include <map>
-#include <mpi.h>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -229,7 +224,6 @@ private:
 
 /**
  * HamiltonianAutomorphismFinder class to find automorphisms of a Hamiltonian
- * with optimizations for larger systems
  */
 class HamiltonianAutomorphismFinder {
 public:
@@ -381,13 +375,7 @@ public:
         return true;
     }
     
-    std::vector<std::vector<int>> findAllAutomorphisms(int maxAutomorphisms = -1, int timeoutSeconds = -1) const {
-        // For large systems, use optimized methods
-        if (n_sites_ > 12) {
-            return findAutomorphismsOptimized(maxAutomorphisms, timeoutSeconds);
-        }
-        
-        // Original method for smaller systems
+    std::vector<std::vector<int>> findAllAutomorphisms() const {
         std::vector<std::vector<int>> automorphisms;
         
         // Start with identity permutation
@@ -396,7 +384,6 @@ public:
             permutation[i] = i;
         }
         int count = 0;
-        
         // Generate all permutations and check if they're automorphisms
         do {
             count++;
@@ -416,12 +403,6 @@ public:
             }
             if (isAutomorphism(permutation)) {
                 automorphisms.push_back(permutation);
-                
-                // Check if we've found enough automorphisms
-                if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
-                    std::cout << "\nReached maximum number of automorphisms: " << maxAutomorphisms << std::endl;
-                    break;
-                }
             }
         } while (std::next_permutation(permutation.begin(), permutation.end()));
         
@@ -463,308 +444,6 @@ private:
     int n_sites_;
     std::vector<Edge> edges;
     std::vector<Vertex> vertices;
-    
-    // Calculate site signatures for optimization
-    std::vector<std::string> calculateSiteSignatures() const {
-        std::vector<std::string> signatures(n_sites_);
-        
-        // Count connections and operator types for each site
-        for (int site = 0; site < n_sites_; site++) {
-            // Count edges involving this site
-            std::map<std::pair<int, int>, int> opTypeCounts; // (op_type, op_partner) -> count
-            std::map<int, double> weightSums; // op_type -> sum of weights
-            
-            for (const auto& edge : edges) {
-                if (edge.site1 == site) {
-                    opTypeCounts[{edge.op1, edge.op2}]++;
-                    weightSums[edge.op1] += std::abs(edge.weight);
-                }
-                if (edge.site2 == site) {
-                    opTypeCounts[{edge.op2, edge.op1}]++;
-                    weightSums[edge.op2] += std::abs(edge.weight);
-                }
-            }
-            
-            // Count vertex operators
-            std::map<int, double> vertexWeights; // op_type -> weight
-            for (const auto& vertex : vertices) {
-                if (vertex.site == site) {
-                    vertexWeights[vertex.op] += std::abs(vertex.weight);
-                }
-            }
-            
-            // Create a signature string encoding all this information
-            std::ostringstream ss;
-            
-            // Encode edge counts and types
-            ss << "E:";
-            for (const auto& [opPair, count] : opTypeCounts) {
-                ss << opPair.first << "-" << opPair.second << ":" << count << ",";
-            }
-            
-            // Encode weight sums
-            ss << "|W:";
-            for (const auto& [opType, sum] : weightSums) {
-                ss << opType << ":" << sum << ",";
-            }
-            
-            // Encode vertex information
-            ss << "|V:";
-            for (const auto& [opType, weight] : vertexWeights) {
-                ss << opType << ":" << weight << ",";
-            }
-            
-            signatures[site] = ss.str();
-        }
-        
-        return signatures;
-    }
-    
-    // Get equivalence classes of sites based on their signatures
-    std::vector<std::vector<int>> getSiteEquivalenceClasses() const {
-        std::vector<std::string> signatures = calculateSiteSignatures();
-        std::map<std::string, std::vector<int>> classes;
-        
-        for (int site = 0; site < n_sites_; site++) {
-            classes[signatures[site]].push_back(site);
-        }
-        
-        std::vector<std::vector<int>> result;
-        for (const auto& [sig, sites] : classes) {
-            result.push_back(sites);
-        }
-        
-        return result;
-    }
-    
-    // Check if a partial permutation is compatible with constraints so far
-    bool isPartialPermutationCompatible(const std::vector<int>& permutation, int depth) const {
-        for (int i = 0; i < depth; i++) {
-            for (int j = i + 1; j < depth; j++) {
-                // Check that connections between mapped sites are preserved
-                for (const auto& edge : edges) {
-                    if ((edge.site1 == i && edge.site2 == j) || (edge.site1 == j && edge.site2 == i)) {
-                        // There is an edge between sites i and j
-                        // Check if there's also an edge between permutation[i] and permutation[j]
-                        bool found = false;
-                        for (const auto& other_edge : edges) {
-                            if ((other_edge.site1 == permutation[i] && other_edge.site2 == permutation[j]) ||
-                                (other_edge.site1 == permutation[j] && other_edge.site2 == permutation[i])) {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found) return false;
-                    }
-                }
-            }
-        }
-        return true;
-    }
-    
-    // Find automorphisms using optimized algorithm
-    std::vector<std::vector<int>> findAutomorphismsOptimized(int maxAutomorphisms = -1, int timeoutSeconds = -1) const {
-        std::vector<std::vector<int>> automorphisms;
-        std::vector<int> permutation(n_sites_, -1);
-        std::vector<bool> used(n_sites_, false);
-        
-        // Get equivalence classes of sites
-        std::vector<std::vector<int>> equivalenceClasses = getSiteEquivalenceClasses();
-        
-        // Map from site to its equivalence class
-        std::vector<int> siteToClass(n_sites_);
-        for (size_t i = 0; i < equivalenceClasses.size(); i++) {
-            for (int site : equivalenceClasses[i]) {
-                siteToClass[site] = i;
-            }
-        }
-        
-        // Record start time for timeout
-        std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
-        
-        // Find automorphisms by backtracking
-        std::function<void(int)> backtrack = [&](int depth) {
-            // Check if we reached the end
-            if (depth == n_sites_) {
-                // Found a valid permutation, check if it's an automorphism
-                if (isAutomorphism(permutation)) {
-                    automorphisms.push_back(permutation);
-                    
-                    // Print the automorphism
-                    std::cout << "\nFound automorphism: ";
-                    for (int v : permutation) {
-                        std::cout << v << " ";
-                    }
-                    std::cout << std::endl;
-                    
-                    // Check if we've found enough automorphisms
-                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
-                        return;
-                    }
-                }
-                return;
-            }
-            
-            // Try placing different sites at the current position
-            // Only try sites in the same equivalence class
-            int currentClass = siteToClass[depth];
-            for (int site : equivalenceClasses[currentClass]) {
-                if (!used[site]) {
-                    permutation[depth] = site;
-                    used[site] = true;
-                    
-                    // Check if the partial permutation is compatible
-                    if (isPartialPermutationCompatible(permutation, depth + 1)) {
-                        backtrack(depth + 1);
-                    }
-                    
-                    used[site] = false;
-                    
-                    // Check for timeout
-                    if (timeoutSeconds > 0) {
-                        auto currentTime = std::chrono::steady_clock::now();
-                        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(currentTime - startTime).count();
-                        if (elapsed >= timeoutSeconds) {
-                            std::cout << "\nReached timeout of " << timeoutSeconds << " seconds" << std::endl;
-                            return;
-                        }
-                    }
-                    
-                    // Check if we found enough automorphisms
-                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
-                        return;
-                    }
-                }
-            }
-        };
-        
-        std::cout << "Finding automorphisms with optimized method..." << std::endl;
-        std::cout << "Found " << equivalenceClasses.size() << " equivalence classes of sites" << std::endl;
-        
-        // Search for specialized patterns first (common symmetry groups)
-        findCommonSymmetryPatterns(automorphisms, maxAutomorphisms);
-        
-        // If we didn't find anything with specialized patterns or we need more,
-        // use the general backtracking approach
-        if (automorphisms.empty() || (maxAutomorphisms > 0 && (int)automorphisms.size() < maxAutomorphisms)) {
-            backtrack(0);
-        }
-        
-        return automorphisms;
-    }
-    
-    // Find common symmetry patterns like reflections, rotations, etc.
-    void findCommonSymmetryPatterns(std::vector<std::vector<int>>& automorphisms, int maxAutomorphisms) const {
-        // Try to detect if we have a chain or ring structure
-        if (isChainStructure()) {
-            std::cout << "Detected chain structure, checking for reflection symmetry..." << std::endl;
-            
-            // Add reflection symmetry for a chain
-            std::vector<int> reflection(n_sites_);
-            for (int i = 0; i < n_sites_; i++) {
-                reflection[i] = n_sites_ - 1 - i;
-            }
-            
-            if (isAutomorphism(reflection)) {
-                automorphisms.push_back(reflection);
-                std::cout << "Found reflection symmetry" << std::endl;
-            }
-        }
-        
-        if (isRingStructure()) {
-            std::cout << "Detected ring structure, checking for rotational and reflection symmetries..." << std::endl;
-            
-            // Add rotational symmetries for a ring
-            for (int shift = 1; shift < n_sites_; shift++) {
-                std::vector<int> rotation(n_sites_);
-                for (int i = 0; i < n_sites_; i++) {
-                    rotation[i] = (i + shift) % n_sites_;
-                }
-                
-                if (isAutomorphism(rotation)) {
-                    automorphisms.push_back(rotation);
-                    std::cout << "Found rotational symmetry with shift " << shift << std::endl;
-                    
-                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
-                        return;
-                    }
-                }
-            }
-            
-            // Add reflection symmetries for a ring
-            for (int axis = 0; axis < n_sites_; axis++) {
-                std::vector<int> reflection(n_sites_);
-                for (int i = 0; i < n_sites_; i++) {
-                    reflection[i] = (2 * axis - i + n_sites_) % n_sites_;
-                }
-                
-                if (isAutomorphism(reflection)) {
-                    automorphisms.push_back(reflection);
-                    std::cout << "Found reflection symmetry around axis " << axis << std::endl;
-                    
-                    if (maxAutomorphisms > 0 && (int)automorphisms.size() >= maxAutomorphisms) {
-                        return;
-                    }
-                }
-            }
-        }
-        
-        // Check for hypercube structure (for n_sites = 2^d)
-        if (isPowerOfTwo(n_sites_)) {
-            std::cout << "Detected possible hypercube structure, checking for symmetries..." << std::endl;
-            // Try symmetries that swap dimensions or reflect along axes
-            // This is complex and would be custom for specific hypercube arrangements
-        }
-    }
-    
-    // Detect if the system is a chain structure
-    bool isChainStructure() const {
-        // Count connections for each site
-        std::vector<int> connectionCount(n_sites_, 0);
-        
-        for (const auto& edge : edges) {
-            if (edge.site1 != edge.site2) {  // Exclude self-connections
-                connectionCount[edge.site1]++;
-                connectionCount[edge.site2]++;
-            }
-        }
-        
-        // Check if it looks like a chain (most sites have 2 connections, ends have 1)
-        int endCount = 0;
-        int middleCount = 0;
-        
-        for (int count : connectionCount) {
-            if (count == 1) endCount++;
-            else if (count == 2) middleCount++;
-        }
-        
-        return (endCount == 2 && middleCount == n_sites_ - 2);
-    }
-    
-    // Detect if the system is a ring structure
-    bool isRingStructure() const {
-        // Count connections for each site
-        std::vector<int> connectionCount(n_sites_, 0);
-        
-        for (const auto& edge : edges) {
-            if (edge.site1 != edge.site2) {  // Exclude self-connections
-                connectionCount[edge.site1]++;
-                connectionCount[edge.site2]++;
-            }
-        }
-        
-        // Check if all sites have exactly 2 connections
-        for (int count : connectionCount) {
-            if (count != 2) return false;
-        }
-        
-        return true;
-    }
-    
-    // Check if a number is a power of 2
-    bool isPowerOfTwo(int n) const {
-        return n > 0 && (n & (n - 1)) == 0;
-    }
 };
 
 /**
@@ -786,13 +465,12 @@ std::vector<std::vector<int>> generateHamiltonianAutomorphisms(
 
 /**
  * AutomorphismCliqueAnalyzer class for finding and visualizing compatible automorphisms
- * Optimized for larger systems
  */
 class AutomorphismCliqueAnalyzer {
 public:
     AutomorphismCliqueAnalyzer() {}
     
-    // Check if two permutations commute (optimized)
+    // Check if two permutations commute
     bool doPermutationsCommute(const std::vector<int>& perm1, const std::vector<int>& perm2) const {
         if (perm1.size() != perm2.size()) {
             throw std::invalid_argument("Permutations must have the same size");
@@ -808,22 +486,17 @@ public:
         return true;
     }
     
-    // Find the maximum clique using Bron-Kerbosch algorithm with pivoting and optimizations
+    // Find the maximum clique using Bron-Kerbosch algorithm
     std::vector<int> findMaximumClique(const std::vector<std::vector<int>>& automorphisms) {
-        // Build the graph using adjacency list (more efficient for sparse graphs)
+        // Build the graph
         int n = automorphisms.size();
-        std::vector<std::unordered_set<int>> graph(n);
+        std::vector<std::vector<int>> graph(n);
         
-        // Pre-compute and cache permutation data for larger systems
-        #pragma omp parallel for schedule(dynamic) if(n > 100)
         for (int i = 0; i < n; ++i) {
             for (int j = i + 1; j < n; ++j) {
                 if (doPermutationsCommute(automorphisms[i], automorphisms[j])) {
-                    #pragma omp critical
-                    {
-                        graph[i].insert(j);
-                        graph[j].insert(i);
-                    }
+                    graph[i].push_back(j);
+                    graph[j].push_back(i);
                 }
             }
         }
@@ -831,16 +504,16 @@ public:
         // Initialize variables for Bron-Kerbosch
         std::vector<int> maxClique;
         std::vector<int> currentClique;
-        std::unordered_set<int> candidates;
-        std::unordered_set<int> excluded;
+        std::vector<int> candidates(n);
+        std::vector<int> excluded;
         
         // Initialize candidates
         for (int i = 0; i < n; ++i) {
-            candidates.insert(i);
+            candidates[i] = i;
         }
         
-        // Run optimized Bron-Kerbosch with pivoting
-        bronKerboschWithPivot(graph, currentClique, candidates, excluded, maxClique);
+        // Run Bron-Kerbosch without pivoting
+        bronKerbosch(graph, currentClique, candidates, excluded, maxClique);
         
         return maxClique;
     }
@@ -856,54 +529,35 @@ public:
             throw std::runtime_error("Could not open file for writing: " + filename+"/automorphism_graph.dot");
         }
         
-        int n = automorphisms.size();
         file << "graph AutomorphismGraph {\n";
         file << "  node [shape=box];\n";
         
         // Add nodes (automorphisms)
-        for (int i = 0; i < n; ++i) {
+        for (size_t i = 0; i < automorphisms.size(); ++i) {
             file << "  A" << i << " [label=\"" << finder.permutationToCycleNotation(automorphisms[i]) << "\"];\n";
         }
         
-        // Add edges (commuting relationships) - process in batches for large graphs
-        const int BATCH_SIZE = 1000;
-        int total_edges = 0;
-        
-        for (int i = 0; i < n; ++i) {
-            for (int j = i + 1; j < n; ++j) {
+        // Add edges (commuting relationships)
+        for (size_t i = 0; i < automorphisms.size(); ++i) {
+            for (size_t j = i + 1; j < automorphisms.size(); ++j) {
                 if (doPermutationsCommute(automorphisms[i], automorphisms[j])) {
                     file << "  A" << i << " -- A" << j << ";\n";
-                    total_edges++;
-                    
-                    // Flush to file periodically for very large graphs
-                    if (total_edges % BATCH_SIZE == 0) {
-                        file.flush();
-                    }
                 }
             }
         }
         
         file << "}\n";
         
-        // For large graphs, consider using a simpler visualization
-        if (n > 100) {
-            std::cout << "Large automorphism graph with " << n << " nodes and " << total_edges << " edges." << std::endl;
-            std::cout << "Consider using a specialized graph viewer for better performance." << std::endl;
-        }
-        
         std::cout << "Generated automorphism graph: " << filename+"/automorphism_graph.dot" << std::endl;
         std::cout << "Visualize with: dot -Tpng " << filename+"/automorphism_graph.dot" << " -o " << filename+"/automorphism_graph.png" << std::endl;
     }
     
-    // Highlight a clique in the graph (optimized for larger systems)
+    // Highlight a clique in the graph
     void visualizeClique(
         const std::vector<std::vector<int>>& automorphisms,
         const std::vector<int>& clique,
         const std::string& filename,
         const HamiltonianAutomorphismFinder& finder) {
-        
-        // For very large systems, create a simplified visualization showing only the clique
-        bool simplified = automorphisms.size() > 200;
         
         std::ofstream file(filename);
         if (!file.is_open()) {
@@ -914,14 +568,10 @@ public:
         file << "  node [shape=box];\n";
         
         // Create a set for fast lookup of clique members
-        std::unordered_set<int> cliqueSet(clique.begin(), clique.end());
+        std::set<int> cliqueSet(clique.begin(), clique.end());
         
         // Add nodes (automorphisms)
         for (size_t i = 0; i < automorphisms.size(); ++i) {
-            if (simplified && cliqueSet.find(i) == cliqueSet.end()) {
-                continue; // Skip non-clique nodes in simplified view
-            }
-            
             if (cliqueSet.find(i) != cliqueSet.end()) {
                 // Node is part of the maximum clique
                 file << "  A" << i << " [label=\"" << finder.permutationToCycleNotation(automorphisms[i]) 
@@ -932,24 +582,15 @@ public:
         }
         
         // Add edges (commuting relationships)
-        if (!simplified) {
-            for (size_t i = 0; i < automorphisms.size(); ++i) {
-                for (size_t j = i + 1; j < automorphisms.size(); ++j) {
-                    if (doPermutationsCommute(automorphisms[i], automorphisms[j])) {
-                        if (cliqueSet.find(i) != cliqueSet.end() && cliqueSet.find(j) != cliqueSet.end()) {
-                            // Edge is part of the maximum clique
-                            file << "  A" << i << " -- A" << j << " [color=blue, penwidth=2];\n";
-                        } else {
-                            file << "  A" << i << " -- A" << j << ";\n";
-                        }
+        for (size_t i = 0; i < automorphisms.size(); ++i) {
+            for (size_t j = i + 1; j < automorphisms.size(); ++j) {
+                if (doPermutationsCommute(automorphisms[i], automorphisms[j])) {
+                    if (cliqueSet.find(i) != cliqueSet.end() && cliqueSet.find(j) != cliqueSet.end()) {
+                        // Edge is part of the maximum clique
+                        file << "  A" << i << " -- A" << j << " [color=blue, penwidth=2];\n";
+                    } else {
+                        file << "  A" << i << " -- A" << j << ";\n";
                     }
-                }
-            }
-        } else {
-            // In simplified view, only show edges within the clique
-            for (size_t i = 0; i < clique.size(); ++i) {
-                for (size_t j = i + 1; j < clique.size(); ++j) {
-                    file << "  A" << clique[i] << " -- A" << clique[j] << " [color=blue, penwidth=2];\n";
                 }
             }
         }
@@ -961,38 +602,25 @@ public:
     }
     
     void saveGraphImage(const std::string& outputFile, const std::string& dotFile) {
-        // For large graphs, use neato layout instead of dot
-        std::string command = "dot -Tpng -Gsize=20,20! -Gdpi=300 " + dotFile + " -o " + outputFile;
+        std::string command = "dot -Tpng " + dotFile + " -o " + outputFile;
         int result = system(command.c_str());
         
         if (result != 0) {
-            std::cerr << "Failed to generate graph image. Trying alternative layout..." << std::endl;
-            // Try with neato for better handling of large graphs
-            command = "neato -Tpng -Gsize=20,20! -Gdpi=300 " + dotFile + " -o " + outputFile;
-            result = system(command.c_str());
-            
-            if (result != 0) {
-                std::cerr << "Failed to generate graph image. Make sure GraphViz is installed." << std::endl;
-                return;
-            }
+            std::cerr << "Failed to generate graph image. Make sure GraphViz is installed." << std::endl;
+            return;
         }
         
         std::cout << "Generated graph image: " << outputFile << std::endl;
     }
     
 private:
-    // Bron-Kerbosch algorithm with pivoting
-    void bronKerboschWithPivot(
-        const std::vector<std::unordered_set<int>>& graph,
+    // Bron-Kerbosch algorithm without pivoting
+    void bronKerbosch(
+        const std::vector<std::vector<int>>& graph,
         std::vector<int>& currentClique,
-        std::unordered_set<int>& candidates,
-        std::unordered_set<int>& excluded,
+        std::vector<int> candidates,
+        std::vector<int> excluded,
         std::vector<int>& maxClique) {
-        
-        // Early termination: if we can't possibly beat the max clique, return
-        if (currentClique.size() + candidates.size() <= maxClique.size()) {
-            return;
-        }
         
         if (candidates.empty() && excluded.empty()) {
             // Found a maximal clique
@@ -1002,178 +630,60 @@ private:
             return;
         }
         
-        // Choose a pivot vertex from candidates ∪ excluded
-        int pivot = choosePivot(graph, candidates, excluded);
-        
-        // Make a copy of candidates to iterate through
-        std::vector<int> candidates_vec(candidates.begin(), candidates.end());
-        
-        // Consider each vertex not connected to the pivot
-        for (int v : candidates_vec) {
-            // Skip if v is connected to pivot
-            if (pivot != -1 && graph[pivot].find(v) != graph[pivot].end()) {
-                continue;
-            }
-            
+        std::vector<int> candidates_copy = candidates;
+        for (int v : candidates_copy) {
             // Add v to current clique
             currentClique.push_back(v);
-            candidates.erase(v);
             
             // Create new candidates and excluded sets
-            std::unordered_set<int> new_candidates;
-            std::unordered_set<int> new_excluded;
+            std::vector<int> new_candidates;
+            std::vector<int> new_excluded;
             
-            // Intersect with neighbors of v (optimized)
+            // Intersect candidates with neighbors of v
             for (int u : candidates) {
-                if (graph[v].find(u) != graph[v].end()) {
-                    new_candidates.insert(u);
+                if (u != v && std::find(graph[v].begin(), graph[v].end(), u) != graph[v].end()) {
+                    new_candidates.push_back(u);
                 }
             }
             
+            // Intersect excluded with neighbors of v
             for (int u : excluded) {
-                if (graph[v].find(u) != graph[v].end()) {
-                    new_excluded.insert(u);
+                if (std::find(graph[v].begin(), graph[v].end(), u) != graph[v].end()) {
+                    new_excluded.push_back(u);
                 }
             }
             
             // Recursive call
-            bronKerboschWithPivot(graph, currentClique, new_candidates, new_excluded, maxClique);
+            bronKerbosch(graph, currentClique, new_candidates, new_excluded, maxClique);
             
             // Remove v from current clique
             currentClique.pop_back();
             
             // Move v from candidates to excluded
-            excluded.insert(v);
+            candidates.erase(std::remove(candidates.begin(), candidates.end(), v), candidates.end());
+            excluded.push_back(v);
         }
-    }
-    
-    // Choose a pivot vertex to maximize pruning
-    int choosePivot(
-        const std::vector<std::unordered_set<int>>& graph,
-        const std::unordered_set<int>& candidates,
-        const std::unordered_set<int>& excluded) {
-        
-        if (candidates.empty() && excluded.empty()) {
-            return -1;
-        }
-        
-        int pivot = -1;
-        int max_connections = -1;
-        
-        // Try to find pivot from candidates first
-        for (int v : candidates) {
-            int connections = 0;
-            for (int u : candidates) {
-                if (u != v && graph[v].find(u) != graph[v].end()) {
-                    connections++;
-                }
-            }
-            
-            if (connections > max_connections) {
-                max_connections = connections;
-                pivot = v;
-            }
-        }
-        
-        // If no good candidate, try excluded
-        if (pivot == -1) {
-            for (int v : excluded) {
-                int connections = 0;
-                for (int u : candidates) {
-                    if (graph[v].find(u) != graph[v].end()) {
-                        connections++;
-                    }
-                }
-                
-                if (connections > max_connections) {
-                    max_connections = connections;
-                    pivot = v;
-                }
-            }
-        }
-        
-        return pivot;
     }
 };
 
 /**
- * MinimalGeneratorFinder class to find a minimal set of generators for a group of automorphisms
+ * MinimalGeneratorFinder class to find the minimal set of generators for a group of automorphisms
  */
 class MinimalGeneratorFinder {
 public:
-    // Find minimal generators for a set of automorphisms
-    std::pair<std::vector<std::vector<int>>, std::vector<int>> findMinimalGenerators(
-        const std::vector<std::vector<int>>& automorphisms) {
-        
-        if (automorphisms.empty()) {
-            return {{}, {}};
+    // Compose two permutations: result(i) = perm1(perm2[i])
+    std::vector<int> composePermutations(
+        const std::vector<int>& perm1, 
+        const std::vector<int>& perm2) {
+        std::vector<int> result(perm1.size());
+        for (size_t i = 0; i < perm1.size(); ++i) {
+            result[i] = perm1[perm2[i]];
         }
-        
-        // Create a group from the automorphisms
-        std::vector<std::vector<int>> group = automorphisms;
-        
-        // Ensure the identity permutation is in the group
-        int n_sites = automorphisms[0].size();
-        std::vector<int> identity(n_sites);
-        for (int i = 0; i < n_sites; ++i) {
-            identity[i] = i;
-        }
-        
-        // Check if identity is already in the group
-        bool hasIdentity = false;
-        for (const auto& perm : group) {
-            if (perm == identity) {
-                hasIdentity = true;
-                break;
-            }
-        }
-        
-        if (!hasIdentity) {
-            group.push_back(identity);
-        }
-        
-        // Find minimal generators
-        std::vector<std::vector<int>> generators;
-        std::vector<int> orders;  // Order of each generator
-        
-        for (const auto& perm : group) {
-            // Skip identity
-            if (perm == identity) {
-                continue;
-            }
-            
-            // Check if current permutation can be generated by existing generators
-            if (!canBeGenerated(perm, generators)) {
-                generators.push_back(perm);
-                orders.push_back(findOrder(perm));
-            }
-        }
-        
-        // Remove redundant generators
-        removeRedundantGenerators(generators, orders);
-        
-        return {generators, orders};
-    }
-    
-    // Compose two permutations: result = p2 ∘ p1 (apply p1, then p2)
-    std::vector<int> composePermutations(const std::vector<int>& p1, const std::vector<int>& p2) const {
-        if (p1.size() != p2.size()) {
-            throw std::invalid_argument("Permutations must have the same size");
-        }
-        
-        std::vector<int> result(p1.size());
-        for (size_t i = 0; i < p1.size(); ++i) {
-            if (p1[i] >= static_cast<int>(p2.size())) {
-                throw std::out_of_range("Permutation index out of range");
-            }
-            result[i] = p2[p1[i]];
-        }
-        
         return result;
     }
     
     // Find the inverse of a permutation
-    std::vector<int> inversePermutation(const std::vector<int>& perm) const {
+    std::vector<int> inversePermutation(const std::vector<int>& perm) {
         std::vector<int> inverse(perm.size());
         for (size_t i = 0; i < perm.size(); ++i) {
             inverse[perm[i]] = i;
@@ -1181,121 +691,117 @@ public:
         return inverse;
     }
     
-private:
-    // Check if a permutation can be generated by a set of generators
-    bool canBeGenerated(const std::vector<int>& perm, 
-                        const std::vector<std::vector<int>>& generators) const {
-        if (generators.empty()) {
-            return false;
-        }
-        
-        int n_sites = perm.size();
-        
-        // Generate identity permutation
-        std::vector<int> identity(n_sites);
-        for (int i = 0; i < n_sites; ++i) {
+    // Find the order of a permutation
+    int findOrder(const std::vector<int>& perm) {
+        // Create identity permutation
+        std::vector<int> identity(perm.size());
+        for (size_t i = 0; i < perm.size(); ++i) {
             identity[i] = i;
         }
         
-        // If the permutation is identity, it's trivially generated
-        if (perm == identity) {
-            return true;
-        }
-        
-        // Use BFS to explore all permutations that can be generated
-        std::queue<std::vector<int>> queue;
-        std::set<std::vector<int>> visited;
-        
-        queue.push(identity);
-        visited.insert(identity);
-        
-        while (!queue.empty()) {
-            std::vector<int> current = queue.front();
-            queue.pop();
-            
-            // Try applying each generator and its inverse
-            for (const auto& gen : generators) {
-                // Apply generator
-                std::vector<int> next = composePermutations(current, gen);
-                if (next == perm) {
-                    return true;
-                }
-                
-                if (visited.find(next) == visited.end()) {
-                    visited.insert(next);
-                    queue.push(next);
-                }
-                
-                // Apply inverse of generator
-                std::vector<int> genInv = inversePermutation(gen);
-                next = composePermutations(current, genInv);
-                if (next == perm) {
-                    return true;
-                }
-                
-                if (visited.find(next) == visited.end()) {
-                    visited.insert(next);
-                    queue.push(next);
-                }
-            }
-        }
-        
-        return false;
-    }
-    
-    // Find the order of a permutation (smallest n such that perm^n = identity)
-    int findOrder(const std::vector<int>& perm) const {
-        int n_sites = perm.size();
-        
-        // Generate identity permutation
-        std::vector<int> identity(n_sites);
-        for (int i = 0; i < n_sites; ++i) {
-            identity[i] = i;
-        }
-        
-        // If the permutation is already identity, order is 1
-        if (perm == identity) {
-            return 1;
-        }
-        
+        // Create a working copy of the permutation
         std::vector<int> current = perm;
         int order = 1;
         
-        // Apply the permutation repeatedly until we get back to identity
+        // Keep composing with itself until we get the identity
         while (current != identity) {
             current = composePermutations(current, perm);
             order++;
-            
-            // Safety check to avoid infinite loops
-            if (order > 1000) {
-                throw std::runtime_error("Failed to find permutation order (exceeded 1000 iterations)");
-            }
         }
         
         return order;
     }
     
-    // Remove redundant generators
-    void removeRedundantGenerators(std::vector<std::vector<int>>& generators, 
-                                std::vector<int>& orders) const {
-        if (generators.empty()) {
-            return;
+    // Find minimal generators and their orders
+    std::pair<std::vector<std::vector<int>>, std::vector<int>> findMinimalGenerators(
+        const std::vector<std::vector<int>>& automorphisms) {
+        if (automorphisms.empty()) {
+            return {std::vector<std::vector<int>>(), std::vector<int>()};
         }
         
-        for (size_t i = 0; i < generators.size(); ++i) {
-            // Try to generate this generator using all others
-            std::vector<std::vector<int>> testSet = generators;
-            testSet.erase(testSet.begin() + i);
+        // Create identity permutation
+        std::vector<int> identity(automorphisms[0].size());
+        for (size_t i = 0; i < identity.size(); ++i) {
+            identity[i] = i;
+        }
+        
+        // Make a copy and ensure the identity is included
+        std::set<std::vector<int>> unique_autos(automorphisms.begin(), automorphisms.end());
+        unique_autos.insert(identity);
+        
+        // Convert back to vector and sort for deterministic results
+        std::vector<std::vector<int>> sorted_autos(unique_autos.begin(), unique_autos.end());
+        std::sort(sorted_autos.begin(), sorted_autos.end());
+        
+        // Store the generators and their orders
+        std::vector<std::vector<int>> generators;
+        std::vector<int> orders;
+        
+        // Set of all elements in the generated subgroup
+        std::set<std::vector<int>> generated_elements;
+        generated_elements.insert(identity);
+        
+        // Try each automorphism as a potential generator
+        for (const auto& automorphism : sorted_autos) {
+            // Skip the identity
+            if (automorphism == identity) continue;
             
-            if (canBeGenerated(generators[i], testSet)) {
-                // This generator is redundant, remove it
-                generators.erase(generators.begin() + i);
-                orders.erase(orders.begin() + i);
-                i--; // Adjust index
+            // Skip if we can already generate this automorphism
+            if (generated_elements.find(automorphism) != generated_elements.end()) continue;
+            
+            // Add this automorphism as a generator
+            generators.push_back(automorphism);
+            int order = findOrder(automorphism);
+            orders.push_back(order);
+            
+            // Generate all elements in the subgroup
+            generateSubgroup(generators, generated_elements);
+            
+            // If we've generated the entire group, we're done
+            if (generated_elements.size() == unique_autos.size()) {
+                break;
+            }
+        }
+        
+        return {generators, orders};
+    }
+    
+private:
+    // Helper method to generate the subgroup from a set of generators
+    void generateSubgroup(
+        const std::vector<std::vector<int>>& generators,
+        std::set<std::vector<int>>& generated_elements) {
+        
+        // Start with the identity
+        std::vector<int> identity(generators[0].size());
+        for (size_t i = 0; i < identity.size(); ++i) {
+            identity[i] = i;
+        }
+        
+        generated_elements.clear();
+        generated_elements.insert(identity);
+        
+        // Keep adding new elements until no more can be added
+        size_t old_size = 0;
+        while (old_size < generated_elements.size()) {
+            old_size = generated_elements.size();
+            
+            // Try composing each element with each generator
+            std::vector<std::vector<int>> existing(generated_elements.begin(), generated_elements.end());
+            for (const auto& elem : existing) {
+                for (const auto& gen : generators) {
+                    // Compose in both orders
+                    std::vector<int> composed1 = composePermutations(elem, gen);
+                    std::vector<int> composed2 = composePermutations(gen, elem);
+                    
+                    generated_elements.insert(composed1);
+                    generated_elements.insert(composed2);
+                }
             }
         }
     }
 };
+
 
 /**
  * Represents automorphisms as powers of generators
@@ -1509,23 +1015,9 @@ public:
     }
     
     void generateSymmetrizedBasis(const std::string& dir) {
-        // Initialize MPI
-        int mpi_rank, mpi_size;
-        MPI_Init(NULL, NULL);
-        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-        MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
-        
-        if (mpi_rank == 0) {
-            std::cout << "Initializing with " << mpi_size << " MPI processes" << std::endl;
-        }
-        
         std::ifstream trans_file(dir + "/Trans.dat");
         if (!trans_file.is_open()) {
-            if (mpi_rank == 0) {
-                std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
-            }
-            MPI_Finalize();
-            return;
+            std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
         }
 
         // Skip the first line
@@ -1542,49 +1034,35 @@ public:
         const std::string dot_file = dir + "/hamiltonian.dot";
         const std::string png_file = dir + "/hamiltonian.png";
         
-        // Only rank 0 does visualization
-        if (mpi_rank == 0) {
-            // Create HamiltonianVisualizer instance
-            std::cout << "Initializing HamiltonianVisualizer...\n";
-            HamiltonianVisualizer visualizer(num_site);
-            
-            // Load edges and vertices
-            std::cout << "Loading interactions and site operators...\n";
-            visualizer.loadEdgesFromFile(interactions_file);
-            visualizer.loadVerticesFromFile(site_ops_file);
-            
-            // Generate DOT file
-            std::cout << "Generating DOT file...\n";
-            visualizer.generateDotFile(dot_file);
-            
-            // Generate PNG image
-            std::cout << "Generating PNG image...\n";
-            visualizer.saveGraphImage(png_file, dot_file);
-            
-            std::cout << "Visualization complete.\n";
-            std::cout << "DOT file: " << dot_file << std::endl;
-            std::cout << "PNG file: " << png_file << std::endl;
-        }
         
-        // Create directory for symmetrized basis (only by rank 0)
-        std::string sym_basis_dir = dir + "/sym_basis";
-        if (mpi_rank == 0) {
-            std::string mkdir_command = "mkdir -p " + sym_basis_dir;
-            system(mkdir_command.c_str());
-        }
         
-        // Make sure all processes wait until directory is created
-        MPI_Barrier(MPI_COMM_WORLD);
+        // Create HamiltonianVisualizer instance
+        std::cout << "Initializing HamiltonianVisualizer...\n";
+        HamiltonianVisualizer visualizer(num_site);
+        
+        // Load edges and vertices
+        std::cout << "Loading interactions and site operators...\n";
+        visualizer.loadEdgesFromFile(interactions_file);
+        visualizer.loadVerticesFromFile(site_ops_file);
+        
+        // Generate DOT file
+        std::cout << "Generating DOT file...\n";
+        visualizer.generateDotFile(dot_file);
+        
+        // Generate PNG image
+        std::cout << "Generating PNG image...\n";
+        visualizer.saveGraphImage(png_file, dot_file);
+        
+        std::cout << "Visualization complete.\n";
+        std::cout << "DOT file: " << dot_file << std::endl;
+        std::cout << "PNG file: " << png_file << std::endl;
 
-        // All processes need to find automorphisms
         HamiltonianAutomorphismFinder finder(num_site);
         finder.loadEdgesFromFile(interactions_file);
         finder.loadVerticesFromFile(site_ops_file);
 
         std::vector<std::vector<int>> automorphism_groups = finder.findAllAutomorphisms();
-        if (mpi_rank == 0) {
-            std::cout << "Found " << automorphism_groups.size() << " automorphisms.\n";
-        }
+        std::cout << "Found " << automorphism_groups.size() << " automorphisms.\n";
 
         AutomorphismCliqueAnalyzer analyzer;
         auto cliques = analyzer.findMaximumClique(automorphism_groups);
@@ -1592,35 +1070,46 @@ public:
         for (const auto& clique : cliques) {
             max_clique_here.push_back(automorphism_groups[clique]);
         }
-        
-        if (mpi_rank == 0) {
-            std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
-            analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
-        }
+        std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
+        // std::cout << "Maximum clique:\n";
+        // for (const auto& clique : max_clique_here) {
+        //     std::cout << "Clique: ";
+        //     for (int index : clique) {
+        //         std::cout << index << " ";
+        //     }
+        //     std::cout << std::endl;
+        // }
+
+        analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
+
         
         MinimalGeneratorFinder minimal_finder;
         std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
         
-        if (mpi_rank == 0) {
-            std::cout << "Minimal generators:\n";
-            int count_temp = 0;
-            for (const auto& generator : minimal_generators.first) {
-                std::cout << "Generator: ";
-                for (int index : generator) {
-                    std::cout << index << " ";
-                }
-                std::cout << "with order: ";
-                std::cout << minimal_generators.second[count_temp] << " ";
-                count_temp++;
-                std::cout << std::endl;
+        std::cout << "Minimal generators:\n";
+        int count_temp = 0;
+        for (const auto& generator : minimal_generators.first) {
+            std::cout << "Generator: ";
+            for (int index : generator) {
+                std::cout << index << " ";
             }
+            std::cout << "with order: ";
+            std::cout << minimal_generators.second[count_temp] << " ";
+            count_temp++;
+            std::cout << std::endl;
         }
 
         AutomorphismPowerRepresentation automorphism_power_representation;
         std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
-        if (mpi_rank == 0) {
-            std::cout << "Power representation generated.\n";
-        }
+        std::cout << "Power representation generated.\n";
+        // std::cout << "Power representation:\n";
+        // for (const auto& powers : power_representation) {
+        //     for (int power : powers) {
+        //         std::cout << power << " ";
+        //     }
+        //     std::cout << std::endl;
+        // }
+        std::cout << "Symmetrized Hamiltonain generated.\n";
         
         // Generate all possible combinations of quantum numbers
         std::vector<std::vector<int>> all_quantum_numbers;
@@ -1640,52 +1129,31 @@ public:
 
         generate_quantum_numbers(0);
 
-        if (mpi_rank == 0) {
-            std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
-        }
+        std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
 
-        // Size of each symmetry block in the Hamiltonian
+        // Create a directory for the symmetrized basis states
+        std::string sym_basis_dir = dir + "/sym_basis";
+        std::string mkdir_command = "mkdir -p " + sym_basis_dir;
+        system(mkdir_command.c_str());
+        std::vector<std::vector<Complex>> unique_sym_basis;
+
+        // Create a filename based on the quantum numbers
+        std::string filename = sym_basis_dir + "/sym_basis";
+
         symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
-        
-        // Total basis vector counter across all symmetry sectors
-        int total_vectors_count = 0;
-        
-        // Total number of basis states
-        size_t total_basis_states = 1 << n_bits_;
-        
-        // Process each symmetry sector (combination of quantum numbers)
-        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); sector_idx++) {
-            const auto& e_i = all_quantum_numbers[sector_idx];
-            if (mpi_rank == 0) {
-                std::cout << "Processing symmetry sector " << sector_idx + 1 << "/" << all_quantum_numbers.size() << std::endl;
-            }
+        int count = 0;
+        // For each symmetry sector (combination of quantum numbers)
+        for (const auto& e_i : all_quantum_numbers) {            
             
-            // Store basis vectors in memory for this sector (local to each process)
-            std::vector<std::vector<Complex>> local_sector_basis_vectors;
+
+            // Total number of basis states in the Hilbert space
+            size_t total_basis_states = 1 << n_bits_;
             
-            // Distribute basis states among MPI processes
-            size_t local_start = (total_basis_states * mpi_rank) / mpi_size;
-            size_t local_end = (total_basis_states * (mpi_rank + 1)) / mpi_size;
-            
-            if (mpi_rank == 0) {
-                std::cout << "Each MPI process will handle approximately " 
-                          << (total_basis_states / mpi_size) << " basis states" << std::endl;
-            }
-            
-            // Process assigned basis states
-            for (size_t basis = local_start; basis < local_end; basis++) {
-                // Show progress periodically (only on rank 0)
-                if (mpi_rank == 0 && (basis % 1000 == 0 || basis == local_start)) {
-                    std::cout << "\rProcess " << mpi_rank << " processing basis state: " 
-                              << basis - local_start << "/" << local_end - local_start << std::flush;
-                }
-                
+            // For each standard basis state
+            for (size_t basis = 0; basis < total_basis_states; basis++) {
                 // Generate the symmetrized basis vector for this state
-                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, 
-                                                             power_representation, 
-                                                             minimal_generators.second, e_i);
-                
-                // Check if this symmetrized basis vector is zero
+                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+                // Check if this symmetrized basis vector is zero (can happen in some symmetry sectors)
                 double norm_squared = 0.0;
                 for (const auto& val : sym_basis_vec) {
                     norm_squared += std::norm(val);
@@ -1695,131 +1163,50 @@ public:
                     continue; // Skip zero vectors
                 }
                 
-                // Check if this vector is unique compared to existing local ones
+                // Check if this symmetrized basis vector is already in our collection
                 bool is_unique = true;
-                
-                for (const auto& existing_vec : local_sector_basis_vectors) {
+                for (const auto& existing_vec : unique_sym_basis) {
                     // Calculate overlap between the vectors
                     Complex overlap(0.0, 0.0);
                     for (size_t i = 0; i < total_basis_states; i++) {
                         overlap += std::conj(existing_vec[i]) * sym_basis_vec[i];
                     }
                     
-                    // If overlap is close to 1, vectors are the same up to a global phase
-                    if (std::abs(std::abs(overlap) - 1.0) < 1e-8) {
+                    // If the absolute value of the overlap is close to 1, the vectors
+                    // are the same up to a global phase factor exp(i*θ)
+                    if (std::abs(std::abs(overlap) - 1.0) < 1e-10) {
                         is_unique = false;
                         break;
                     }
                 }
                 
-                // If the vector is unique, add it to our local collection
+                // If the symmetrized basis vector is unique, add it to our collection
                 if (is_unique) {
-                    local_sector_basis_vectors.push_back(sym_basis_vec);
+                    unique_sym_basis.push_back(sym_basis_vec);
+                    symmetrized_block_ham_sizes[count]++;
                 }
             }
-            
-            if (mpi_rank == 0) {
-                std::cout << std::endl;
-            }
-            
-            // Gather the number of vectors from each process
-            int local_count = local_sector_basis_vectors.size();
-            std::vector<int> all_counts(mpi_size);
-            
-            MPI_Gather(&local_count, 1, MPI_INT, all_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
-            
-            // Calculate displacements for receive buffer
-            std::vector<int> displacements(mpi_size, 0);
-            if (mpi_rank == 0) {
-                for (int i = 1; i < mpi_size; i++) {
-                    displacements[i] = displacements[i-1] + all_counts[i-1];
-                }
-            }
-            
-            // Gather total number of vectors for this sector
-            int sector_total_vectors = 0;
-            if (mpi_rank == 0) {
-                for (int count : all_counts) {
-                    sector_total_vectors += count;
-                }
-                symmetrized_block_ham_sizes[sector_idx] = sector_total_vectors;
-            }
-            
-            // Broadcast the total vectors for this sector so all processes know the size
-            MPI_Bcast(&sector_total_vectors, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            
-            // Writing vectors to disk - each process writes its own vectors
-            int sector_vectors_start = total_vectors_count;
-            
-            // First broadcast the starting index to all processes
-            MPI_Bcast(&sector_vectors_start, 1, MPI_INT, 0, MPI_COMM_WORLD);
-            
-            // Calculate local offset for this process
-            int local_offset = sector_vectors_start;
-            for (int i = 0; i < mpi_rank; i++) {
-                local_offset += all_counts[i];
-            }
-            
-            if (mpi_rank == 0) {
-                std::cout << "Writing " << sector_total_vectors << " basis vectors for sector " << sector_idx << std::endl;
-            }
-            
-            // Each process writes its own vectors
-            for (size_t i = 0; i < local_sector_basis_vectors.size(); i++) {
-                const auto& sym_basis_vec = local_sector_basis_vectors[i];
-                std::string filename = sym_basis_dir + "/sym_basis" + std::to_string(local_offset + i) + ".dat";
-                
-                std::ofstream output_file(filename);
-                if (!output_file.is_open()) {
-                    std::cerr << "Process " << mpi_rank << " failed to open file: " << filename << std::endl;
-                    continue;
-                }
-                
-                // Only write non-zero elements to save space
-                for (size_t j = 0; j < total_basis_states; j++) {
-                    if (std::abs(sym_basis_vec[j]) > 1e-8) {
-                        output_file << j << " " << sym_basis_vec[j].real() << " " << sym_basis_vec[j].imag() << std::endl;
-                    }
-                }
-                output_file.close();
-            }
-            
-            // Update the total vector count
-            total_vectors_count += sector_total_vectors;
-            
-            // Clear memory for the next sector
-            local_sector_basis_vectors.clear();
-            local_sector_basis_vectors.shrink_to_fit();
-            
-            // Make sure all processes are done writing files before continuing
-            MPI_Barrier(MPI_COMM_WORLD);
+            count++;
         }
         
-        // Only process 0 writes summary information
-        if (mpi_rank == 0) {
-            // Write the number of unique basis vectors
-            std::cout << "Number of unique symmetrized basis vectors: " << total_vectors_count << std::endl;
-            std::cout << "Block sizes: ";
-            for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
-                std::cout << symmetrized_block_ham_sizes[i] << " ";
-            }
-            std::cout << std::endl;
-            
-            // Write the block sizes to a file for later reference
-            std::string block_info_file = dir + "/sym_block_sizes.dat";
-            std::ofstream block_info(block_info_file);
-            block_info << all_quantum_numbers.size() << std::endl;
-            for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
-                block_info << symmetrized_block_ham_sizes[i] << std::endl;
-            }
-            block_info.close();
+        // Write the number of unique basis vectors
+        std::cout << "Number of unique symmetrized basis vectors: " << unique_sym_basis.size() << std::endl;
+        std::cout << "Block sizes: ";
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
+            std::cout << symmetrized_block_ham_sizes[i] << " ";
         }
-        
-        // Make sure symmetrized_block_ham_sizes is available on all processes
-        MPI_Bcast(symmetrized_block_ham_sizes.data(), symmetrized_block_ham_sizes.size(), MPI_INT, 0, MPI_COMM_WORLD);
-        
-        // Finalize MPI
-        MPI_Finalize();
+        std::cout << std::endl;
+
+        // Write each symmetrized basis vector
+        for (size_t i = 0; i < unique_sym_basis.size(); i++) {    
+            std::ofstream output_file(filename+std::to_string(i) + ".dat");        
+            for (size_t j = 0; j < (1<<num_site); j++) {
+                if (std::abs(unique_sym_basis[i][j]) > 1e-8) {
+                    output_file << j << " " << unique_sym_basis[i][j].real() << " " << unique_sym_basis[i][j].imag() << std::endl;
+                }
+            }
+            output_file.close();
+        }
     }
 
     std::vector<Complex> read_sym_basis(int index, const std::string& dir){
