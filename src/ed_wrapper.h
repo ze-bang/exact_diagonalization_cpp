@@ -53,6 +53,7 @@ struct EDParameters {
     double beta_min = 0.01;
     double beta_max = 100.0;
     int num_beta_bins = 100;
+    int num_sites = 0; // Number of sites in the system
 };
 
 // Main wrapper function for exact diagonalization

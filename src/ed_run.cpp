@@ -2,6 +2,9 @@
 #include "construct_ham.h"
 #include <fstream>
 #include <string>
+#include <chrono>
+#include <vector>
+#include <cmath>
 #include "ed_wrapper.h"
 
 
@@ -9,12 +12,24 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
         std::cout << "Options:" << std::endl;
-        std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, etc.)" << std::endl;
+        std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, etc.)" << std::endl;
         std::cout << "  --eigenvalues=<n>    : Number of eigenvalues to compute" << std::endl;
         std::cout << "  --eigenvectors       : Compute eigenvectors" << std::endl;
         std::cout << "  --output=<dir>       : Output directory" << std::endl;
         std::cout << "  --tolerance=<tol>    : Convergence tolerance" << std::endl;
         std::cout << "  --iterations=<iter>  : Maximum iterations" << std::endl;
+        std::cout << "  --block-size=<size>  : Block size for block methods" << std::endl;
+        std::cout << "  --shift=<value>      : Shift value for shift-invert methods" << std::endl;
+        std::cout << "  --format=<format>    : Hamiltonian file format (STANDARD, SPARSE_MATRIX)" << std::endl;
+        std::cout << "  --skip-standard      : Skip standard diagonalization" << std::endl;
+        std::cout << "  --skip-symmetrized   : Skip symmetrized diagonalization" << std::endl;
+        std::cout << "  --thermo             : Compute thermodynamic data" << std::endl;
+        std::cout << "  --beta-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
+        std::cout << "  --beta-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
+        std::cout << "  --beta-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
+        std::cout << "  --measure-spin       : Compute spin expectation values" << std::endl;
+        std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
+        std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
         return 1;
     }
 
@@ -28,9 +43,28 @@ int main(int argc, char* argv[]) {
     params.output_dir = directory + "/output";
     params.tolerance = 1e-10;
     params.max_iterations = (1<<10);
+    params.block_size = 10;
+    params.shift = 0.0;
+    params.beta_min = 0.01;
+    params.beta_max = 100.0;
+    params.num_beta_bins = 100;
+    params.num_samples = 20;
+
+    // Required parameters - must be specified by user
+    bool num_sites_specified = false;
+    bool full_spectrum = false;
     
     // Default method
     DiagonalizationMethod method = DiagonalizationMethod::LANCZOS;
+    
+    // Default file format
+    HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD;
+    
+    // Control flags
+    bool run_standard = true;
+    bool run_symmetrized = false;
+    bool compute_thermo = false;
+    bool measure_spin = false;
     
     // Parse command line options
     for (int i = 2; i < argc; i++) {
@@ -50,12 +84,16 @@ int main(int argc, char* argv[]) {
             else if (method_str == "LANCZOS_NO_ORTHO") method = DiagonalizationMethod::LANCZOS_NO_ORTHO;
             else if (method_str == "SHIFT_INVERT") method = DiagonalizationMethod::SHIFT_INVERT;
             else if (method_str == "SHIFT_INVERT_ROBUST") method = DiagonalizationMethod::SHIFT_INVERT_ROBUST;
+            else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else std::cerr << "Unknown method: " << method_str << std::endl;
-            // Add other methods as needed
         }
         else if (arg.find("--eigenvalues=") == 0) {
-            params.num_eigenvalues = (1 << std::stoi(arg.substr(14)));
-            params.max_iterations = (1 << std::stoi(arg.substr(14)));
+            if (arg.substr(14) == "full") {
+                full_spectrum = true;
+            }
+            else{
+                params.num_eigenvalues = std::stoi(arg.substr(14));
+            }
         }
         else if (arg == "--eigenvectors") {
             params.compute_eigenvectors = true;
@@ -69,105 +107,258 @@ int main(int argc, char* argv[]) {
         else if (arg.find("--iterations=") == 0) {
             params.max_iterations = std::stoi(arg.substr(13));
         }
+        else if (arg.find("--block-size=") == 0) {
+            params.block_size = std::stoi(arg.substr(13));
+        }
+        else if (arg.find("--shift=") == 0) {
+            params.shift = std::stod(arg.substr(8));
+        }
+        else if (arg.find("--format=") == 0) {
+            std::string format_str = arg.substr(9);
+            if (format_str == "STANDARD") format = HamiltonianFileFormat::STANDARD;
+            else if (format_str == "SPARSE_MATRIX") format = HamiltonianFileFormat::SPARSE_MATRIX;
+            else std::cerr << "Unknown format: " << format_str << std::endl;
+        }
+        else if (arg == "--standard") {
+            run_standard = true;
+            run_symmetrized = false;
+        }
+        else if (arg == "--symmetrized") {
+            run_standard = false;
+            run_symmetrized = true;
+        }
+        else if (arg == "--thermo") {
+            compute_thermo = true;
+        }
+        else if (arg.find("--beta-min=") == 0) {
+            params.beta_min = std::stod(arg.substr(11));
+        }
+        else if (arg.find("--beta-max=") == 0) {
+            params.beta_max = std::stod(arg.substr(11));
+        }
+        else if (arg.find("--beta-bins=") == 0) {
+            params.num_beta_bins = std::stoi(arg.substr(12));
+        }
+        else if (arg == "--measure-spin") {
+            measure_spin = true;
+            // Spin measurements require eigenvectors
+            params.compute_eigenvectors = true;
+        }
+        else if (arg.find("--samples=") == 0) {
+            params.num_samples = std::stoi(arg.substr(10));
+        }
+        else if (arg.find("--num_sites=") == 0) {
+            params.num_sites = std::stoi(arg.substr(12));
+            num_sites_specified = true;
+        }
+    }
+    
+    if (full_spectrum) {
+        params.num_eigenvalues = (1ULL << params.num_sites);
+    }
+
+    params.max_iterations = std::max(params.max_iterations, params.num_eigenvalues);
+
+    // Check if required parameters were provided
+    if (!num_sites_specified) {
+        std::cerr << "Error: --num_sites parameter is required" << std::endl;
+        std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
+        std::cout << "Required options:" << std::endl;
+        std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+        return 1;
     }
     
     // Create output directories
-    // params.output_dir = params.output_dir + "/standard";
+    std::string standard_output = params.output_dir;
     std::string symmetrized_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/symmetrized";
-    std::string cmd = "mkdir -p " + params.output_dir + " " + symmetrized_output;
+    std::string thermo_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/thermo";
+    
+    std::string cmd = "mkdir -p " + standard_output;
+    if (run_symmetrized) cmd += " " + symmetrized_output;
+    if (compute_thermo) cmd += " " + thermo_output;
     system(cmd.c_str());
     
-    std::cout << "==========================================" << std::endl;
-    std::cout << "Starting Standard Exact Diagonalization" << std::endl;
-    std::cout << "==========================================" << std::endl;
+    // Store results
+    EDResults standard_results;
+    EDResults sym_results;
     
     // Run standard diagonalization
-    auto start_time = std::chrono::high_resolution_clock::now();
-    
-    EDResults results;
-    try {
-        results = exact_diagonalization_from_directory(
-            directory, method, params, HamiltonianFileFormat::STANDARD
-        );
+    if (run_standard) {
+        std::cout << "==========================================" << std::endl;
+        std::cout << "Starting Standard Exact Diagonalization" << std::endl;
+        std::cout << "==========================================" << std::endl;
+        std::cout << "Method: ";
+        switch (method) {
+            case DiagonalizationMethod::LANCZOS: std::cout << "Lanczos"; break;
+            case DiagonalizationMethod::FULL: std::cout << "Full Diagonalization"; break;
+            case DiagonalizationMethod::TPQ: std::cout << "Thermal Pure Quantum (TPQ)"; break;
+            case DiagonalizationMethod::ARPACK: std::cout << "ARPACK"; break;
+            default: std::cout << "Other"; break;
+        }
+        std::cout << std::endl;
         
-        // Display eigenvalues
-        std::cout << "Eigenvalues (standard):" << std::endl;
-        for (size_t i = 0; i < results.eigenvalues.size(); i++) {
-            std::cout << i << ": " << results.eigenvalues[i] << std::endl;
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        try {
+            standard_results = exact_diagonalization_from_directory(
+                directory, method, params, format
+            );
+            
+            // Display eigenvalues
+            std::cout << "Eigenvalues (standard):" << std::endl;
+            for (size_t i = 0; i < standard_results.eigenvalues.size() && i < 10; i++) {
+                std::cout << i << ": " << standard_results.eigenvalues[i] << std::endl;
+            }
+            if (standard_results.eigenvalues.size() > 10) {
+                std::cout << "... (" << standard_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
+            }
+            
+            // Save eigenvalues to file
+            std::ofstream standard_file(standard_output + "/eigenvalues.txt");
+            if (standard_file.is_open()) {
+                for (const auto& val : standard_results.eigenvalues) {
+                    standard_file << val << std::endl;
+                }
+                standard_file.close();
+                std::cout << "Saved " << standard_results.eigenvalues.size() << " eigenvalues to " 
+                          << standard_output + "/eigenvalues.txt" << std::endl;
+            }
+            
+            // If thermodynamic data computed, save it
+            if (compute_thermo) {
+                if (method == DiagonalizationMethod::TPQ){
+                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                    if (thermo_file.is_open()) {
+                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                        for (size_t i = 0; i < standard_results.thermo_data.temperatures.size(); i++) {
+                            thermo_file << standard_results.thermo_data.temperatures[i] << " "
+                                       << standard_results.thermo_data.energy[i] << " "
+                                       << standard_results.thermo_data.specific_heat[i] << " "
+                                       << standard_results.thermo_data.entropy[i] << " "
+                                       << standard_results.thermo_data.free_energy[i] << std::endl;
+                        }
+                        thermo_file.close();
+                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                    }
+                }
+                // Check if full spectrum is calculated
+                else if (standard_results.eigenvalues.size() == (1ULL << params.num_sites)) {
+                    std::cout << "Full spectrum calculated. Computing thermodynamic properties..." << std::endl;
+                    
+                    // Call the function to calculate thermodynamics from spectrum
+                    ThermodynamicData thermo_data = calculate_thermodynamics_from_spectrum(
+                        standard_results.eigenvalues,
+                        0.01,  // T_min
+                        10.0,  // T_max
+                        100    // num_points
+                    );
+                    
+                    // Save the calculated thermodynamic data
+                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                    if (thermo_file.is_open()) {
+                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                        for (size_t i = 0; i < thermo_data.temperatures.size(); i++) {
+                            thermo_file << thermo_data.temperatures[i] << " "
+                                       << thermo_data.energy[i] << " "
+                                       << thermo_data.specific_heat[i] << " "
+                                       << thermo_data.entropy[i] << " "
+                                       << thermo_data.free_energy[i] << std::endl;
+                        }
+                        thermo_file.close();
+                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                    }
+                }
+            }
+            
+            // Measure spin if requested
+            if (measure_spin && params.compute_eigenvectors) {
+                // This would call the appropriate function to measure spin
+                // For now, just print a message
+                std::cout << "Spin measurements not implemented yet" << std::endl;
+            }
         }
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error in standard ED: " << e.what() << std::endl;
-    }
-    
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-    std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
-    
-    // Save eigenvalues to file
-    std::ofstream standard_file(params.output_dir + "/eigenvalues.txt");
-    if (standard_file.is_open()) {
-        for (const auto& val : results.eigenvalues) {
-            standard_file << val << std::endl;
+        catch (const std::exception& e) {
+            std::cerr << "Error in standard ED: " << e.what() << std::endl;
         }
-        standard_file.close();
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
     }
-    
-    std::cout << "\n==========================================" << std::endl;
-    std::cout << "Starting Symmetrized Exact Diagonalization" << std::endl;
-    std::cout << "==========================================" << std::endl;
-    
-    // Set up parameters for symmetrized diagonalization
-    EDParameters sym_params = params;
-    sym_params.output_dir = symmetrized_output;
     
     // Run symmetrized diagonalization
-    start_time = std::chrono::high_resolution_clock::now();
-    
-    EDResults sym_results;
-    try {
-        sym_results = exact_diagonalization_from_directory_symmetrized(
-            directory, method, sym_params, HamiltonianFileFormat::STANDARD
-        );
+    if (run_symmetrized) {
+        std::cout << "\n==========================================" << std::endl;
+        std::cout << "Starting Symmetrized Exact Diagonalization" << std::endl;
+        std::cout << "==========================================" << std::endl;
         
-        // Display eigenvalues
-        std::cout << "Eigenvalues (symmetrized):" << std::endl;
-        for (size_t i = 0; i < sym_results.eigenvalues.size(); i++) {
-            std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
+        // Set up parameters for symmetrized diagonalization
+        EDParameters sym_params = params;
+        sym_params.output_dir = symmetrized_output;
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        try {
+            sym_results = exact_diagonalization_from_directory_symmetrized(
+                directory, method, sym_params, format
+            );
+            
+            // Display eigenvalues
+            std::cout << "Eigenvalues (symmetrized):" << std::endl;
+            for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {
+                std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
+            }
+            if (sym_results.eigenvalues.size() > 10) {
+                std::cout << "... (" << sym_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
+            }
+            
+            // Save eigenvalues to file
+            std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
+            if (sym_file.is_open()) {
+                for (const auto& val : sym_results.eigenvalues) {
+                    sym_file << val << std::endl;
+                }
+                sym_file.close();
+                std::cout << "Saved " << sym_results.eigenvalues.size() << " eigenvalues to " 
+                          << symmetrized_output + "/eigenvalues.txt" << std::endl;
+            }
         }
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error in symmetrized ED: " << e.what() << std::endl;
-    }
-    
-    end_time = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-    std::cout << "Symmetrized ED completed in " << duration / 1000.0 << " seconds" << std::endl;
-    
-    // Save eigenvalues to file
-    std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
-    if (sym_file.is_open()) {
-        for (const auto& val : sym_results.eigenvalues) {
-            sym_file << val << std::endl;
+        catch (const std::exception& e) {
+            std::cerr << "Error in symmetrized ED: " << e.what() << std::endl;
         }
-        sym_file.close();
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        std::cout << "Symmetrized ED completed in " << duration / 1000.0 << " seconds" << std::endl;
     }
     
-    // Compare results
-    std::cout << "\n==========================================" << std::endl;
-    std::cout << "Comparing Results" << std::endl;
-    std::cout << "==========================================" << std::endl;
-    
-    int compare_count = std::min(results.eigenvalues.size(), sym_results.eigenvalues.size());
-    if (compare_count > 0) {
-        std::cout << "    Standard      Symmetrized    Difference" << std::endl;
-        for (int i = 0; i < compare_count; i++) {
-            double diff = std::abs(results.eigenvalues[i] - sym_results.eigenvalues[i]);
-            std::cout << i << ": " << results.eigenvalues[i] << "  " 
-                      << sym_results.eigenvalues[i] << "  " << diff << std::endl;
+    // Compare results if both calculations were run
+    if (run_standard && run_symmetrized) {
+        std::cout << "\n==========================================" << std::endl;
+        std::cout << "Comparing Results" << std::endl;
+        std::cout << "==========================================" << std::endl;
+        
+        int compare_count = std::min(standard_results.eigenvalues.size(), sym_results.eigenvalues.size());
+        if (compare_count > 0) {
+            std::cout << "    Standard      Symmetrized    Difference" << std::endl;
+            double max_diff = 0.0;
+            double avg_diff = 0.0;
+            for (int i = 0; i < compare_count && i < 20; i++) {
+                double diff = std::abs(standard_results.eigenvalues[i] - sym_results.eigenvalues[i]);
+                max_diff = std::max(max_diff, diff);
+                avg_diff += diff;
+                std::cout << i << ": " << standard_results.eigenvalues[i] << "  " 
+                          << sym_results.eigenvalues[i] << "  " << diff << std::endl;
+            }
+            if (compare_count > 20) {
+                std::cout << "... (" << compare_count - 20 << " more comparisons)" << std::endl;
+            }
+            avg_diff /= compare_count;
+            std::cout << "Maximum difference: " << max_diff << std::endl;
+            std::cout << "Average difference: " << avg_diff << std::endl;
+        } else {
+            std::cout << "No eigenvalues to compare." << std::endl;
         }
-    } else {
-        std::cout << "No eigenvalues to compare." << std::endl;
     }
     
     return 0;
