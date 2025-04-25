@@ -17,6 +17,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
+#include <mpi.h>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -1508,9 +1509,23 @@ public:
     }
     
     void generateSymmetrizedBasis(const std::string& dir) {
+        // Initialize MPI
+        int mpi_rank, mpi_size;
+        MPI_Init(NULL, NULL);
+        MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+        
+        if (mpi_rank == 0) {
+            std::cout << "Initializing with " << mpi_size << " MPI processes" << std::endl;
+        }
+        
         std::ifstream trans_file(dir + "/Trans.dat");
         if (!trans_file.is_open()) {
-            std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
+            if (mpi_rank == 0) {
+                std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
+            }
+            MPI_Finalize();
+            return;
         }
 
         // Skip the first line
@@ -1527,33 +1542,49 @@ public:
         const std::string dot_file = dir + "/hamiltonian.dot";
         const std::string png_file = dir + "/hamiltonian.png";
         
-        // Create HamiltonianVisualizer instance
-        std::cout << "Initializing HamiltonianVisualizer...\n";
-        HamiltonianVisualizer visualizer(num_site);
+        // Only rank 0 does visualization
+        if (mpi_rank == 0) {
+            // Create HamiltonianVisualizer instance
+            std::cout << "Initializing HamiltonianVisualizer...\n";
+            HamiltonianVisualizer visualizer(num_site);
+            
+            // Load edges and vertices
+            std::cout << "Loading interactions and site operators...\n";
+            visualizer.loadEdgesFromFile(interactions_file);
+            visualizer.loadVerticesFromFile(site_ops_file);
+            
+            // Generate DOT file
+            std::cout << "Generating DOT file...\n";
+            visualizer.generateDotFile(dot_file);
+            
+            // Generate PNG image
+            std::cout << "Generating PNG image...\n";
+            visualizer.saveGraphImage(png_file, dot_file);
+            
+            std::cout << "Visualization complete.\n";
+            std::cout << "DOT file: " << dot_file << std::endl;
+            std::cout << "PNG file: " << png_file << std::endl;
+        }
         
-        // Load edges and vertices
-        std::cout << "Loading interactions and site operators...\n";
-        visualizer.loadEdgesFromFile(interactions_file);
-        visualizer.loadVerticesFromFile(site_ops_file);
+        // Create directory for symmetrized basis (only by rank 0)
+        std::string sym_basis_dir = dir + "/sym_basis";
+        if (mpi_rank == 0) {
+            std::string mkdir_command = "mkdir -p " + sym_basis_dir;
+            system(mkdir_command.c_str());
+        }
         
-        // Generate DOT file
-        std::cout << "Generating DOT file...\n";
-        visualizer.generateDotFile(dot_file);
-        
-        // Generate PNG image
-        std::cout << "Generating PNG image...\n";
-        visualizer.saveGraphImage(png_file, dot_file);
-        
-        std::cout << "Visualization complete.\n";
-        std::cout << "DOT file: " << dot_file << std::endl;
-        std::cout << "PNG file: " << png_file << std::endl;
+        // Make sure all processes wait until directory is created
+        MPI_Barrier(MPI_COMM_WORLD);
 
+        // All processes need to find automorphisms
         HamiltonianAutomorphismFinder finder(num_site);
         finder.loadEdgesFromFile(interactions_file);
         finder.loadVerticesFromFile(site_ops_file);
 
         std::vector<std::vector<int>> automorphism_groups = finder.findAllAutomorphisms();
-        std::cout << "Found " << automorphism_groups.size() << " automorphisms.\n";
+        if (mpi_rank == 0) {
+            std::cout << "Found " << automorphism_groups.size() << " automorphisms.\n";
+        }
 
         AutomorphismCliqueAnalyzer analyzer;
         auto cliques = analyzer.findMaximumClique(automorphism_groups);
@@ -1561,29 +1592,35 @@ public:
         for (const auto& clique : cliques) {
             max_clique_here.push_back(automorphism_groups[clique]);
         }
-        std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
-
-        analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
+        
+        if (mpi_rank == 0) {
+            std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
+            analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
+        }
         
         MinimalGeneratorFinder minimal_finder;
         std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
         
-        std::cout << "Minimal generators:\n";
-        int count_temp = 0;
-        for (const auto& generator : minimal_generators.first) {
-            std::cout << "Generator: ";
-            for (int index : generator) {
-                std::cout << index << " ";
+        if (mpi_rank == 0) {
+            std::cout << "Minimal generators:\n";
+            int count_temp = 0;
+            for (const auto& generator : minimal_generators.first) {
+                std::cout << "Generator: ";
+                for (int index : generator) {
+                    std::cout << index << " ";
+                }
+                std::cout << "with order: ";
+                std::cout << minimal_generators.second[count_temp] << " ";
+                count_temp++;
+                std::cout << std::endl;
             }
-            std::cout << "with order: ";
-            std::cout << minimal_generators.second[count_temp] << " ";
-            count_temp++;
-            std::cout << std::endl;
         }
 
         AutomorphismPowerRepresentation automorphism_power_representation;
         std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
-        std::cout << "Power representation generated.\n";
+        if (mpi_rank == 0) {
+            std::cout << "Power representation generated.\n";
+        }
         
         // Generate all possible combinations of quantum numbers
         std::vector<std::vector<int>> all_quantum_numbers;
@@ -1603,12 +1640,9 @@ public:
 
         generate_quantum_numbers(0);
 
-        std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
-
-        // Create a directory for the symmetrized basis states
-        std::string sym_basis_dir = dir + "/sym_basis";
-        std::string mkdir_command = "mkdir -p " + sym_basis_dir;
-        system(mkdir_command.c_str());
+        if (mpi_rank == 0) {
+            std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
+        }
 
         // Size of each symmetry block in the Hamiltonian
         symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
@@ -1616,27 +1650,42 @@ public:
         // Total basis vector counter across all symmetry sectors
         int total_vectors_count = 0;
         
+        // Total number of basis states
+        size_t total_basis_states = 1 << n_bits_;
+        
         // Process each symmetry sector (combination of quantum numbers)
         for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); sector_idx++) {
             const auto& e_i = all_quantum_numbers[sector_idx];
-            std::cout << "Processing symmetry sector " << sector_idx + 1 << "/" << all_quantum_numbers.size() << std::endl;
+            if (mpi_rank == 0) {
+                std::cout << "Processing symmetry sector " << sector_idx + 1 << "/" << all_quantum_numbers.size() << std::endl;
+            }
             
-            // Total number of basis states in the Hilbert space
-            size_t total_basis_states = 1 << n_bits_;
+            // Store basis vectors in memory for this sector (local to each process)
+            std::vector<std::vector<Complex>> local_sector_basis_vectors;
             
-            // Vector to store filenames of basis vectors in this sector for checking uniqueness
-            std::vector<std::string> sector_basis_files;
+            // Distribute basis states among MPI processes
+            size_t local_start = (total_basis_states * mpi_rank) / mpi_size;
+            size_t local_end = (total_basis_states * (mpi_rank + 1)) / mpi_size;
             
-            // For each standard basis state
-            for (size_t basis = 0; basis < total_basis_states; basis++) {
-                if (basis % 1000 == 0) {
-                    std::cout << "\rProcessing basis state: " << basis << "/" << total_basis_states << std::flush;
+            if (mpi_rank == 0) {
+                std::cout << "Each MPI process will handle approximately " 
+                          << (total_basis_states / mpi_size) << " basis states" << std::endl;
+            }
+            
+            // Process assigned basis states
+            for (size_t basis = local_start; basis < local_end; basis++) {
+                // Show progress periodically (only on rank 0)
+                if (mpi_rank == 0 && (basis % 1000 == 0 || basis == local_start)) {
+                    std::cout << "\rProcess " << mpi_rank << " processing basis state: " 
+                              << basis - local_start << "/" << local_end - local_start << std::flush;
                 }
                 
                 // Generate the symmetrized basis vector for this state
-                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, 
+                                                             power_representation, 
+                                                             minimal_generators.second, e_i);
                 
-                // Check if this symmetrized basis vector is zero (can happen in some symmetry sectors)
+                // Check if this symmetrized basis vector is zero
                 double norm_squared = 0.0;
                 for (const auto& val : sym_basis_vec) {
                     norm_squared += std::norm(val);
@@ -1646,66 +1695,131 @@ public:
                     continue; // Skip zero vectors
                 }
                 
-                // Check if this symmetrized basis vector is already in our collection
+                // Check if this vector is unique compared to existing local ones
                 bool is_unique = true;
                 
-                // Compare with each existing basis vector in this sector
-                for (const auto& existing_file : sector_basis_files) {
-                    // Read the existing basis vector from file
-                    std::vector<Complex> existing_vec(total_basis_states, Complex(0.0, 0.0));
-                    std::ifstream basis_file(existing_file);
-                    int idx;
-                    double real, imag;
-                    while (basis_file >> idx >> real >> imag) {
-                        existing_vec[idx] = Complex(real, imag);
-                    }
-                    basis_file.close();
-                    
+                for (const auto& existing_vec : local_sector_basis_vectors) {
                     // Calculate overlap between the vectors
                     Complex overlap(0.0, 0.0);
                     for (size_t i = 0; i < total_basis_states; i++) {
                         overlap += std::conj(existing_vec[i]) * sym_basis_vec[i];
                     }
                     
-                    // If the absolute value of the overlap is close to 1, the vectors
-                    // are the same up to a global phase factor exp(i*θ)
-                    if (std::abs(std::abs(overlap) - 1.0) < 1e-10) {
+                    // If overlap is close to 1, vectors are the same up to a global phase
+                    if (std::abs(std::abs(overlap) - 1.0) < 1e-8) {
                         is_unique = false;
                         break;
                     }
                 }
                 
-                // If the symmetrized basis vector is unique, write it to a file
+                // If the vector is unique, add it to our local collection
                 if (is_unique) {
-                    std::string filename = sym_basis_dir + "/sym_basis" + std::to_string(total_vectors_count) + ".dat";
-                    std::ofstream output_file(filename);
-                    
-                    // Only write non-zero elements to save space
-                    for (size_t j = 0; j < total_basis_states; j++) {
-                        if (std::abs(sym_basis_vec[j]) > 1e-8) {
-                            output_file << j << " " << sym_basis_vec[j].real() << " " << sym_basis_vec[j].imag() << std::endl;
-                        }
-                    }
-                    output_file.close();
-                    
-                    // Add the filename to our list for this sector
-                    sector_basis_files.push_back(filename);
-                    
-                    // Increment counters
-                    symmetrized_block_ham_sizes[sector_idx]++;
-                    total_vectors_count++;
+                    local_sector_basis_vectors.push_back(sym_basis_vec);
                 }
             }
-            std::cout << std::endl; // End the progress line
+            
+            if (mpi_rank == 0) {
+                std::cout << std::endl;
+            }
+            
+            // Gather the number of vectors from each process
+            int local_count = local_sector_basis_vectors.size();
+            std::vector<int> all_counts(mpi_size);
+            
+            MPI_Gather(&local_count, 1, MPI_INT, all_counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Calculate displacements for receive buffer
+            std::vector<int> displacements(mpi_size, 0);
+            if (mpi_rank == 0) {
+                for (int i = 1; i < mpi_size; i++) {
+                    displacements[i] = displacements[i-1] + all_counts[i-1];
+                }
+            }
+            
+            // Gather total number of vectors for this sector
+            int sector_total_vectors = 0;
+            if (mpi_rank == 0) {
+                for (int count : all_counts) {
+                    sector_total_vectors += count;
+                }
+                symmetrized_block_ham_sizes[sector_idx] = sector_total_vectors;
+            }
+            
+            // Broadcast the total vectors for this sector so all processes know the size
+            MPI_Bcast(&sector_total_vectors, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Writing vectors to disk - each process writes its own vectors
+            int sector_vectors_start = total_vectors_count;
+            
+            // First broadcast the starting index to all processes
+            MPI_Bcast(&sector_vectors_start, 1, MPI_INT, 0, MPI_COMM_WORLD);
+            
+            // Calculate local offset for this process
+            int local_offset = sector_vectors_start;
+            for (int i = 0; i < mpi_rank; i++) {
+                local_offset += all_counts[i];
+            }
+            
+            if (mpi_rank == 0) {
+                std::cout << "Writing " << sector_total_vectors << " basis vectors for sector " << sector_idx << std::endl;
+            }
+            
+            // Each process writes its own vectors
+            for (size_t i = 0; i < local_sector_basis_vectors.size(); i++) {
+                const auto& sym_basis_vec = local_sector_basis_vectors[i];
+                std::string filename = sym_basis_dir + "/sym_basis" + std::to_string(local_offset + i) + ".dat";
+                
+                std::ofstream output_file(filename);
+                if (!output_file.is_open()) {
+                    std::cerr << "Process " << mpi_rank << " failed to open file: " << filename << std::endl;
+                    continue;
+                }
+                
+                // Only write non-zero elements to save space
+                for (size_t j = 0; j < total_basis_states; j++) {
+                    if (std::abs(sym_basis_vec[j]) > 1e-8) {
+                        output_file << j << " " << sym_basis_vec[j].real() << " " << sym_basis_vec[j].imag() << std::endl;
+                    }
+                }
+                output_file.close();
+            }
+            
+            // Update the total vector count
+            total_vectors_count += sector_total_vectors;
+            
+            // Clear memory for the next sector
+            local_sector_basis_vectors.clear();
+            local_sector_basis_vectors.shrink_to_fit();
+            
+            // Make sure all processes are done writing files before continuing
+            MPI_Barrier(MPI_COMM_WORLD);
         }
         
-        // Write the number of unique basis vectors
-        std::cout << "Number of unique symmetrized basis vectors: " << total_vectors_count << std::endl;
-        std::cout << "Block sizes: ";
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
-            std::cout << symmetrized_block_ham_sizes[i] << " ";
+        // Only process 0 writes summary information
+        if (mpi_rank == 0) {
+            // Write the number of unique basis vectors
+            std::cout << "Number of unique symmetrized basis vectors: " << total_vectors_count << std::endl;
+            std::cout << "Block sizes: ";
+            for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
+                std::cout << symmetrized_block_ham_sizes[i] << " ";
+            }
+            std::cout << std::endl;
+            
+            // Write the block sizes to a file for later reference
+            std::string block_info_file = dir + "/sym_block_sizes.dat";
+            std::ofstream block_info(block_info_file);
+            block_info << all_quantum_numbers.size() << std::endl;
+            for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
+                block_info << symmetrized_block_ham_sizes[i] << std::endl;
+            }
+            block_info.close();
         }
-        std::cout << std::endl;
+        
+        // Make sure symmetrized_block_ham_sizes is available on all processes
+        MPI_Bcast(symmetrized_block_ham_sizes.data(), symmetrized_block_ham_sizes.size(), MPI_INT, 0, MPI_COMM_WORLD);
+        
+        // Finalize MPI
+        MPI_Finalize();
     }
 
     std::vector<Complex> read_sym_basis(int index, const std::string& dir){
