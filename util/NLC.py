@@ -1,436 +1,540 @@
+#!/usr/bin/env python3
+"""
+Numerical Linked Cluster Expansion (NLCe) for thermodynamic properties
+of quantum spin systems on the pyrochlore lattice.
+
+This module provides functions to calculate specific heat capacity, 
+energy, entropy, and other thermodynamic properties using the NLCe method
+with data from exact diagonalization of finite clusters.
+"""
+
 import numpy as np
-from scipy.interpolate import interp1d
 import os
-import subprocess
-import shutil
+import glob
+import re
 import matplotlib.pyplot as plt
+from collections import defaultdict
+import sys
+import argparse
 
-def average_energy(eigenvalues, temperatures, kb=1.0):
+def calculate_boltzmann_weights(energies, temperatures):
     """
-    Compute average energy and specific heat as a function of temperature.
+    Calculate Boltzmann weights exp(-beta*E)/Z for a set of energy levels and temperatures.
     
-    Parameters:
-    -----------
-    eigenvalues : array_like
-        Array containing the full energy spectrum.
-    temperatures : array_like
-        Array of temperatures.
-    kb : float, optional
-        Boltzmann constant (default: 1.0).
+    Args:
+        energies: Array of energy eigenvalues
+        temperatures: Array of temperatures
     
     Returns:
-    --------
-    avg_energy : ndarray
-        Average energy at each temperature.
-    specific_heat : ndarray
-        Specific heat at each temperature.
+        weights: 2D array of Boltzmann weights for each energy and temperature
+        partition_functions: Array of partition functions for each temperature
     """
-    # Convert inputs to numpy arrays if they aren't already
-    eigenvalues = np.asarray(eigenvalues)
+    # Convert to numpy arrays if they aren't already
+    energies = np.asarray(energies)
     temperatures = np.asarray(temperatures)
     
-    # Initialize arrays to store results
-    avg_energy = np.zeros_like(temperatures, dtype=float)
+    # Calculate β = 1/(kB*T) for each temperature (kB=1 in natural units)
+    betas = 1.0 / temperatures
     
-    # Ground state energy
-    e_min = np.min(eigenvalues)
+    # Calculate e^(-βE) for all energies and temperatures
+    # Subtract minimum energy to avoid numerical overflow
+    E_min = np.min(energies)
+    exp_terms = np.exp(-np.outer(betas, energies - E_min))
     
-    for i, T in enumerate(temperatures):
-        if T == 0 or np.isclose(T, 0):  # Handle T=0 or very small T case
-            avg_energy[i] = e_min  # Ground state energy
-            specific_heat[i] = 0.0  # Specific heat is zero at T=0
-        else:
-            beta = 1.0 / (kb * T)
-            
-            # For numerical stability, shift eigenvalues by the minimum value
-            shifted_eigenvalues = eigenvalues - e_min
-            
-            # Calculate Boltzmann factors and partition function
-            boltzmann_factors = np.exp(-beta * shifted_eigenvalues)
-            Z = np.sum(boltzmann_factors)
-            
-            # Calculate average energy (add back the minimum energy)
-            avg_shifted_energy = np.sum(shifted_eigenvalues * boltzmann_factors) / Z
-            avg_energy[i] = avg_shifted_energy + e_min
-    return avg_energy
+    # Calculate partition function Z = ∑e^(-βE) for each temperature
+    partition_functions = np.sum(exp_terms, axis=1)
+    
+    # Calculate Boltzmann weights w = e^(-βE)/Z
+    weights = exp_terms / partition_functions[:, np.newaxis]
+    
+    return weights, partition_functions
 
 
-def specific_heat(eigenvalues, temperatures, kb=1.0):
+def calculate_thermodynamics_from_spectrum(energies, T_min, T_max, num_points, ground_state_degeneracy=1):
     """
-    Compute average energy and specific heat as a function of temperature.
+    Calculate thermodynamic properties from an energy spectrum.
     
-    Parameters:
-    -----------
-    eigenvalues : array_like
-        Array containing the full energy spectrum.
-    temperatures : array_like
-        Array of temperatures.
-    kb : float, optional
-        Boltzmann constant (default: 1.0).
+    Args:
+        energies: Array of energy eigenvalues
+        T_min: Minimum temperature
+        T_max: Maximum temperature
+        num_points: Number of temperature points
+        ground_state_degeneracy: Degeneracy of the ground state
     
     Returns:
-    --------
-    avg_energy : ndarray
-        Average energy at each temperature.
-    specific_heat : ndarray
-        Specific heat at each temperature.
+        ThermodynamicData object with calculated properties
     """
-    # Convert inputs to numpy arrays if they aren't already
-    eigenvalues = np.asarray(eigenvalues)
-    temperatures = np.asarray(temperatures)
+    # Generate temperature array (can use logarithmic spacing if desired)
+    temperatures = np.linspace(T_min, T_max, num_points)
     
-    # Initialize arrays to store results
-    avg_energy = np.zeros_like(temperatures, dtype=float)
-    specific_heat = np.zeros_like(temperatures, dtype=float)
+    # Calculate Boltzmann weights and partition function
+    weights, Z = calculate_boltzmann_weights(energies, temperatures)
     
-    # Ground state energy
-    e_min = np.min(eigenvalues)
+    # Calculate β = 1/(kB*T) for each temperature
+    betas = 1.0 / temperatures
     
-    kb = 1.380649e-23  # Boltzmann constant in J/K
-    n_avogadro = 6.02214076e23  # Avogadro's number in mol^-1
-    kb = kb * n_avogadro  # Convert to J/mol/K
-
-    kb_meV = 0.00861733  # Boltzmann constant in meV/K
-
-    for i, T in enumerate(temperatures):
-        if T == 0 or np.isclose(T, 0):  # Handle T=0 or very small T case
-            avg_energy[i] = e_min  # Ground state energy
-            specific_heat[i] = 0.0  # Specific heat is zero at T=0
-        else:
-            beta = 1.0 / (kb_meV * T)
-            
-            # For numerical stability, shift eigenvalues by the minimum value
-            shifted_eigenvalues = eigenvalues - e_min
-            
-            # Calculate Boltzmann factors and partition function
-            boltzmann_factors = np.exp(-beta * shifted_eigenvalues)
-            Z = np.sum(boltzmann_factors)
-            
-            # Calculate average energy (add back the minimum energy)
-            avg_shifted_energy = np.sum(shifted_eigenvalues * boltzmann_factors) / Z
-            
-            # Calculate average energy squared (for the specific heat)
-            avg_shifted_energy_squared = np.sum(shifted_eigenvalues**2 * boltzmann_factors) / Z
-            
-            # Calculate specific heat (this formula is invariant to energy shifts)
-            specific_heat[i] =  (avg_shifted_energy_squared - avg_shifted_energy**2)/(kb*T)**2
+    # Calculate internal energy: U = ∑ E_i * w_i
+    energy = np.sum(weights * energies, axis=1)
     
-    return specific_heat
+    # Calculate energy squared: <E²> = ∑ E_i² * w_i
+    energy_squared = np.sum(weights * energies**2, axis=1)
+    
+    # Calculate specific heat: C = β² * (<E²> - <E>²)
+    specific_heat = betas**2 * (energy_squared - energy**2)
+    
+    # Calculate entropy: S = log(Z) + β*U
+    # Adjust for ground state degeneracy
+    entropy = np.log(Z) + betas * energy
+    if ground_state_degeneracy > 1:
+        entropy += np.log(ground_state_degeneracy)
+    
+    # Calculate free energy: F = -T*log(Z)
+    free_energy = -temperatures * np.log(Z)
+    if ground_state_degeneracy > 1:
+        free_energy -= temperatures * np.log(ground_state_degeneracy)
+    
+    # Return data as a dictionary-like object
+    class ThermodynamicData:
+        def __init__(self):
+            self.temperatures = temperatures
+            self.energy = energy
+            self.specific_heat = specific_heat
+            self.entropy = entropy
+            self.free_energy = free_energy
+            self.partition_function = Z
+    
+    return ThermodynamicData()
 
 
-# Cluster name, Subcluster name, Multiplicity
-ClusterInfo = [["2", "1", 2], ["3", "1", 3], ["3", "2", 2], ["4a", "1", 4], ["4a", "2", 3], ["4a", "3", 3], ["4b", "1", 4], ["4b", "2", 3], ["4b", "3", 2], ["5a", "1", 5], ["5a", "2", 4], ["5a", "3", 6], ["5a", "4a", 4]]
-
-def NLC_weight(observable, cluster_name, dir, temperatures):
+def read_cluster_info(cluster_dir):
     """
-    Compute the NLC weight for a given observable.
+    Read cluster information from files in the given directory.
     
-    Parameters:
-    -----------
-    observable : str
-        The observable for which to compute the NLC weight.
-    cluster_size : int
-        Size of the cluster.
-    subcluster_size : int
-        Size of the subcluster.
-    multiplicity : int
-        Multiplicity of the cluster.
-    N : int
-        Number of sites in the system.
+    Args:
+        cluster_dir: Directory containing cluster info files
     
     Returns:
-    --------
-    nlc_weight : float
-        The NLC weight for the given observable.
+        Dictionary with cluster information
     """
+    # Find site info file
+    site_info_files = glob.glob(os.path.join(cluster_dir, "*site_info.dat"))
+    if not site_info_files:
+        raise FileNotFoundError(f"No site info file found in {cluster_dir}")
     
-    if cluster_name == "1":
-        eigenvalues = np.genfromtxt(dir + "/1/output/spectrum.dat", dtype=float)
-        return observable(eigenvalues, temperatures)
+    site_info_file = site_info_files[0]
     
-    else:
-        # Compute the NLC weight
-        eigenvalues = np.genfromtxt(dir + "/" + cluster_name + "/output/spectrum.dat", dtype=float)
-
-        nlc_weight = observable(eigenvalues, temperatures)
-        for i in ClusterInfo:
-            if i[0] == cluster_name:
-                nlc_weight = nlc_weight - int(i[2])*NLC_weight(observable, i[1], dir, temperatures)
-        
-        return nlc_weight
-
+    # Extract cluster name
+    cluster_name = os.path.basename(site_info_file).replace("_site_info.dat", "")
     
-def run_lanczos(dir):
-    """
-    Call the C++ lanczos program on specified subdirectories.
+    # Read site info
+    sites = []
+    with open(site_info_file, 'r') as f:
+        for line in f:
+            if line.startswith('#') or not line.strip():
+                continue
+            parts = line.strip().split()
+            if len(parts) >= 6:
+                site_id = int(parts[0])
+                matrix_idx = int(parts[1])
+                sublattice = int(parts[2])
+                x, y, z = float(parts[3]), float(parts[4]), float(parts[5])
+                sites.append({
+                    'site_id': site_id,
+                    'matrix_idx': matrix_idx,
+                    'sublattice': sublattice,
+                    'position': (x, y, z)
+                })
     
-    Parameters:
-    -----------
-    dir : str
-        Base directory path.
-    
-    Returns:
-    --------
-    bool
-        True if all executions were successful, False otherwise.
-    """
-    
-    # List of subdirectories to process
-    subdirs = ['1', '2', '3', '4a', '4b']
-    
-    # Process each subdirectory
-    for subdir in subdirs:
-        full_path = os.path.join(dir, subdir)
-        print(f"Running lanczos on {full_path}")
-        
+    # Read eigenvalues if available
+    eigenvalues_file = os.path.join(cluster_dir, "output", "eigenvalues.txt")
+    eigenvalues = []
+    if os.path.exists(eigenvalues_file):
         try:
-            # Run the lanczos program and wait for it to complete
-            result = subprocess.run(
-                ["./build/lanczos", full_path, "0"],
-                check=True,
-                capture_output=True,
-                text=True
-            )
-            print(f"Lanczos successfully completed on {full_path}")
-            print(f"Output: {result.stdout}")
-        except subprocess.CalledProcessError as e:
-            print(f"Error executing lanczos on {full_path}: {e}")
-            print(f"Error output: {e.stderr}")
-            return False
+            eigenvalues = np.loadtxt(eigenvalues_file)/len(sites)
+        except:
+            print(f"Warning: Could not read eigenvalues from {eigenvalues_file}")
     
-    return True
-    
+    # Return cluster info
+    return {
+        'cluster_name': cluster_name,
+        'num_sites': len(sites),
+        'sites': sites,
+        'eigenvalues': eigenvalues,
+        'directory': cluster_dir
+    }
 
 
-def NLC_compute(params, temperatures, dir):
+def read_thermo_data(cluster_dir):
     """
-    Call helper_non_kramer script with specified parameters.
+    Read pre-computed thermodynamic data from a file.
     
-    Parameters:
-    -----------
-    Jxx : float
-        X-axis coupling constant.
-    Jyy : float
-        Y-axis coupling constant.
-    Jzz : float
-        Z-axis coupling constant.
-    dir : str
-        Directory path.
+    Args:
+        cluster_dir: Directory containing thermodynamic data
+    
+    Returns:
+        ThermodynamicData object or None if data not found
     """
+    thermo_file = os.path.join(cluster_dir, "thermo", "thermo_data.txt")
     
-    # Clear directory if it exists
-    if os.path.exists(dir):
-        shutil.rmtree(dir)
-
-    # Create the directory structure
-    os.makedirs(dir, exist_ok=True)
-    os.makedirs(os.path.join(dir, '1/lanczos_eigenvectors'), exist_ok=True)
-    os.makedirs(os.path.join(dir, '2/lanczos_eigenvectors'), exist_ok=True)
-    os.makedirs(os.path.join(dir, '3/lanczos_eigenvectors'), exist_ok=True)
-    os.makedirs(os.path.join(dir, '4a/lanczos_eigenvectors'), exist_ok=True)
-    os.makedirs(os.path.join(dir, '4b/lanczos_eigenvectors'), exist_ok=True)
-
-    # Convert parameters to strings
-    jxx_str = str(params[0])
-    jyy_str = str(params[1])
-    jzz_str = str(params[2])
+    if not os.path.exists(thermo_file):
+        return None
     
-    # Call the helper script with arguments
     try:
-        result = subprocess.run(
-            ["python", "helper_non_kramers.py", jxx_str, jyy_str, jzz_str, "0", "1", "1", "1", dir+'/1/', "1"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        result = subprocess.run(
-            ["python", "helper_non_kramers.py", jxx_str, jyy_str, jzz_str, "0", "1", "1", "1", dir+'/2/', "2"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        result = subprocess.run(
-            ["python", "helper_non_kramers.py", jxx_str, jyy_str, jzz_str, "0", "1", "1", "1", dir+'/3/', "3"],
-            check=True,
-            capture_output=True,
-            text=True
-        )        
-        result = subprocess.run(
-            ["python", "helper_non_kramers.py", jxx_str, jyy_str, jzz_str, "0", "1", "1", "1", dir+'/4a/', "4a"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        result = subprocess.run(
-            ["python", "helper_non_kramers.py", jxx_str, jyy_str, jzz_str, "0", "1", "1", "1", dir+'/4b/', "4b"],
-            check=True,
-            capture_output=True,
-            text=True
-        )
-        print("helper_non_kramers.py executed successfully")
-        print("Output:", result.stdout)
-    except subprocess.CalledProcessError as e:
-        print(f"Error executing helper_non_kramer.py: {e}")
-        print("Error output:", e.stderr)
-    
-    run_lanczos(dir)
-    nlc_sum = np.zeros_like(temperatures, dtype=float)
-    for i in ClusterInfo:
-        if i[0] == "5a":
-            nlc_sum += NLC_weight(specific_heat, i[1], dir, temperatures)*int(i[2])
-    return nlc_sum/16
+        # Read data (skip header line)
+        data = np.loadtxt(thermo_file, skiprows=1)
+        
+        # Create ThermodynamicData object
+        thermo = type('ThermodynamicData', (), {})()
+        thermo.temperatures = data[:, 0]
+        thermo.energy = data[:, 1]
+        thermo.specific_heat = data[:, 2]
+        thermo.entropy = data[:, 3]
+        thermo.free_energy = data[:, 4]
+        
+        return thermo
+    except Exception as e:
+        print(f"Warning: Error reading thermo data from {thermo_file}: {e}")
+        return None
 
 
-import scipy.optimize as optimize
-
-def load_reference_data(filename):
+def extract_cluster_order_id(cluster_name):
     """
-    Load reference data from a file. This function assumes the data file
-    contains temperature and specific heat values in two columns.
-    
-    Parameters:
-    -----------
-    filename : str
-        Path to the data file
+    Extract order and ID from a cluster name like 'cluster_2_order_3'
     
     Returns:
-    --------
-    temp_data : ndarray
-        Temperature values
-    heat_data : ndarray
-        Specific heat values
+        (cluster_id, order) tuple or (None, None) if name doesn't match pattern
     """
-    data = np.loadtxt(filename)
-    return data[:, 0], data[:, 1]  # Assuming first column is temperature, second is specific heat
+    match = re.search(r'cluster_(\d+)_order_(\d+)', cluster_name)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None, None
 
-def fit_nlc_model(initial_params, reference_data_file, dir_path, 
-                    temperatures, cluster_names=None, bounds=None):
+
+def find_clusters(base_dir, max_order=None):
     """
-    Fit a model to specific heat data by minimizing the error.
+    Find all cluster directories and organize them by order.
     
-    Parameters:
-    -----------
-    model_func : callable
-        Function that takes parameters and returns a function to calculate specific heat
-    initial_params : array_like
-        Initial guess for parameters to optimize
-    reference_data_file : str
-        Path to file containing reference data
-    dir_path : str
-        Directory containing eigenvalue data
-    temperatures : array_like
-        Temperatures at which to calculate specific heat
-    cluster_names : list, optional
-        List of cluster names to include in NLC sum
-    bounds : tuple, optional
-        Bounds for parameters (min, max)
+    Args:
+        base_dir: Base directory to search for clusters
+        max_order: Maximum cluster order to include (None for all)
     
     Returns:
-    --------
-    opt_params : ndarray
-        Optimized parameters
-    min_error : float
-        Minimum error achieved
+        Dictionary mapping cluster order to list of cluster directories
     """
-    # Load reference data
-    temp_data, heat_data = load_reference_data(reference_data_file)
-        
-    def error_function(params):
-        """Calculate error between model and reference data"""
-        # Get specific heat function with current parameters
-        
-        nlc_sum = NLC_compute(params, temp_data, dir_path)
-
-        # Calculate error using mean squared error
-        # First interpolate model at reference temperatures
-
-        # Calculate MSE
-        mse = np.mean((nlc_sum - heat_data) ** 2)
-        return mse
+    clusters_by_order = defaultdict(list)
     
-    # Perform optimization
-    if bounds:
-        result = optimize.minimize(error_function, initial_params, bounds=bounds)
+    # Look for cluster directories
+    for root, dirs, files in os.walk(base_dir):
+        site_info_files = [f for f in files if f.endswith('_site_info.dat')]
+        
+        for file in site_info_files:
+            cluster_name = file.replace('_site_info.dat', '')
+            cluster_id, order = extract_cluster_order_id(cluster_name)
+            
+            if cluster_id is not None and order is not None:
+                if max_order is None or order <= max_order:
+                    clusters_by_order[order].append(root)
+    
+    return clusters_by_order
+
+
+def calculate_nlce_weights(clusters_by_order):
+    """
+    Calculate NLCe weights for each cluster.
+    
+    Args:
+        clusters_by_order: Dictionary mapping orders to lists of cluster info
+    
+    Returns:
+        Dictionary mapping cluster directories to their NLCe weights
+    """
+    weights = {}
+    
+    # Process clusters by order, starting from lowest
+    for order in sorted(clusters_by_order.keys()):
+        for cluster_dir in clusters_by_order[order]:
+            # Read cluster info
+            cluster_info = read_cluster_info(cluster_dir)
+            cluster_name = cluster_info['cluster_name']
+            
+            # For order 1, weight is always 1
+            if order == 1:
+                weights[cluster_dir] = 1.0
+                continue
+            
+            # Initialize weight to 1
+            weight = 1.0
+            
+            # Subtract weights of all subclusters
+            for sub_order in range(1, order):
+                for sub_cluster_dir in clusters_by_order[sub_order]:
+                    sub_cluster_info = read_cluster_info(sub_cluster_dir)
+                    
+                    # Check if this is a subcluster (based on embedding factor)
+                    # For simplicity, we use a placeholder embedding calculation
+                    # In a real implementation, you would need to compute actual embedding factors
+                    embedding_factor = calculate_embedding_factor(cluster_info, sub_cluster_info)
+                    
+                    if embedding_factor > 0:
+                        weight -= embedding_factor * weights[sub_cluster_dir]
+            
+            weights[cluster_dir] = weight
+    
+    return weights
+
+
+def calculate_embedding_factor(cluster_info, subcluster_info):
+    """
+    Calculate the number of ways a subcluster can be embedded in a cluster.
+    
+    This is a placeholder implementation. In a real application, this would
+    require proper graph isomorphism checking.
+    
+    Args:
+        cluster_info: Dictionary with information about the larger cluster
+        subcluster_info: Dictionary with information about the potential subcluster
+    
+    Returns:
+        Number of ways subcluster can be embedded in cluster (0 if not a subcluster)
+    """
+    # Extract cluster IDs and orders
+    cluster_name = cluster_info['cluster_name']
+    subcluster_name = subcluster_info['cluster_name']
+    
+    cluster_id, cluster_order = extract_cluster_order_id(cluster_name)
+    subcluster_id, subcluster_order = extract_cluster_order_id(subcluster_name)
+    
+    if cluster_order <= subcluster_order:
+        return 0  # Cannot embed a larger cluster in a smaller one
+    
+    # In a real implementation, you would use the lattice structure to determine
+    # the actual embedding factor. For demonstration, we use a simple formula.
+    # This should be replaced with actual embedding calculations.
+    
+    # For a pyrochlore lattice with tetrahedral clusters, a rough approximation
+    if cluster_order == subcluster_order + 1:
+        # Each order-n cluster contains n subclusters of order n-1
+        return cluster_order
+    elif cluster_order > subcluster_order + 1:
+        # Combinatorial factor (rough approximation)
+        import math
+        return math.comb(cluster_order, subcluster_order)
+    
+    return 0
+
+
+def combine_nlce_results(clusters_by_order, weights, property_name, max_order=None, T_min=0.001, T_max=10, num_points=1000):
+    """
+    Combine NLCe results up to a maximum order.
+    
+    Args:
+        clusters_by_order: Dictionary mapping orders to lists of cluster directories
+        weights: Dictionary mapping cluster directories to NLCe weights
+        property_name: Name of the property to combine ('energy', 'specific_heat', etc.)
+        max_order: Maximum order to include (None for all available)
+        T_min, T_max, num_points: Temperature range and number of points
+    
+    Returns:
+        Dictionary with combined results for each order up to max_order
+    """
+    # Create temperature array
+    temperatures = np.logspace(np.log(T_min)/np.log(10), np.log(T_max)/np.log(10), num_points)
+    
+    # Initialize results dictionary
+    results = {
+        'temperatures': temperatures,
+        'by_order': {}
+    }
+    
+    # Initialize arrays to accumulate results for each order
+    available_orders = sorted(clusters_by_order.keys())
+    if max_order is None:
+        max_order = max(available_orders)
+    
+    for order in range(1, max_order + 1):
+        results['by_order'][order] = np.zeros(num_points)
+    
+    # Process each cluster and accumulate its contribution
+    for order in available_orders:
+        if order > max_order:
+            continue
+            
+        order_contribution = np.zeros(num_points)
+        
+        for cluster_dir in clusters_by_order[order]:
+            # Read thermodynamic data
+            thermo_data = read_thermo_data(cluster_dir)
+            # If no pre-computed data, try to calculate from eigenvalues
+            if thermo_data is None:
+                cluster_info = read_cluster_info(cluster_dir)
+                if len(cluster_info['eigenvalues']) > 0:
+                    thermo_data = calculate_thermodynamics_from_spectrum(
+                        cluster_info['eigenvalues'],
+                        T_min, T_max, num_points
+                    )
+            
+            # Skip this cluster if we couldn't get thermodynamic data
+            if thermo_data is None:
+                print(f"Warning: No thermodynamic data available for {cluster_dir}")
+                continue
+            
+            # Get the property values (interpolate if necessary)
+            if hasattr(thermo_data, property_name):
+                prop_values = getattr(thermo_data, property_name)
+                
+                # Interpolate if temperature points don't match
+                if len(thermo_data.temperatures) != len(temperatures) or not np.allclose(thermo_data.temperatures, temperatures):
+                    prop_values = np.interp(temperatures, thermo_data.temperatures, prop_values)
+                
+                # Add weighted contribution
+                weight = weights.get(cluster_dir, 0.0)
+                order_contribution += weight * prop_values
+            else:
+                print(f"Warning: Property '{property_name}' not found in thermodynamic data for {cluster_dir}")
+        
+        # Accumulate results up to this order
+        for o in range(1, order + 1):
+            results['by_order'][o] = results['by_order'][o-1] if o > 1 else np.zeros(num_points)
+            if o == order:
+                results['by_order'][o] += order_contribution
+    
+    return results
+
+
+def visualize_nlce_results(results, property_name, output_file=None, show_orders=None):
+    """
+    Visualize NLCe results for a thermodynamic property.
+    
+    Args:
+        results: Dictionary with NLCe results from combine_nlce_results
+        property_name: Name of the property being visualized
+        output_file: Path to save the figure (None to display only)
+        show_orders: List of orders to show (None for all)
+    """
+    temperatures = results['temperatures']
+    all_orders = sorted(results['by_order'].keys())
+    
+    if show_orders is None:
+        show_orders = all_orders
     else:
-        result = optimize.minimize(error_function, initial_params)
+        show_orders = [o for o in show_orders if o in all_orders]
     
-    opt_params = result.x
-    min_error = result.fun
-    
-    print(f"Optimization complete. Minimum error: {min_error}")
-    print(f"Optimal parameters: {opt_params}")
-    
-    return opt_params, min_error
-
-def plot_fit_results(opt_params, dir_path, reference_data_file=""):
-    """
-    Plot the fitted results against reference data.
-    
-    Parameters:
-    -----------
-    opt_params : array_like
-        Optimized parameters
-    model_func : callable
-        Function that takes parameters and returns a function to calculate specific heat
-    reference_data_file : str
-        Path to file containing reference data
-    dir_path : str
-        Directory containing eigenvalue data
-    temperatures : array_like
-        Temperatures at which to calculate specific heat
-    cluster_names : list, optional
-        List of cluster names to include in NLC sum
-    """
-    # Load reference data
-    if reference_data_file == "":
-        temp_data = np.logspace(-2, 1, 1000)
-        nlc_sum = NLC_compute(opt_params, temp_data, dir_path)
-    else:
-        temp_data, heat_data = load_reference_data(reference_data_file)
-        
-        # Calculate fitted model    
-        nlc_sum = NLC_compute(opt_params, temp_data, dir_path)
-
-    
-    # Plot results
     plt.figure(figsize=(10, 6))
-    if reference_data_file != "":
-        plt.plot(temp_data, heat_data, 'o', label='Reference Data')
-    plt.plot(temp_data, nlc_sum, '-', label='Fitted Model')
-    plt.xlabel('Temperature')
-    plt.ylabel('Specific Heat')
+    
+    for order in show_orders:
+        plt.plot(temperatures, results['by_order'][order], 
+                 label=f'Order {order}', linewidth=2)
+    
+    plt.xlabel('Temperature', fontsize=12)
+    plt.ylabel(property_name.replace('_', ' ').title(), fontsize=12)
+    plt.title(f'NLCe Results for {property_name.replace("_", " ").title()}', fontsize=14)
+    plt.legend(fontsize=10)
     plt.xscale('log')
-    plt.legend()
-    plt.title('Fitted Specific Heat vs Reference Data')
-    plt.grid(True)
-    plt.savefig('fit_results.png')
+    plt.grid(True, alpha=0.3)
+    
+    if output_file:
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
 
 
-def plot_spec_heat_from_file(dir, temperatures):
-    A = np.genfromtxt(dir + "/output/spectrum.dat", dtype=float)
-    print(A)
-    E = specific_heat(A, temperatures)
-    plt.plot(temperatures, E, label='Specific Heat')
-    plt.xlabel('Temperature')
-    plt.ylabel('Specific Heat')
-    plt.xscale('log')
-    plt.legend()
-    plt.title('Specific Heat vs Temperature')
-    plt.grid(True)
-    plt.savefig(dir+'specific_heat_plot.png')
-    plt.show()
+def run_nlce(base_dir, max_order=None, T_min=0.01, T_max=10, num_points=100, output_dir=None):
+    """
+    Run a complete NLCe calculation.
+    
+    Args:
+        base_dir: Directory containing cluster data
+        max_order: Maximum cluster order to include
+        T_min, T_max, num_points: Temperature range and number of points
+        output_dir: Directory to save results (None to use base_dir/nlce_results)
+    
+    Returns:
+        Dictionary with NLCe results for different properties
+    """
+    # Set default output directory
+    if output_dir is None:
+        output_dir = os.path.join(base_dir, 'nlce_results')
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Find all clusters
+    print(f"Finding clusters in {base_dir}...")
+    clusters_by_order = find_clusters(base_dir, max_order)
+    
+    # Check if clusters were found
+    if not clusters_by_order:
+        raise ValueError(f"No clusters found in {base_dir}")
+    
+    # Print cluster statistics
+    print("\nCluster statistics:")
+    for order in sorted(clusters_by_order.keys()):
+        print(f"  Order {order}: {len(clusters_by_order[order])} clusters")
+    
+    # Calculate NLCe weights
+    print("\nCalculating NLCe weights...")
+    weights = calculate_nlce_weights(clusters_by_order)
+    
+    # Save weights to file
+    weights_file = os.path.join(output_dir, 'nlce_weights.txt')
+    with open(weights_file, 'w') as f:
+        f.write("# NLCe weights\n")
+        f.write("# cluster_directory weight\n")
+        for cluster_dir, weight in weights.items():
+            f.write(f"{cluster_dir} {weight}\n")
+    
+    # Properties to calculate
+    properties = ['energy', 'specific_heat', 'entropy', 'free_energy']
+    
+    # Calculate and save NLCe results for each property
+    results = {}
+    for prop in properties:
+        print(f"\nCalculating NLCe results for {prop}...")
+        prop_results = combine_nlce_results(
+            clusters_by_order, weights, prop, max_order,
+            T_min, T_max, num_points
+        )
+        results[prop] = prop_results
+        
+        # Save results to file
+        for order in prop_results['by_order']:
+            result_file = os.path.join(output_dir, f'{prop}_order_{order}.txt')
+            with open(result_file, 'w') as f:
+                f.write(f"# NLCe results for {prop}, order {order}\n")
+                f.write("# temperature value\n")
+                for t, val in zip(prop_results['temperatures'], prop_results['by_order'][order]):
+                    f.write(f"{t} {val}\n")
+        
+        # Visualize results
+        print(f"Generating plot for {prop}...")
+        output_file = os.path.join(output_dir, f'{prop}_nlce.png')
+        visualize_nlce_results(prop_results, prop, output_file)
+    
+    print(f"\nNLCe calculation complete. Results saved to {output_dir}")
+    return results
 
 
+def main():
+    """Main function to run NLCe from command line"""
+    parser = argparse.ArgumentParser(description='Run NLCe calculations for thermodynamic properties')
+    parser.add_argument('base_dir', help='Directory containing cluster data')
+    parser.add_argument('--max-order', type=int, help='Maximum cluster order to include')
+    parser.add_argument('--t-min', type=float, default=0.01, help='Minimum temperature')
+    parser.add_argument('--t-max', type=float, default=10.0, help='Maximum temperature')
+    parser.add_argument('--num-points', type=int, default=100, help='Number of temperature points')
+    parser.add_argument('--output-dir', help='Directory to save results')
+    
+    args = parser.parse_args()
+    
+    run_nlce(
+        args.base_dir,
+        max_order=args.max_order,
+        T_min=args.t_min,
+        T_max=args.t_max,
+        num_points=args.num_points,
+        output_dir=args.output_dir
+    )
 
-# opt_params, min_error = fit_nlc_model(
-#     initial_params=[0.2, 0.2, 1.0],
-#     reference_data_file='specific_heat_Pr2Zr2O7.txt',
-#     dir_path='./data',
-#     temperatures=np.linspace(0.01, 10, 100),
-#     cluster_names=['1', '2', '3', '4a', '4b'],
-#     bounds=((0, None), (0, None), (0, None))
-# )
 
-plot_fit_results([0.2, 0.2, 1.0], './data')
-
-# plot_spec_heat_from_file("ED_XXZ_test/", np.logspace(-2, 1, 100))
+if __name__ == "__main__":
+    main()

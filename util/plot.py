@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Load data from file
-data_file = './ED_test_8_sites/output/thermodynamics.dat'
+data_file = './data/4b/thermo/thermo_data.txt'
 data = np.loadtxt(data_file, comments='#')
 
 # Extract temperature and specific heat columns

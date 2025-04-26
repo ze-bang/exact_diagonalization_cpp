@@ -88,7 +88,7 @@ int main(int argc, char* argv[]) {
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {
-            if (arg.substr(14) == "full") {
+            if (arg.substr(14) == "FULL") {
                 full_spectrum = true;
             }
             else{
