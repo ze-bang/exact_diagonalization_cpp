@@ -93,6 +93,7 @@ def parse_arguments():
     parser.add_argument('--max_order', type=int, required=True, help='Maximum order of clusters to generate')
     parser.add_argument('--visualize', action='store_true', help='Visualize each cluster')
     parser.add_argument('--lattice_size', type=int, default=0, help='Size of finite lattice (default: 2*max_order)')
+    parser.add_argument('--output_dir', type=str, default='.', help='Output directory for cluster information')
     return parser.parse_args()
 
 def create_pyrochlore_lattice(L):
@@ -336,7 +337,7 @@ def main():
     print(f"\nResults saved to pyrochlore_clusters_order_{max_order}.txt")
     
     # Create output directory for cluster info
-    output_dir = f"cluster_info_order_{max_order}"
+    output_dir = args.output_dir + f"/cluster_info_order_{max_order}"
     os.makedirs(output_dir, exist_ok=True)
     
     # Extract and save detailed information for each cluster

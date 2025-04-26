@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Load data from file
-data_file = './data/4b/thermo/thermo_data.txt'
+data_file = './NLC_test/cluster_3_order_3/thermo/thermo_data.txt'
 data = np.loadtxt(data_file, comments='#')
 
 # Extract temperature and specific heat columns
@@ -68,10 +68,6 @@ plt.title('Energy vs Temperature', fontsize=16)
 
 # Add grid for better readability
 plt.grid(True, linestyle='--', alpha=0.7)
-
-Emin = np.loadtxt('./ED_test_8_sites/output/spectrum.dat')
-
-plt.text(0.1, 0.8, r'$E_{min} = '+ str(Emin[0]) +'$', fontsize=16, color='red', transform=plt.gca().transAxes)
 plt.xscale('log')
 # Add legend
 plt.legend()

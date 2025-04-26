@@ -1,0 +1,339 @@
+import os
+import numpy as np
+import glob
+import re
+from collections import defaultdict
+from scipy.optimize import curve_fit
+import argparse
+
+#!/usr/bin/env python3
+"""
+NLC (Numerical Linked Cluster Expansion) summation utility.
+Calculates thermodynamic properties of a lattice using cluster expansion.
+"""
+
+import matplotlib.pyplot as plt
+
+class NLCExpansion:
+    def __init__(self, cluster_dir, eigenvalue_dir, beta_values=None):
+        """
+        Initialize the NLC expansion calculator.
+        
+        Args:
+            cluster_dir: Directory containing cluster information files
+            eigenvalue_dir: Directory containing eigenvalue files from ED calculations
+            beta_values: Array of inverse temperature values to evaluate
+        """
+        self.cluster_dir = cluster_dir
+        self.eigenvalue_dir = eigenvalue_dir
+        
+        if beta_values is None:
+            self.beta_values = np.logspace(3, -2, 200)  # Default temperature range
+        else:
+            self.beta_values = beta_values
+            
+        self.clusters = {}  # Will store {cluster_id: {order, multiplicity, eigenvalues, etc.}}
+        self.weights = {}   # Will store calculated weights for each cluster and property
+        
+    def read_clusters(self):
+        """Read all cluster information from files in the cluster directory."""
+        pattern = os.path.join(self.cluster_dir, "cluster_*_order_*.dat")
+        cluster_files = glob.glob(pattern)
+        
+        for file_path in cluster_files:
+            # Extract cluster ID and order from filename
+            match = re.search(r'cluster_(\d+)_order_(\d+)', file_path)
+            if not match:
+                continue
+                
+            cluster_id, order = int(match.group(1)), int(match.group(2))
+            
+            with open(file_path, 'r') as f:
+                lines = f.readlines()
+                
+            multiplicity = None
+            num_vertices = None
+            for line in lines:
+                if line.startswith("# Multiplicity:"):
+                    multiplicity = int(line.split(":")[1].strip())
+                elif line.startswith("# Number of vertices:"):
+                    num_vertices = int(line.split(":")[1].strip())
+                
+                # Break if we found both values
+                if multiplicity is not None and num_vertices is not None:
+                    break
+            
+            if multiplicity is None:
+                print(f"Warning: Multiplicity not found for cluster {cluster_id}")
+                continue
+                
+            if num_vertices is None:
+                print(f"Warning: Number of vertices not found for cluster {cluster_id}")
+                continue
+                
+            self.clusters[cluster_id] = {
+                'order': order,
+                'multiplicity': multiplicity,
+                'num_vertices': num_vertices,
+                'file_path': file_path,
+                'eigenvalues': None  # Will be loaded later
+            }
+    def read_eigenvalues(self):
+        """Read eigenvalues for each cluster from ED output files."""
+        for cluster_id in self.clusters:
+            eigenvalue_file = os.path.join(
+                self.eigenvalue_dir, 
+                f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}/output/eigenvalues.txt"
+            )
+            
+            if not os.path.exists(eigenvalue_file):
+                print(f"Warning: Eigenvalue file not found for cluster {cluster_id}")
+                continue
+                
+            with open(eigenvalue_file, 'r') as f:
+                eigenvalues = [float(line.strip()) for line in f if line.strip()]
+                
+            self.clusters[cluster_id]['eigenvalues'] = np.array(eigenvalues)
+    
+    def get_subclusters(self, cluster_id):
+        """
+        Get all subclusters of a given cluster.
+        For this demo, we'll just use a simple heuristic based on order.
+        
+        In a full implementation, this would use the actual topology data.
+        """
+        order = self.clusters[cluster_id]['order']
+        return [cid for cid, data in self.clusters.items() 
+                if data['order'] < order]
+    
+    def calculate_thermodynamic_quantities(self, eigenvalues, num_sites):
+        """
+        Calculate thermodynamic quantities from eigenvalues.
+        Uses a numerically stable approach to handle large beta values (low temperatures).
+        
+        Returns:
+            Dictionary with 'energy' and 'specific_heat' as keys
+        """
+        results = {
+            'energy': np.zeros_like(self.beta_values),
+            'specific_heat': np.zeros_like(self.beta_values)
+        }
+        
+        for i, beta in enumerate(self.beta_values):
+            # For extremely large beta (low T), use ground state approximation
+            if beta > 1e10:
+                ground_state_energy = np.min(eigenvalues)
+                results['energy'][i] = ground_state_energy
+                results['specific_heat'][i] = 0.0  # Specific heat approaches 0 as T->0
+                continue
+                
+            # Find ground state energy (minimum eigenvalue)
+            ground_state_energy = np.min(eigenvalues)
+            
+            # Shift eigenvalues by ground state energy for numerical stability
+            shifted_eigenvalues = eigenvalues - ground_state_energy
+            
+            # Calculate exponential terms with shifted eigenvalues
+            # exp(-β(Ei-E0)) instead of exp(-βEi) to prevent underflow
+            exp_terms = np.exp(-beta * shifted_eigenvalues)
+            Z_shifted = np.sum(exp_terms)
+            
+            # Calculate energy using original eigenvalues but stable exponentials
+            energy = np.sum(eigenvalues * exp_terms) / Z_shifted
+            
+            # Calculate energy squared
+            energy_squared = np.sum(eigenvalues**2 * exp_terms) / Z_shifted
+            
+            # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
+            specific_heat = beta**2 * (energy_squared - energy**2) / num_sites
+            
+            results['energy'][i] = energy
+            results['specific_heat'][i] = specific_heat
+            
+        return results
+    
+    def calculate_weights(self):
+        """Calculate weights for all clusters using the NLC principle."""
+        # Sort clusters by order
+        sorted_clusters = sorted(
+            [(cid, data['order']) for cid, data in self.clusters.items()], 
+            key=lambda x: x[1]
+        )
+        
+        # Initialize weights dictionary
+        self.weights = {
+            'energy': {},
+            'specific_heat': {}
+        }
+        
+        # Calculate weights for each cluster
+        for cluster_id, _ in sorted_clusters:
+            if self.clusters[cluster_id]['eigenvalues'] is None:
+                continue
+                
+            # Get thermodynamic quantities for this cluster
+            quantities = self.calculate_thermodynamic_quantities(
+                self.clusters[cluster_id]['eigenvalues'],
+                self.clusters[cluster_id]['num_vertices']
+            )
+            
+            # Get subclusters
+            subclusters = self.get_subclusters(cluster_id)
+            
+            # Calculate weights for energy and specific heat
+            for prop in ['energy', 'specific_heat']:
+                # Property of the cluster
+                property_value = quantities[prop]
+                
+                # Subtract contributions from all subclusters
+                for subcluster_id in subclusters:
+                    if subcluster_id in self.weights[prop]:
+                        property_value -= self.weights[prop][subcluster_id] * \
+                                          self.clusters[subcluster_id]['multiplicity']
+                
+                # Store the weight
+                self.weights[prop][cluster_id] = property_value / self.clusters[cluster_id]['multiplicity']
+    
+    def sum_nlc(self, euler_resum=False, order_cutoff=None):
+        """
+        Perform the NLC summation with optional Euler resummation.
+        
+        Args:
+            euler_resum: If True, apply Euler resummation
+            order_cutoff: Maximum order to include in the summation
+            
+        Returns:
+            Dictionary with summed properties
+        """
+        results = {
+            'energy': np.zeros_like(self.beta_values),
+            'specific_heat': np.zeros_like(self.beta_values)
+        }
+        
+        # Calculate the NLC sum for each property
+        for prop in ['energy', 'specific_heat']:
+            # Sum by order
+            sum_by_order = defaultdict(lambda: np.zeros_like(self.beta_values))
+            
+            for cluster_id, weight in self.weights[prop].items():
+                order = self.clusters[cluster_id]['order']
+                if order_cutoff is not None and order > order_cutoff:
+                    continue
+                    
+                sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
+            
+            if not euler_resum:
+                # Regular summation
+                for order, contribution in sum_by_order.items():
+                    results[prop] += contribution
+            else:
+                # Euler resummation
+                max_order = max(sum_by_order.keys()) if sum_by_order else 0
+                
+                # Initialize partial sums array
+                partial_sums = np.zeros((max_order + 1, len(self.beta_values)))
+                
+                # Calculate partial sums
+                for order in range(max_order + 1):
+                    if order > 0:
+                        partial_sums[order] = partial_sums[order-1]
+                    if order in sum_by_order:
+                        partial_sums[order] += sum_by_order[order]
+                
+                # Apply Euler transformation
+                euler_sums = np.zeros_like(partial_sums)
+                euler_sums[0] = partial_sums[0]
+                
+                for k in range(1, max_order + 1):
+                    for j in range(k, max_order + 1):
+                        binomial = 1
+                        for l in range(j-k+1, j+1):
+                            binomial *= l
+                        for l in range(1, k+1):
+                            binomial //= l
+                        
+                        euler_sums[k] += binomial * (-1)**(j-k) * partial_sums[j]
+                
+                # Use the highest order Euler sum
+                results[prop] = euler_sums[max_order]
+        
+        return results
+    
+    def run(self, euler_resum=False, order_cutoff=None):
+        """Run the full NLC calculation."""
+        print("Reading cluster information...")
+        self.read_clusters()
+        
+        print("Reading eigenvalues...")
+        self.read_eigenvalues()
+        
+        print("Calculating weights...")
+        self.calculate_weights()
+        
+        print("Performing NLC summation...")
+        results = self.sum_nlc(euler_resum, order_cutoff)
+        
+        return results
+    
+    def plot_results(self, results, save_path=None):
+        """Plot energy and specific heat vs temperature."""
+        temperatures = 1.0 / self.beta_values
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Plot energy
+        ax1.plot(temperatures, results['energy'], 'b-')
+        ax1.set_xlabel('Temperature (T)')
+        ax1.set_ylabel('Energy per site')
+        ax1.set_title('Energy vs Temperature')
+        ax1.set_xscale('log')
+        
+        # Plot specific heat
+        ax2.plot(temperatures, results['specific_heat'], 'r-')
+        ax2.set_xlabel('Temperature (T)')
+        ax2.set_ylabel('Specific Heat per site')
+        ax2.set_title('Specific Heat vs Temperature')
+        ax2.set_xscale('log')
+
+        plt.tight_layout()
+        
+        if save_path:
+            plt.savefig(save_path)
+        else:
+            plt.show()
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Run NLC calculation for lattice models')
+    parser.add_argument('--cluster_dir', required=True, help='Directory containing cluster information files')
+    parser.add_argument('--eigenvalue_dir', required=True, help='Directory containing eigenvalue files from ED calculations')
+    parser.add_argument('--output_dir', default='.', help='Directory to save output files')
+    parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation')
+    parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
+    parser.add_argument('--plot', action='store_true', help='Generate plot of results')
+    
+    args = parser.parse_args()
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create NLC instance
+    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir)
+    
+    # Run NLC calculation
+    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff)
+    
+    # Save results in tabular format
+    output_file = os.path.join(args.output_dir, "nlc_results.txt")
+    with open(output_file, 'w') as f:
+        f.write("# Temperature\tEnergy\tSpecific_Heat\n")
+        for i, beta in enumerate(nlc.beta_values):
+            temp = 1.0 / beta
+            f.write(f"{temp:.8e}\t{results['energy'][i]:.8e}\t{results['specific_heat'][i]:.8e}\n")
+    
+    # Plot results if requested
+    if args.plot:
+        plot_path = os.path.join(args.output_dir, "nlc_results.png")
+        nlc.plot_results(results, save_path=plot_path)
+    
+    print(f"NLC calculation completed! Results saved to {output_file}")
