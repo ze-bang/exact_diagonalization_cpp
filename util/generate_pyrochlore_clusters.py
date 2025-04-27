@@ -298,6 +298,93 @@ def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index):
     plt.savefig(f'cluster_{cluster_index}_order_{len(cluster)}.png')
     plt.close()
 
+def identify_subclusters(distinct_clusters, tet_graph):
+    """
+    Identify all topological subclusters for each distinct cluster and their multiplicities.
+    
+    Args:
+    - distinct_clusters: List of topologically distinct clusters
+    - tet_graph: NetworkX graph where nodes are tetrahedra
+    
+    Returns:
+    - subclusters_info: Dictionary mapping cluster indices to their subclusters info
+    """
+    # Group distinct clusters by order
+    clusters_by_order = defaultdict(list)
+    for i, cluster in enumerate(distinct_clusters):
+        clusters_by_order[len(cluster)].append((i, cluster))
+    
+    # Initialize results
+    subclusters_info = {}
+    
+    # Process each distinct cluster
+    for i, cluster in enumerate(distinct_clusters):
+        cluster_order = len(cluster)
+        subclusters_info[i] = []
+        
+        # Skip if cluster_order is 1 (no subclusters)
+        if cluster_order == 1:
+            continue
+        
+        # Find subclusters for each lower order
+        for order in range(1, cluster_order):
+            # Get candidate distinct clusters of this order
+            candidates = clusters_by_order[order]
+            
+            # Track subcluster counts for this order
+            subcluster_counts = defaultdict(int)
+            
+            # Generate all subclusters of the current order
+            for subcluster_set in itertools.combinations(cluster, order):
+                subcluster = frozenset(subcluster_set)
+                subgraph = tet_graph.subgraph(subcluster)
+                
+                # Find matching distinct cluster
+                for cand_idx, cand_cluster in candidates:
+                    cand_subgraph = tet_graph.subgraph(cand_cluster)
+                    if nx.is_isomorphic(subgraph, cand_subgraph):
+                        subcluster_counts[cand_idx] += 1
+                        break
+            
+            # Add to results
+            for subcluster_idx, count in subcluster_counts.items():
+                subclusters_info[i].append((subcluster_idx, count))
+        
+        # Sort by order
+        subclusters_info[i].sort(key=lambda x: len(distinct_clusters[x[0]]))
+    
+    return subclusters_info
+
+def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, output_dir):
+    """
+    Save information about subclusters of each distinct cluster to a file.
+    
+    Args:
+    - subclusters_info: Dictionary mapping cluster indices to their subclusters info
+    - distinct_clusters: List of topologically distinct clusters
+    - multiplicities: List of multiplicities for each cluster
+    - output_dir: Directory to save the output file
+    """
+    with open(f"{output_dir}/subclusters_info.txt", 'w') as f:
+        f.write("# Subclusters information for each topologically distinct cluster\n")
+        f.write("# Format: Cluster_ID, Order, Multiplicity, Subclusters[(ID, Multiplicity), ...]\n\n")
+        
+        for i, cluster in enumerate(distinct_clusters):
+            cluster_id = i + 1
+            order = len(cluster)
+            multiplicity = multiplicities[i]
+            
+            subclusters = subclusters_info.get(i, [])
+            subcluster_str = ", ".join([f"({j+1}, {count})" for j, count in subclusters])
+            
+            f.write(f"Cluster {cluster_id} (Order {order}, Multiplicity {multiplicity}):\n")
+            if subclusters:
+                f.write(f"  Subclusters: {subcluster_str}\n")
+            else:
+                f.write("  No subclusters (order 1 cluster)\n")
+            f.write("\n")
+
+
 def main():
     args = parse_arguments()
     max_order = args.max_order
@@ -326,19 +413,13 @@ def main():
     for order in sorted(clusters_by_order.keys()):
         print(f"  Order {order}: {len(clusters_by_order[order])} distinct clusters")
     
-    # Save results
-    with open(f'pyrochlore_clusters_order_{max_order}.txt', 'w') as f:
-        f.write(f"# Topologically distinct clusters in pyrochlore lattice up to order {max_order}\n")
-        f.write(f"# Format: Cluster_ID, Order, Multiplicity, Tetrahedra_indices\n")
-        
-        for i, (cluster, multiplicity) in enumerate(zip(distinct_clusters, multiplicities)):
-            f.write(f"{i+1}, {len(cluster)}, {multiplicity}, {','.join(map(str, cluster))}\n")
-    
-    print(f"\nResults saved to pyrochlore_clusters_order_{max_order}.txt")
-    
     # Create output directory for cluster info
     output_dir = args.output_dir + f"/cluster_info_order_{max_order}"
     os.makedirs(output_dir, exist_ok=True)
+
+
+    save_subclusters_info(identify_subclusters(distinct_clusters, tet_graph), distinct_clusters, multiplicities, output_dir)
+
     
     # Extract and save detailed information for each cluster
     print("\nExtracting and saving detailed cluster information...")
@@ -352,6 +433,10 @@ def main():
         
         # Save to file
         save_cluster_info(cluster_info, cluster_id, order, multiplicity, output_dir)
+
+
+        print(f"  Saved to {output_dir}/cluster_{cluster_id}_order_{order}.dat")
+
     
     print(f"Detailed cluster information saved to {output_dir}/ directory")
     
