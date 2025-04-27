@@ -73,7 +73,8 @@ int main(int argc, char* argv[]) {
             std::string method_str = arg.substr(9);
             if (method_str == "LANCZOS") method = DiagonalizationMethod::LANCZOS;
             else if (method_str == "FULL") method = DiagonalizationMethod::FULL;
-            else if (method_str == "TPQ") method = DiagonalizationMethod::TPQ;
+            else if (method_str == "mTPQ") method = DiagonalizationMethod::mTPQ;
+            else if (method_str == "cTPQ") method = DiagonalizationMethod::cTPQ;
             else if (method_str == "KRYLOV_SCHUR") method = DiagonalizationMethod::KRYLOV_SCHUR;
             else if (method_str == "DAVIDSON") method = DiagonalizationMethod::DAVIDSON;
             else if (method_str == "BICG") method = DiagonalizationMethod::BICG;
@@ -191,7 +192,8 @@ int main(int argc, char* argv[]) {
         switch (method) {
             case DiagonalizationMethod::LANCZOS: std::cout << "Lanczos"; break;
             case DiagonalizationMethod::FULL: std::cout << "Full Diagonalization"; break;
-            case DiagonalizationMethod::TPQ: std::cout << "Thermal Pure Quantum (TPQ)"; break;
+            case DiagonalizationMethod::mTPQ: std::cout << "microcanonical Thermal Pure Quantum (mTPQ)"; break;
+            case DiagonalizationMethod::cTPQ: std::cout << "canonical Thermal Pure Quantum (cTPQ)"; break;
             case DiagonalizationMethod::ARPACK: std::cout << "ARPACK"; break;
             default: std::cout << "Other"; break;
         }
@@ -226,7 +228,7 @@ int main(int argc, char* argv[]) {
             
             // If thermodynamic data computed, save it
             if (compute_thermo) {
-                if (method == DiagonalizationMethod::TPQ){
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
                     std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
                     if (thermo_file.is_open()) {
                         thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;

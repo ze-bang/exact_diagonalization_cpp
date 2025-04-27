@@ -1071,14 +1071,6 @@ public:
             max_clique_here.push_back(automorphism_groups[clique]);
         }
         std::cout << "Maximum clique size: " << max_clique_here.size() << std::endl;
-        // std::cout << "Maximum clique:\n";
-        // for (const auto& clique : max_clique_here) {
-        //     std::cout << "Clique: ";
-        //     for (int index : clique) {
-        //         std::cout << index << " ";
-        //     }
-        //     std::cout << std::endl;
-        // }
 
         analyzer.generateAutomorphismGraph(automorphism_groups, dir, finder);
 

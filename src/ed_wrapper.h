@@ -21,7 +21,8 @@ enum class DiagonalizationMethod {
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
     FULL,                  // Full diagonalization
-    TPQ,                    // Thermal Pure Quantum states
+    mTPQ,                    // Thermal Pure Quantum states
+    cTPQ,
     ARPACK                  // ARPACK
 };
 
@@ -188,25 +189,61 @@ EDResults exact_diagonalization_core(
                              params.compute_eigenvectors);
             break;
             
-        case DiagonalizationMethod::TPQ:
+        case DiagonalizationMethod::mTPQ:
+            std::cout << "Using microcanonical TPQ (Thermal Pure Quantum states) method" << std::endl;
             {
-                std::cout << "Using TPQ method for thermal calculations" << std::endl;
-                TPQResults tpq_results = perform_tpq_calculation(
-                    H, hilbert_space_dim, params.num_samples, 50, 
-                    -10.0, 10.0, 0.0, params.temp_min, params.temp_max, 
-                    params.num_temp_bins);
+                // Set up TPQ parameters
+                TPQThermodynamicData tpq_results = microcanonical_tpq(
+                    H, 
+                    hilbert_space_dim,
+                    params.num_sites,
+                    params.num_samples,
+                    0.1,  // time_step
+                    params.num_temp_bins,
+                    params.output_dir,
+                    params.compute_eigenvectors  // save_states
+                );
                 
-                // Convert TPQ results to thermodynamic data
-                results.thermo_data.temperatures = tpq_results.temperatures;
-                results.thermo_data.energy = tpq_results.energies;
-                results.thermo_data.specific_heat = tpq_results.specific_heats;
-                results.thermo_data.entropy = tpq_results.entropies;
-                results.thermo_data.free_energy = tpq_results.free_energies;
-                
-                // Save TPQ results if output directory is provided
-                if (!params.output_dir.empty()) {
-                    save_tpq_results(tpq_results, params.output_dir + "/tpq_results.txt", 0);
+                // Convert TPQThermodynamicData to ThermodynamicData
+                results.thermo_data.temperatures = tpq_results.beta_values;
+                for (auto& beta : results.thermo_data.temperatures) {
+                    beta = 1.0 / beta;  // Convert beta to temperature
                 }
+                results.thermo_data.energy = tpq_results.energy;
+                results.thermo_data.specific_heat = tpq_results.specific_heat;
+                results.thermo_data.entropy = tpq_results.entropy;
+                results.thermo_data.free_energy = tpq_results.free_energy;
+            }
+            break;
+            
+        case DiagonalizationMethod::cTPQ:
+            std::cout << "Using canonical TPQ (Thermal Pure Quantum states) method" << std::endl;
+            {
+                // Set up TPQ parameters
+                double beta_min = 1.0 / params.temp_max;  // Convert max temperature to min beta
+                double beta_max = 1.0 / params.temp_min;  // Convert min temperature to max beta
+                
+                TPQThermodynamicData tpq_results = canonical_tpq(
+                    H, 
+                    hilbert_space_dim,
+                    params.num_sites,
+                    params.num_samples,
+                    beta_min,
+                    beta_max,
+                    params.num_temp_bins,
+                    params.output_dir,
+                    params.compute_eigenvectors  // save_states
+                );
+                
+                // Convert TPQThermodynamicData to ThermodynamicData
+                results.thermo_data.temperatures = tpq_results.beta_values;
+                for (auto& beta : results.thermo_data.temperatures) {
+                    beta = 1.0 / beta;  // Convert beta to temperature
+                }
+                results.thermo_data.energy = tpq_results.energy;
+                results.thermo_data.specific_heat = tpq_results.specific_heat;
+                results.thermo_data.entropy = tpq_results.entropy;
+                results.thermo_data.free_energy = tpq_results.free_energy;
             }
             break;
             
