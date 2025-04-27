@@ -154,8 +154,6 @@ class NLCExpansion:
             
             # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
             specific_heat = (energy_squared - energy**2) / (temp * temp * self.kB)
-            if self.SI:
-                specific_heat *= (1.602176634e-22 * 6.02214076e23)  # Convert to SI units
             
             # Calculate entropy, accounting for shifted partition function
             # S = kB * [ln(Z) + βE]
