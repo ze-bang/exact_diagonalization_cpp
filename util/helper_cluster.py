@@ -200,6 +200,13 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
     
     interALL = []
     transfer = []
+
+    gamma = np.exp(1j*2*np.pi/3)
+    # Define non-kramer pyrochlore factor
+    non_kramer_factor = np.array([[0, 1, gamma, gamma**2],
+                                  [1, 0, gamma**2, gamma],
+                                  [gamma, gamma**2, 0, 1],
+                                  [gamma**2, gamma, 1, 0]])
     
     # Generate Heisenberg interactions
     for site_id in sorted(nn_list.keys()):
@@ -220,8 +227,10 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
                 interALL.append([2, node_mapping[i], 2, node_mapping[j], Jzz/2, 0])  # Sz-Sz
                 interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm/2, 0])   # S+-S-
                 interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm/2, 0])   # S--S+
-                interALL.append([1, node_mapping[i], 1, node_mapping[j], Jpmpm/2, 0])  # S--S-
-                interALL.append([0, node_mapping[i], 0, node_mapping[j], Jpmpm/2, 0])  # S+-S+
+                Jpmpm_ = Jpmpm/2 * non_kramer_factor[i % 4, j % 4]
+                print(Jpmpm_)
+                interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S--S-
+                interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S+-S+
     
     # Convert to arrays
     interALL = np.array(interALL)
