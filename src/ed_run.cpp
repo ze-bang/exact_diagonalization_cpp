@@ -24,9 +24,9 @@ int main(int argc, char* argv[]) {
         std::cout << "  --skip-standard      : Skip standard diagonalization" << std::endl;
         std::cout << "  --skip-symmetrized   : Skip symmetrized diagonalization" << std::endl;
         std::cout << "  --thermo             : Compute thermodynamic data" << std::endl;
-        std::cout << "  --beta-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
-        std::cout << "  --beta-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
-        std::cout << "  --beta-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
+        std::cout << "  --temp-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
+        std::cout << "  --temp-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
+        std::cout << "  --temp-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
         std::cout << "  --measure-spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
@@ -45,9 +45,9 @@ int main(int argc, char* argv[]) {
     params.max_iterations = (1<<10);
     params.block_size = 10;
     params.shift = 0.0;
-    params.beta_min = 0.01;
-    params.beta_max = 100.0;
-    params.num_beta_bins = 100;
+    params.temp_min = 0.001;
+    params.temp_max = 20.0;
+    params.num_temp_bins = 100;
     params.num_samples = 20;
 
     // Required parameters - must be specified by user
@@ -130,14 +130,14 @@ int main(int argc, char* argv[]) {
         else if (arg == "--thermo") {
             compute_thermo = true;
         }
-        else if (arg.find("--beta-min=") == 0) {
-            params.beta_min = std::stod(arg.substr(11));
+        else if (arg.find("--temp-min=") == 0) {
+            params.temp_min = std::stod(arg.substr(11));
         }
-        else if (arg.find("--beta-max=") == 0) {
-            params.beta_max = std::stod(arg.substr(11));
+        else if (arg.find("--temp-max=") == 0) {
+            params.temp_max = std::stod(arg.substr(11));
         }
-        else if (arg.find("--beta-bins=") == 0) {
-            params.num_beta_bins = std::stoi(arg.substr(12));
+        else if (arg.find("--temp-bins=") == 0) {
+            params.num_temp_bins = std::stoi(arg.substr(12));
         }
         else if (arg == "--measure-spin") {
             measure_spin = true;
@@ -248,9 +248,9 @@ int main(int argc, char* argv[]) {
                     // Call the function to calculate thermodynamics from spectrum
                     ThermodynamicData thermo_data = calculate_thermodynamics_from_spectrum(
                         standard_results.eigenvalues,
-                        0.01,  // T_min
-                        10.0,  // T_max
-                        100    // num_points
+                        params.temp_min,  // T_min
+                        params.temp_max,  // T_max
+                        params.num_temp_bins  // num_points
                     );
                     
                     // Save the calculated thermodynamic data

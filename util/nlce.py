@@ -100,9 +100,9 @@ def run_ed_for_cluster(args):
     if ed_options["thermo"]:
         cmd.extend([
             '--thermo',
-            f'--beta-min={ed_options["beta_min"]}',
-            f'--beta-max={ed_options["beta_max"]}',
-            f'--beta-bins={ed_options["beta_bins"]}'
+            f'--temp-min={ed_options["temp_min"]}',
+            f'--temp-max={ed_options["temp_max"]}',
+            f'--temp-bins={ed_options["temp_bins"]}'
         ])
     
     try:
@@ -133,9 +133,9 @@ def main():
     # ED parameters
     parser.add_argument('--method', type=str, default='FULL', help='Diagonalization method (FULL, LANCZOS, etc.)')
     parser.add_argument('--thermo', action='store_true', help='Compute thermodynamic properties')
-    parser.add_argument('--beta_min', type=float, default=0.01, help='Minimum inverse temperature')
-    parser.add_argument('--beta_max', type=float, default=100.0, help='Maximum inverse temperature')
-    parser.add_argument('--beta_bins', type=int, default=100, help='Number of temperature bins')
+    parser.add_argument('--temp_min', type=float, default=0.001, help='Minimum temperature')
+    parser.add_argument('--temp_max', type=float, default=20.0, help='Maximum temperature')
+    parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
     
     # NLCE parameters
     parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation for NLCE')
@@ -151,6 +151,9 @@ def main():
     parser.add_argument('--parallel', action='store_true', help='Run ED in parallel')
     parser.add_argument('--num_cores', type=int, default=multiprocessing.cpu_count(), 
                        help='Number of cores to use for parallel processing')
+    
+    # SI units
+    parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
     
     args = parser.parse_args()
     
@@ -255,9 +258,9 @@ def main():
         ed_options = {
             "method": args.method,
             "thermo": args.thermo,
-            "beta_min": args.beta_min,
-            "beta_max": args.beta_max,
-            "beta_bins": args.beta_bins
+            "temp_min": args.temp_min,
+            "temp_max": args.temp_max,
+            "temp_bins": args.temp_bins
         }
         
         # Prepare arguments for each cluster
@@ -398,8 +401,14 @@ def main():
             f'--cluster_dir={cluster_info_dir}',
             f'--eigenvalue_dir={ed_dir}',
             f'--output_dir={nlc_dir}',
-            '--plot'
+            '--plot',
+            f'--temp_min={args.temp_min}',
+            f'--temp_max={args.temp_max}',
+            f'--temp_bins={args.temp_bins}',
         ]
+        
+        if args.SI_units:
+            nlc_params.append('--SI_units')
         
         if args.euler_resum:
             nlc_params.append('--euler_resum')

@@ -15,14 +15,14 @@ Calculates thermodynamic properties of a lattice using cluster expansion.
 import matplotlib.pyplot as plt
 
 class NLCExpansion:
-    def __init__(self, cluster_dir, eigenvalue_dir, beta_values=None, SI_units=False):
+    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, SI_units=False):
         """
         Initialize the NLC expansion calculator.
         
         Args:
             cluster_dir: Directory containing cluster information files
             eigenvalue_dir: Directory containing eigenvalue files from ED calculations
-            beta_values: Array of inverse temperature values to evaluate
+            temp_values: Array of inverse temperature values to evaluate
         """
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
@@ -34,10 +34,7 @@ class NLCExpansion:
             self.kB = 0.086173  # Boltzmann constant in meV/K
             self.SI = True
 
-        if beta_values is None:
-            self.beta_values = np.logspace(3, -2, 200)  # Default temperature range
-        else:
-            self.beta_values = beta_values
+        self.temp_values = np.logspace(np.log(temp_min)/np.log(10), np.log(temp_max)/np.log(10), num_temps)  # Default temperature range
 
         
 
@@ -115,7 +112,7 @@ class NLCExpansion:
         return [cid for cid, data in self.clusters.items() 
                 if data['order'] < order]
     
-    def calculate_thermodynamic_quantities(self, eigenvalues, num_sites):
+    def calculate_thermodynamic_quantities(self, eigenvalues):
         """
         Calculate thermodynamic quantities from eigenvalues.
         Uses a numerically stable approach to handle large beta values (low temperatures).
@@ -124,16 +121,14 @@ class NLCExpansion:
             Dictionary with 'energy', 'specific_heat', and 'entropy' as keys
         """
         results = {
-            'energy': np.zeros_like(self.beta_values),
-            'specific_heat': np.zeros_like(self.beta_values),
-            'entropy': np.zeros_like(self.beta_values)
+            'energy': np.zeros_like(self.temp_values),
+            'specific_heat': np.zeros_like(self.temp_values),
+            'entropy': np.zeros_like(self.temp_values)
         }
-
-        eigenvalues = eigenvalues / num_sites
         
-        for i, beta in enumerate(self.beta_values):
+        for i, temp in enumerate(self.temp_values):
             # For extremely large beta (low T), use ground state approximation
-            if beta > 1e10:
+            if temp < 1e-5:
                 ground_state_energy = np.min(eigenvalues)
                 results['energy'][i] = ground_state_energy
                 results['specific_heat'][i] = 0.0  # Specific heat approaches 0 as T->0
@@ -148,7 +143,7 @@ class NLCExpansion:
             
             # Calculate exponential terms with shifted eigenvalues
             # exp(-β(Ei-E0)) instead of exp(-βEi) to prevent underflow
-            exp_terms = np.exp(-beta * shifted_eigenvalues / self.kB)
+            exp_terms = np.exp(-shifted_eigenvalues / (temp * self.kB) )
             Z_shifted = np.sum(exp_terms)
             
             # Calculate energy using original eigenvalues but stable exponentials
@@ -158,15 +153,15 @@ class NLCExpansion:
             energy_squared = np.sum(eigenvalues**2 * exp_terms) / Z_shifted
             
             # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
-            specific_heat = beta**2 * (energy_squared - energy**2) / (self.kB) 
+            specific_heat = (energy_squared - energy**2) / (temp * temp * self.kB)
             if self.SI:
                 specific_heat *= (1.602176634e-22 * 6.02214076e23)  # Convert to SI units
             
             # Calculate entropy, accounting for shifted partition function
             # S = kB * [ln(Z) + βE]
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
-            entropy = self.kB * (np.log(Z_shifted) + beta * (energy - ground_state_energy) / self.kB)
-            
+            entropy = self.kB * (np.log(Z_shifted) + (energy - ground_state_energy) / (self.kB * temp))
+
             results['energy'][i] = energy
             results['specific_heat'][i] = specific_heat 
             results['entropy'][i] = entropy
@@ -195,7 +190,6 @@ class NLCExpansion:
             # Get thermodynamic quantities for this cluster
             quantities = self.calculate_thermodynamic_quantities(
                 self.clusters[cluster_id]['eigenvalues'],
-                self.clusters[cluster_id]['num_vertices']
             )
             
             # Get subclusters
@@ -227,15 +221,15 @@ class NLCExpansion:
             Dictionary with summed properties
         """
         results = {
-            'energy': np.zeros_like(self.beta_values),
-            'specific_heat': np.zeros_like(self.beta_values),
-            'entropy': np.zeros_like(self.beta_values)
+            'energy': np.zeros_like(self.temp_values),
+            'specific_heat': np.zeros_like(self.temp_values),
+            'entropy': np.zeros_like(self.temp_values)
         }
         
         # Calculate the NLC sum for each property
         for prop in ['energy', 'specific_heat', 'entropy']:
             # Sum by order
-            sum_by_order = defaultdict(lambda: np.zeros_like(self.beta_values))
+            sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
             
             for cluster_id, weight in self.weights[prop].items():
                 order = self.clusters[cluster_id]['order']
@@ -253,7 +247,7 @@ class NLCExpansion:
                 max_order = max(sum_by_order.keys()) if sum_by_order else 0
                 
                 # Initialize partial sums array
-                partial_sums = np.zeros((max_order + 1, len(self.beta_values)))
+                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
                 
                 # Calculate partial sums
                 for order in range(max_order + 1):
@@ -299,7 +293,7 @@ class NLCExpansion:
     
     def plot_results(self, results, save_path=None):
         """Plot energy and specific heat vs temperature."""
-        temperatures = 1.0 / self.beta_values
+        temperatures = 1.0 / self.temp_values
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
         
@@ -333,6 +327,10 @@ if __name__ == "__main__":
     parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation')
     parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
     parser.add_argument('--plot', action='store_true', help='Generate plot of results')
+    parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
+    parser.add_argument('--temp_min', type=float, default=1e-4, help='Minimum temperature for calculations')
+    parser.add_argument('--temp_max', type=float, default=1.0, help='Maximum temperature for calculations')
+    parser.add_argument('--temp_bins', type=int, default=200, help='Number of temperature points to calculate')
     
     args = parser.parse_args()
     
@@ -340,7 +338,7 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Create NLC instance
-    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir)
+    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.SI_units)
     
     # Run NLC calculation
     results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff)
@@ -353,27 +351,24 @@ if __name__ == "__main__":
     # Save energy data
     with open(energy_file, 'w') as f:
         f.write("# Temperature\tEnergy\n")
-        for i, beta in enumerate(nlc.beta_values):
-            temp = 1.0 / beta
+        for i, temp in enumerate(nlc.temp_values):
             f.write(f"{temp:.8e}\t{results['energy'][i]:.8e}\n")
 
     # Save specific heat data
     with open(specific_heat_file, 'w') as f:
         f.write("# Temperature\tSpecific_Heat\n")
-        for i, beta in enumerate(nlc.beta_values):
-            temp = 1.0 / beta
+        for i, temp in enumerate(nlc.temp_values):
             f.write(f"{temp:.8e}\t{results['specific_heat'][i]:.8e}\n")
 
     # Save entropy data
     with open(entropy_file, 'w') as f:
         f.write("# Temperature\tEntropy\n")
-        for i, beta in enumerate(nlc.beta_values):
-            temp = 1.0 / beta
+        for i, temp in enumerate(nlc.temp_values):
             f.write(f"{temp:.8e}\t{results['entropy'][i]:.8e}\n")
 
     # Plot results if requested
     if args.plot:
-        temperatures = 1.0 / nlc.beta_values
+        temperatures = nlc.temp_values
         
         # Plot energy
         plt.figure(figsize=(8, 6))

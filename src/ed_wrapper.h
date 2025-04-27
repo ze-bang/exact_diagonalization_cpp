@@ -50,9 +50,9 @@ struct EDParameters {
     
     // TPQ-specific parameters
     int num_samples = 20;
-    double beta_min = 0.01;
-    double beta_max = 100.0;
-    int num_beta_bins = 100;
+    double temp_min = 1e-3;
+    double temp_max = 20;
+    int num_temp_bins = 100;
     int num_sites = 0; // Number of sites in the system
 };
 
@@ -193,8 +193,8 @@ EDResults exact_diagonalization_core(
                 std::cout << "Using TPQ method for thermal calculations" << std::endl;
                 TPQResults tpq_results = perform_tpq_calculation(
                     H, hilbert_space_dim, params.num_samples, 50, 
-                    -10.0, 10.0, 0.0, params.beta_min, params.beta_max, 
-                    params.num_beta_bins);
+                    -10.0, 10.0, 0.0, params.temp_min, params.temp_max, 
+                    params.num_temp_bins);
                 
                 // Convert TPQ results to thermodynamic data
                 results.thermo_data.temperatures = tpq_results.temperatures;
@@ -215,6 +215,11 @@ EDResults exact_diagonalization_core(
             break;
     }
     
+    // Divide each eigenvalue by the number of sites
+    for (auto& eigenvalue : results.eigenvalues) {
+        eigenvalue /= params.num_sites;
+    }
+
     return results;
 }
 
@@ -477,44 +482,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                 out[row] += val * in[col];
             }
         };
-
-        // Print the block Hamiltonian matrix for debugging
-        std::cout << "Matrix representation of block " << block_idx << " (dim: " << block_dim << "):" << std::endl;
-
-        // // For large matrices, only print summary or write to file
-        // if (block_dim > 20) {
-        //     std::cout << "Matrix too large to display directly. Writing to file..." << std::endl;
-        //     std::string matrix_file = params.output_dir + "/block_" + std::to_string(block_idx) + "_matrix.txt";
-        //     std::ofstream mat_out(matrix_file);
-        //     if (mat_out.is_open()) {
-        //         mat_out << "# Block Hamiltonian Matrix " << block_idx << " (dim: " << block_dim << ")" << std::endl;
-        //         mat_out << "# Format: row col real imag" << std::endl;
-        //         for (const auto& [row, col, val] : block_entries) {
-        //             mat_out << row << " " << col << " " << val.real() << " " << val.imag() << std::endl;
-        //         }
-        //         mat_out.close();
-        //         std::cout << "Matrix saved to " << matrix_file << std::endl;
-        //     } else {
-        //         std::cout << "Failed to open file for matrix output." << std::endl;
-        //     }
-        // } else {
-        //     // Create a dense matrix representation for visualization
-        //     std::vector<std::vector<Complex>> dense_matrix(block_dim, std::vector<Complex>(block_dim, Complex(0.0, 0.0)));
-            
-        //     // Fill in the entries
-        //     for (const auto& [row, col, val] : block_entries) {
-        //         dense_matrix[row][col] = val;
-        //     }
-            
-        //     // Print the matrix
-        //     for (int i = 0; i < block_dim; ++i) {
-        //         for (int j = 0; j < block_dim; ++j) {
-        //             std::cout << "(" << dense_matrix[i][j].real() << "," << dense_matrix[i][j].imag() << ") ";
-        //         }
-        //         std::cout << std::endl;
-        //     }
-        //     std::cout << std::endl;
-        // }
         
         // Modify diagonalization parameters for the block
         EDParameters block_params = params;
