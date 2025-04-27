@@ -28,7 +28,6 @@ def load_experimental_data(file_path):
     data = np.loadtxt(file_path)
     temp = data[:, 0]  # Temperature (K)
     spec_heat = data[:, 1]  # Specific heat (J*mol/K)
-    spec_heat = spec_heat / (6.022e23 * 1.6021773e-22)
     return temp, spec_heat
 
 def run_nlce(params, fixed_params, exp_temp, work_dir):
@@ -50,7 +49,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         '--temp_max', str(max(exp_temp) * 1.2),
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--thermo',
-        '--SI_units'
+        '--SI_units',
+        '--euler_resum'
     ]
     
     if fixed_params.get("skip_cluster_gen", False):
@@ -176,7 +176,7 @@ def main():
     
     # Optimization parameters
     parser.add_argument('--method', type=str, default='L-BFGS-B', help='Optimization method')
-    parser.add_argument('--max_iter', type=int, default=20, help='Maximum number of iterations')
+    parser.add_argument('--max_iter', type=int, default=200 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')
     
     args = parser.parse_args()

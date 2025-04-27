@@ -27,12 +27,7 @@ class NLCExpansion:
         self.cluster_dir = cluster_dir
         self.eigenvalue_dir = eigenvalue_dir
         
-        if not SI_units:
-            self.kB = 1.0
-            self.SI = False
-        else:
-            self.kB = 0.086173  # Boltzmann constant in meV/K
-            self.SI = True
+        self.SI = SI_units  # Flag for SI units
 
         self.temp_values = np.logspace(np.log(temp_min)/np.log(10), np.log(temp_max)/np.log(10), num_temps)  # Default temperature range
 
@@ -143,7 +138,7 @@ class NLCExpansion:
             
             # Calculate exponential terms with shifted eigenvalues
             # exp(-β(Ei-E0)) instead of exp(-βEi) to prevent underflow
-            exp_terms = np.exp(-shifted_eigenvalues / (temp * self.kB) )
+            exp_terms = np.exp(-shifted_eigenvalues / temp)
             Z_shifted = np.sum(exp_terms)
             
             # Calculate energy using original eigenvalues but stable exponentials
@@ -153,13 +148,17 @@ class NLCExpansion:
             energy_squared = np.sum(eigenvalues**2 * exp_terms) / Z_shifted
             
             # Specific heat = β² * (⟨E²⟩ - ⟨E⟩²)
-            specific_heat = (energy_squared - energy**2) / (temp * temp * self.kB)
+            specific_heat = (energy_squared - energy**2) / (temp * temp)
             
             # Calculate entropy, accounting for shifted partition function
             # S = kB * [ln(Z) + βE]
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
-            entropy = self.kB * (np.log(Z_shifted) + (energy - ground_state_energy) / (self.kB * temp))
+            entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
 
+            if self.SI:
+                specific_heat *= (6.02214076e23  * 1.380649e-23)  # Convert to SI units (J/K)
+                entropy *= (6.02214076e23 * 1.380649e-23)
+                energy *= (6.02214076e23 * 1.380649e-23)
             results['energy'][i] = energy
             results['specific_heat'][i] = specific_heat 
             results['entropy'][i] = entropy
@@ -205,7 +204,7 @@ class NLCExpansion:
                                           self.clusters[subcluster_id]['multiplicity']
                 
                 # Store the weight
-                self.weights[prop][cluster_id] = property_value / self.clusters[cluster_id]['multiplicity']
+                self.weights[prop][cluster_id] = property_value
     
     def sum_nlc(self, euler_resum=False, order_cutoff=None):
         """

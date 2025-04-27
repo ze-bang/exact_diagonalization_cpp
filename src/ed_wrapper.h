@@ -253,9 +253,9 @@ EDResults exact_diagonalization_core(
     }
     
     // Divide each eigenvalue by the number of sites
-    for (auto& eigenvalue : results.eigenvalues) {
-        eigenvalue /= params.num_sites;
-    }
+    // for (auto& eigenvalue : results.eigenvalues) {
+    //     eigenvalue /= params.num_sites;
+    // }
 
     return results;
 }
