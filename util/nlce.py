@@ -8,6 +8,8 @@ import re
 import multiprocessing
 import logging
 from tqdm import tqdm
+import numpy as np
+import traceback
 
 #!/usr/bin/env python3
 """
@@ -282,6 +284,108 @@ def main():
     else:
         logging.info("Skipping Exact Diagonalization step.")
     
+    # Step 3.5: Plot thermodynamic data for each cluster
+    if args.thermo and not args.skip_ed:
+        logging.info("="*80)
+        logging.info("Step 3.5: Plotting thermodynamic data for each cluster")
+        logging.info("="*80)
+        
+        # Create directory for thermodynamic plots
+        thermo_plots_dir = os.path.join(args.base_dir, f'thermo_plots_order_{args.max_order}')
+        os.makedirs(thermo_plots_dir, exist_ok=True)
+        
+        try:
+            import matplotlib.pyplot as plt
+            
+            # Iterate through all clusters
+            for cluster_id, order, _ in tqdm(clusters, desc="Plotting thermodynamic data"):
+                cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
+                
+                # Check if thermodynamic data exists
+                thermo_file = os.path.join(cluster_ed_dir, "thermo/thermo_data.txt")
+                if not os.path.exists(thermo_file):
+                    logging.warning(f"No thermodynamic data found for cluster {cluster_id}")
+                    continue
+                
+                # Load thermodynamic data
+                try:
+                    # First read the header to determine the columns
+                    columns = []
+                    with open(thermo_file, 'r') as f:
+                        for line in f:
+                            if line.startswith('#') and 'Column' in line:
+                                parts = line.strip('# \n').split(':')
+                                if len(parts) >= 2:
+                                    col_num = int(parts[0].replace('Column', '').strip()) - 1
+                                    col_name = parts[1].strip()
+                                    while len(columns) <= col_num:
+                                        columns.append(None)
+                                    columns[col_num] = col_name
+                    
+                    # Load the data
+                    data = np.loadtxt(thermo_file, comments='#')
+                    
+                    # Create plots
+                    fig, axs = plt.subplots(2, 2, figsize=(12, 10))
+                    fig.suptitle(f"Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
+                    
+                    # Get indices for each quantity
+                    beta_idx = columns.index('Temperature') if 'Temperature' in columns else 0
+                    energy_idx = columns.index('Energy') if 'Energy' in columns else 1
+                    free_energy_idx = columns.index('Free Energy') if 'Free Energy' in columns else 4
+                    spec_heat_idx = columns.index('Specific Heat') if 'Specific Heat' in columns else 2
+                    entropy_idx = columns.index('Entropy') if 'Entropy' in columns else 3
+                    
+                    # Convert beta to temperature
+                    T = data[:, beta_idx]
+                    
+                    # Sort by temperature (ascending)
+                    sort_idx = np.argsort(T)
+                    T = T[sort_idx]
+                    data = data[sort_idx]
+                    
+                    # Plot energy
+                    axs[0, 0].plot(T, data[:, energy_idx], 'r-')
+                    axs[0, 0].set_xlabel("Temperature")
+                    axs[0, 0].set_ylabel("Energy")
+                    axs[0, 0].set_xscale('log')
+                    axs[0, 0].grid(True)
+                    
+                    # Plot specific heat
+                    axs[0, 1].plot(T, data[:, spec_heat_idx], 'b-')
+                    axs[0, 1].set_xlabel("Temperature")
+                    axs[0, 1].set_ylabel("Specific Heat")
+                    axs[0, 1].set_xscale('log')
+                    axs[0, 1].grid(True)
+                    
+                    # Plot entropy
+                    axs[1, 0].plot(T, data[:, entropy_idx], 'g-')
+                    axs[1, 0].set_xlabel("Temperature")
+                    axs[1, 0].set_ylabel("Entropy")
+                    axs[1, 0].set_xscale('log')
+                    axs[1, 0].grid(True)
+                    
+                    # Plot free energy
+                    axs[1, 1].plot(T, data[:, free_energy_idx], 'm-')
+                    axs[1, 1].set_xlabel("Temperature")
+                    axs[1, 1].set_ylabel("Free Energy")
+                    axs[1, 1].set_xscale('log')
+                    axs[1, 1].grid(True)
+                    
+                    # Save plot
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(thermo_plots_dir, f"thermo_cluster_{cluster_id}_order_{order}.png"))
+                    plt.close(fig)
+                    
+                    logging.info(f"Thermodynamic plots created for cluster {cluster_id}")
+                    
+                except Exception as e:
+                    logging.error(f"Error plotting thermodynamic data for cluster {cluster_id}: {e}")
+                    logging.error(traceback.format_exc())
+        
+        except ImportError:
+            logging.error("Matplotlib not installed. Skipping thermodynamic plots.")
+
     # Step 4: Perform NLCE summation
     if not args.skip_nlc:
         logging.info("="*80)
