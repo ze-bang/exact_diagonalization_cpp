@@ -53,8 +53,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         '--euler_resum'
     ]
     
-    if fixed_params.get("skip_cluster_gen", False):
-        cmd.append('--skip_cluster_gen')
+    cmd.append('--skip_cluster_gen')
     if fixed_params.get("skip_ham_prep", False):
         cmd.append('--skip_ham_prep')
     
@@ -163,8 +162,8 @@ def main():
     parser.add_argument('--initial_Jxx', type=float, default=0.0, help='Initial guess for Jxx coupling')
     parser.add_argument('--initial_Jyy', type=float, default=0.0, help='Initial guess for Jyy coupling')
     parser.add_argument('--initial_Jzz', type=float, default=1.0, help='Initial guess for Jzz coupling')
-    parser.add_argument('--bound_min', type=float, default=-2.0, help='Lower bound for J parameters')
-    parser.add_argument('--bound_max', type=float, default=2.0, help='Upper bound for J parameters')
+    parser.add_argument('--bound_min', type=float, default=-100.0, help='Lower bound for J parameters')
+    parser.add_argument('--bound_max', type=float, default=100.0, help='Upper bound for J parameters')
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=3, help='Maximum order for NLCE calculation')
@@ -173,7 +172,7 @@ def main():
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
 
 
-    parser.add_argument('--skip_cluster_gen', action='store_false', help='Skip cluster generation step')
+    parser.add_argument('--skip_cluster_gen', action='store_true', help='Skip cluster generation step')
     parser.add_argument('--skip_ham_prep', action='store_true', help='Skip Hamiltonian preparation step')
     
     # Optimization parameters
@@ -206,20 +205,21 @@ def main():
 
 
     # Generate clusters once before optimization starts to avoid redundant generation
-    logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
-    cluster_gen_cmd = [
-        'python3',
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
-        '--max_order', str(args.max_order),
-        '--output_dir', work_dir+'/clusters_order_'+str(args.max_order)+'/',
-    ]
-    try:
-        subprocess.run(cluster_gen_cmd, check=True)
-        logging.info(f"Clusters successfully generated in {work_dir}")
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error generating clusters: {e}")
-        logging.error("Continuing without pre-generating clusters")
-    
+    if not args.skip_cluster_gen:
+        logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
+        cluster_gen_cmd = [
+            'python3',
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+            '--max_order', str(args.max_order),
+            '--output_dir', work_dir+'/clusters_order_'+str(args.max_order)+'/',
+        ]
+        try:
+            subprocess.run(cluster_gen_cmd, check=True)
+            logging.info(f"Clusters successfully generated in {work_dir}")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error generating clusters: {e}")
+            logging.error("Continuing without pre-generating clusters")
+        
     try:
         # Load experimental data
         logging.info(f"Loading experimental data from {args.exp_data}")
@@ -232,7 +232,6 @@ def main():
             "h": args.h,
             "field_dir": args.field_dir,
             "temp_bins": args.temp_bins,
-            "skip_cluster_gen": args.skip_cluster_gen,
             "skip_ham_prep": args.skip_ham_prep,
             "temp_min": args.temp_min,
             "temp_max": args.temp_max

@@ -71,6 +71,8 @@ def run_nlce_for_order(order, args):
         cmd.append(f'--num_cores={args.num_cores}')
     if args.SI_units:
         cmd.append('--SI_units')
+    if args.skip_cluster_gen:
+        cmd.append('--skip_cluster_gen')
         
     # Add field direction if specified
     if args.field_dir:
@@ -301,6 +303,8 @@ def main():
                         help='Skip calculations and only plot existing results')
     parser.add_argument('--start_order', type=int, default=1,
                         help='Starting order (default is 1)')
+    parser.add_argument('--skip_cluster_gen', action='store_true',
+                        help='Skip cluster generation and only run NLCE calculations')
     
     # Parallel processing
     parser.add_argument('--parallel', action='store_true', help='Run ED in parallel')

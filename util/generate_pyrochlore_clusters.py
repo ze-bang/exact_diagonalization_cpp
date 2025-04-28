@@ -418,7 +418,7 @@ def main():
     max_order = args.max_order
     
     # Set lattice size
-    L = args.lattice_size if args.lattice_size > 0 else max(3, 5*max_order)
+    L = args.lattice_size if args.lattice_size > 0 else max(6, 5*max_order)
     
     print(f"Generating pyrochlore lattice of size {L}×{L}×{L}...")
     lattice, pos, tetrahedra = create_pyrochlore_lattice(L)
