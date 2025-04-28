@@ -56,7 +56,7 @@ class NLCExpansion:
             num_vertices = None
             for line in lines:
                 if line.startswith("# Multiplicity:"):
-                    multiplicity = int(line.split(":")[1].strip())
+                    multiplicity = float(line.split(":")[1].strip())
                 elif line.startswith("# Number of vertices:"):
                     num_vertices = int(line.split(":")[1].strip())
                 
@@ -164,8 +164,101 @@ class NLCExpansion:
             results['entropy'][i] = entropy
             
         return results
+    
+    def read_subcluster_info(self):
+        """Read subcluster information from the provided file."""
+
+        self.subcluster_info = {}
+        
+        subcluster_file = 'subclusters_info.txt'  # Default subcluster info file
+
+        # Check if file exists in the specified directory
+        filepath = os.path.join(self.cluster_dir, subcluster_file)
+        print(f"Looking for subcluster info file at: {filepath}")
+        if not os.path.exists(filepath):
+            filepath = subcluster_file  # Try relative path
+            if not os.path.exists(filepath):
+                print(f"Warning: Subcluster info file not found at {subcluster_file}")
+                return
+                
+        with open(filepath, 'r') as f:
+            current_cluster = None
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                    
+                if line.startswith('Cluster'):
+                    # Parse cluster header: "Cluster X (Order Y, Multiplicity Z):"
+                    match = re.match(r'Cluster (\d+) \(Order (\d+)\):', line)
+                    if match:
+                        current_cluster = int(match.group(1))
+                        self.subcluster_info[current_cluster] = {'subclusters': {}}
+                        
+                elif line.startswith('Subclusters:'):
+                    # Parse subclusters: "(1, 2), (3, 4), ..."
+                    subclusters_str = line.replace('  Subclusters:', '').strip()
+                    if subclusters_str == "No subclusters" or not subclusters_str:
+                        continue
+                        
+                    # Extract all (id, multiplicity) pairs
+                    pairs = re.findall(r'\((\d+),\s*(\d+)\)', subclusters_str)
+                    for subcluster_id, multiplicity in pairs:
+                        print(f"Adding subcluster {subcluster_id} with multiplicity {multiplicity} to cluster {current_cluster}")
+                        self.subcluster_info[current_cluster]['subclusters'][int(subcluster_id)] = int(multiplicity)
+    
+    def get_subclusters(self, cluster_id):
+        """
+        Get all subclusters of a given cluster with their multiplicities.
+        
+        Returns:
+            Dictionary mapping subcluster_id to its multiplicity in this cluster
+        """
+        # Try to use subcluster info if available
+        if hasattr(self, 'subcluster_info') and cluster_id in self.subcluster_info:
+            return self.subcluster_info[cluster_id]['subclusters']
+        
+        # Fallback to simple heuristic based on order
+        subclusters = {}
+        order = self.clusters[cluster_id]['order']
+        for cid, data in self.clusters.items():
+            if data['order'] < order:
+                subclusters[cid] = 1  # Assume multiplicity 1 as a fallback
+                
+        return subclusters
+    
+
+    def print_subcluster_info(self):
+        """Print out the subcluster information for all clusters."""
+        # Read subcluster information if not already loaded
+        if not hasattr(self, 'subcluster_info'):
+            self.read_subcluster_info()
+            
+        if not hasattr(self, 'subcluster_info') or not self.subcluster_info:
+            print("No subcluster information available.")
+            return
+            
+        print("Subcluster Information:")
+        print("----------------------")
+        
+        for cluster_id, info in sorted(self.subcluster_info.items()):
+            print(f"Cluster {cluster_id}:")
+            if 'subclusters' in info and info['subclusters']:
+                print("  Subclusters (ID, Multiplicity):")
+                for subcluster_id, multiplicity in sorted(info['subclusters'].items()):
+                    print(f"    {subcluster_id}: {multiplicity}")
+            else:
+                print("  No subclusters")
+            print()
+    
     def calculate_weights(self):
         """Calculate weights for all clusters using the NLC principle."""
+        # Read subcluster information if not already loaded
+        if not hasattr(self, 'subcluster_info'):
+            self.read_subcluster_info()
+
+        self.print_subcluster_info()
+            
         # Sort clusters by order
         sorted_clusters = sorted(
             [(cid, data['order']) for cid, data in self.clusters.items()], 
@@ -189,7 +282,7 @@ class NLCExpansion:
                 self.clusters[cluster_id]['eigenvalues'],
             )
             
-            # Get subclusters
+            # Get subclusters with their multiplicities
             subclusters = self.get_subclusters(cluster_id)
             
             # Calculate weights for energy and specific heat
@@ -197,15 +290,16 @@ class NLCExpansion:
                 # Property of the cluster
                 property_value = quantities[prop]
                 
-                # Subtract contributions from all subclusters
-                for subcluster_id in subclusters:
+
+                # Subtract contributions from all subclusters with correct multiplicities
+                for subcluster_id, multiplicity in subclusters.items():
                     if subcluster_id in self.weights[prop]:
-                        property_value -= self.weights[prop][subcluster_id] * \
-                                          self.clusters[subcluster_id]['multiplicity']
+                        property_value -= self.weights[prop][subcluster_id] * multiplicity
                 
                 # Store the weight
                 self.weights[prop][cluster_id] = property_value
-    
+
+
     def sum_nlc(self, euler_resum=False, order_cutoff=None):
         """
         Perform the NLC summation with optional Euler resummation.

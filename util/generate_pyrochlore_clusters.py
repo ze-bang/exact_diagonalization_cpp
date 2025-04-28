@@ -197,10 +197,14 @@ def generate_clusters(tet_graph, max_order):
     distinct_clusters = []
     multiplicities = []
     
+    # Total number of tetrahedra for per-site normalization
+    n_tetrahedra = tet_graph.number_of_nodes()
+    
     # Start with single tetrahedron cluster (all are equivalent)
     first_tet = list(tet_graph.nodes())[0]
     distinct_clusters.append(frozenset([first_tet]))
-    multiplicities.append(tet_graph.number_of_nodes())  # All tetrahedra are equivalent
+    # Calculate multiplicity per site (per tetrahedron in this case)
+    multiplicities.append(1.0)  # Normalized to 1 per site
     
     # Keep track of all clusters by order
     all_clusters_by_order = {1: [frozenset([i]) for i in tet_graph.nodes()]}
@@ -245,10 +249,11 @@ def generate_clusters(tet_graph, max_order):
                 iso_classes.append(cluster)
                 class_members.append([cluster])
         
-        # Add distinct clusters with multiplicities
+        # Add distinct clusters with multiplicities per site
         for i, rep_cluster in enumerate(iso_classes):
             distinct_clusters.append(rep_cluster)
-            multiplicities.append(len(class_members[i]))
+            # Multiplicity per site
+            multiplicities.append(len(class_members[i]) / n_tetrahedra /4)
         
         print(f"  Found {len(iso_classes)} distinct clusters of order {order}")
     
@@ -377,7 +382,7 @@ def save_subclusters_info(subclusters_info, distinct_clusters, multiplicities, o
             subclusters = subclusters_info.get(i, [])
             subcluster_str = ", ".join([f"({j+1}, {count})" for j, count in subclusters])
             
-            f.write(f"Cluster {cluster_id} (Order {order}, Multiplicity {multiplicity}):\n")
+            f.write(f"Cluster {cluster_id} (Order {order}):\n")
             if subclusters:
                 f.write(f"  Subclusters: {subcluster_str}\n")
             else:
@@ -419,7 +424,7 @@ def main():
 
 
     save_subclusters_info(identify_subclusters(distinct_clusters, tet_graph), distinct_clusters, multiplicities, output_dir)
-
+    print(f"Subclusters information saved to {output_dir}/subclusters_info.txt")
     
     # Extract and save detailed information for each cluster
     print("\nExtracting and saving detailed cluster information...")
@@ -433,7 +438,6 @@ def main():
         
         # Save to file
         save_cluster_info(cluster_info, cluster_id, order, multiplicity, output_dir)
-
 
         print(f"  Saved to {output_dir}/cluster_{cluster_id}_order_{order}.dat")
 
