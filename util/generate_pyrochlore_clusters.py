@@ -6,6 +6,7 @@ import itertools
 import sys
 from collections import defaultdict
 import os
+import collections
 
 #!/usr/bin/env python3
 """
@@ -184,80 +185,102 @@ def build_tetrahedron_graph(tetrahedra):
 
 def generate_clusters(tet_graph, max_order):
     """
-    Generate all topologically distinct clusters up to max_order.
+    Generate all topologically distinct clusters up to max_order and their multiplicities.
     
     Args:
-    - tet_graph: NetworkX graph where nodes are tetrahedra
-    - max_order: Maximum number of tetrahedra in a cluster
-    
+        tet_graph: NetworkX graph where nodes are tetrahedra and edges connect adjacent tetrahedra
+        max_order: Maximum number of tetrahedra in a cluster
+        
     Returns:
-    - distinct_clusters: List of topologically distinct clusters
-    - multiplicities: List of multiplicities for each cluster
+        distinct_clusters: List of topologically distinct clusters
+        multiplicities: List of multiplicities for each distinct cluster
     """
+    
     distinct_clusters = []
     multiplicities = []
     
-    # Total number of tetrahedra for per-site normalization
-    n_tetrahedra = tet_graph.number_of_nodes()
-    
-    # Start with single tetrahedron cluster (all are equivalent)
-    first_tet = list(tet_graph.nodes())[0]
-    distinct_clusters.append(frozenset([first_tet]))
-    # Calculate multiplicity per site (per tetrahedron in this case)
-    multiplicities.append(1.0)  # Normalized to 1 per site
-    
-    # Keep track of all clusters by order
-    all_clusters_by_order = {1: [frozenset([i]) for i in tet_graph.nodes()]}
-    
-    # Generate clusters of increasing order
-    for order in range(2, max_order + 1):
+    # Process each order
+    for order in range(1, max_order + 1):
         print(f"Generating clusters of order {order}...")
-        current_order_clusters = set()
         
-        # Expand each cluster from previous order
-        for cluster in all_clusters_by_order[order-1]:
-            # Find all tetrahedra adjacent to the cluster
-            neighbors = set()
-            for tet in cluster:
-                for neighbor in tet_graph.neighbors(tet):
-                    if neighbor not in cluster:
-                        neighbors.add(neighbor)
+        # For order 1, all tetrahedra are equivalent in a uniform lattice
+        if order == 1:
+            # Take one representative tetrahedron
+            first_tet = list(tet_graph.nodes())[0]
+            distinct_clusters.append([first_tet])
+            multiplicities.append(1.0)
+            continue
+        
+        # For higher orders, generate all possible connected subgraphs
+        all_subgraphs = []
+        
+        # Start from each tetrahedron and grow clusters
+        for start_tet in tet_graph.nodes():
+            # Use BFS to systematically grow clusters
+            queue = collections.deque([(frozenset([start_tet]), set(tet_graph.neighbors(start_tet)))])
+            visited_configurations = set()
             
-            # Add each neighbor to form new clusters
-            for neighbor in neighbors:
-                new_cluster = frozenset(cluster.union({neighbor}))
-                current_order_clusters.add(new_cluster)
+            while queue:
+                current, frontier = queue.popleft()
+                
+                # Skip if we've seen this configuration before
+                if current in visited_configurations:
+                    continue
+                visited_configurations.add(current)
+                
+                if len(current) == order:
+                    all_subgraphs.append(current)
+                    continue
+                
+                if len(current) > order:
+                    continue
+                
+                # Try adding each frontier tetrahedron
+                for next_tet in frontier:
+                    new_set = current | {next_tet}
+                    
+                    # Update frontier with neighbors of the new tetrahedron
+                    new_frontier = frontier | set(tet_graph.neighbors(next_tet))
+                    new_frontier -= new_set  # Remove tetrahedra already in the set
+                    
+                    queue.append((new_set, new_frontier))
         
-        all_clusters_by_order[order] = list(current_order_clusters)
+        # Remove duplicates
+        unique_subgraphs = set(all_subgraphs)
         
-        # Find topologically distinct clusters using graph isomorphism
-        iso_classes = []
-        class_members = []
+        # Group by isomorphism class
+        isomorphism_classes = []
         
-        for cluster in current_order_clusters:
-            subgraph = tet_graph.subgraph(cluster)
-            found_isomorphic = False
+        for subgraph_nodes in unique_subgraphs:
+            subgraph = tet_graph.subgraph(subgraph_nodes)
             
-            for i, rep_cluster in enumerate(iso_classes):
-                rep_subgraph = tet_graph.subgraph(rep_cluster)
+            found_match = False
+            for idx, (rep_nodes, embeddings) in enumerate(isomorphism_classes):
+                rep_subgraph = tet_graph.subgraph(rep_nodes)
+                
                 if nx.is_isomorphic(subgraph, rep_subgraph):
-                    class_members[i].append(cluster)
-                    found_isomorphic = True
+                    isomorphism_classes[idx][1].append(subgraph_nodes)
+                    found_match = True
                     break
             
-            if not found_isomorphic:
-                iso_classes.append(cluster)
-                class_members.append([cluster])
+            if not found_match:
+                isomorphism_classes.append((subgraph_nodes, [subgraph_nodes]))
         
-        # Add distinct clusters with multiplicities per site
-        for i, rep_cluster in enumerate(iso_classes):
-            distinct_clusters.append(rep_cluster)
-            # Multiplicity per site
-            multiplicities.append(len(class_members[i]) / n_tetrahedra /4)
-        
-        print(f"  Found {len(iso_classes)} distinct clusters of order {order}")
+        # Add to results with corrected multiplicities
+        for rep_nodes, embeddings in isomorphism_classes:
+            cluster = list(rep_nodes)
+            distinct_clusters.append(cluster)
+            
+            # Calculate embedding weight for NLCE
+            # For an infinite lattice, normalized by the number of tetrahedra
+            # This gives the correct weight per lattice site
+            multiplicity = len(embeddings) / len(tet_graph.nodes())
+            multiplicities.append(multiplicity)
+            
+        print(f"Found {len(isomorphism_classes)} distinct clusters of order {order}")
     
     return distinct_clusters, multiplicities
+
 
 def visualize_cluster(lattice, pos, tetrahedra, cluster, cluster_index):
     """Visualize a single cluster in 3D."""
@@ -395,7 +418,7 @@ def main():
     max_order = args.max_order
     
     # Set lattice size
-    L = args.lattice_size if args.lattice_size > 0 else max(3, 2*max_order)
+    L = args.lattice_size if args.lattice_size > 0 else max(3, 5*max_order)
     
     print(f"Generating pyrochlore lattice of size {L}×{L}×{L}...")
     lattice, pos, tetrahedra = create_pyrochlore_lattice(L)

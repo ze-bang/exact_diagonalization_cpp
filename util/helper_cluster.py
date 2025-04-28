@@ -224,10 +224,10 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
                 j = neighbor_id
                 
                 # Heisenberg interactions
-                interALL.append([2, node_mapping[i], 2, node_mapping[j], Jzz/2, 0])  # Sz-Sz
-                interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm/2, 0])   # S+-S-
-                interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm/2, 0])   # S--S+
-                Jpmpm_ = Jpmpm/2 * non_kramer_factor[i % 4, j % 4]
+                interALL.append([2, node_mapping[i], 2, node_mapping[j], Jzz, 0])  # Sz-Sz
+                interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm, 0])   # S+-S-
+                interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm, 0])   # S--S+
+                Jpmpm_ = Jpmpm * non_kramer_factor[i % 4, j % 4]
                 print(Jpmpm_)
                 interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S--S-
                 interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S+-S+

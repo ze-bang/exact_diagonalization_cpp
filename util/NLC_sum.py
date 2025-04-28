@@ -155,6 +155,11 @@ class NLCExpansion:
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
             entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
 
+            # Convert to per site
+            energy /= 2
+            specific_heat /= 2
+            entropy /= 2
+
             if self.SI:
                 specific_heat *= (6.02214076e23  * 1.380649e-23)  # Convert to SI units (J/K)
                 entropy *= (6.02214076e23 * 1.380649e-23)
@@ -289,13 +294,10 @@ class NLCExpansion:
             for prop in ['energy', 'specific_heat', 'entropy']:
                 # Property of the cluster
                 property_value = quantities[prop]
-                
-
                 # Subtract contributions from all subclusters with correct multiplicities
                 for subcluster_id, multiplicity in subclusters.items():
                     if subcluster_id in self.weights[prop]:
                         property_value -= self.weights[prop][subcluster_id] * multiplicity
-                
                 # Store the weight
                 self.weights[prop][cluster_id] = property_value
 
