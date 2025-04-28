@@ -45,8 +45,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         '--h', str(fixed_params["h"]),
         '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
         '--base_dir', work_dir,
-        '--temp_min', str(min(exp_temp) * 0.5),
-        '--temp_max', str(max(exp_temp) * 1.2),
+        '--temp_min', str(fixed_params["temp_min"]),
+        '--temp_max', str(fixed_params["temp_max"]),
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--thermo',
         '--SI_units',
@@ -171,7 +171,9 @@ def main():
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
     parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], help='Field direction (x,y,z)')
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
-    parser.add_argument('--skip_cluster_gen', action='store_true', help='Skip cluster generation step')
+
+
+    parser.add_argument('--skip_cluster_gen', action='store_false', help='Skip cluster generation step')
     parser.add_argument('--skip_ham_prep', action='store_true', help='Skip Hamiltonian preparation step')
     
     # Optimization parameters
@@ -179,6 +181,11 @@ def main():
     parser.add_argument('--max_iter', type=int, default=200 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')
     
+    # Temperature range for NLCE
+    parser.add_argument('--temp_min', type=float, default=1.0, help='Minimum temperature for NLCE')
+    parser.add_argument('--temp_max', type=float, default=20.0, help='Maximum temperature for NLCE')
+
+
     args = parser.parse_args()
     
     # Create output directory
@@ -196,6 +203,22 @@ def main():
     else:
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
+
+
+    # Generate clusters once before optimization starts to avoid redundant generation
+    logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
+    cluster_gen_cmd = [
+        'python3',
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+        '--max_order', str(args.max_order),
+        '--output_dir', work_dir+'/clusters_order_'+str(args.max_order)+'/',
+    ]
+    try:
+        subprocess.run(cluster_gen_cmd, check=True)
+        logging.info(f"Clusters successfully generated in {work_dir}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error generating clusters: {e}")
+        logging.error("Continuing without pre-generating clusters")
     
     try:
         # Load experimental data
@@ -210,9 +233,22 @@ def main():
             "field_dir": args.field_dir,
             "temp_bins": args.temp_bins,
             "skip_cluster_gen": args.skip_cluster_gen,
-            "skip_ham_prep": args.skip_ham_prep
+            "skip_ham_prep": args.skip_ham_prep,
+            "temp_min": args.temp_min,
+            "temp_max": args.temp_max
         }
         
+        # Filter experimental data based on temperature range
+        valid_indices = (exp_temp >= args.temp_min) & (exp_temp <= args.temp_max)
+        exp_temp = exp_temp[valid_indices]
+        exp_spec_heat = exp_spec_heat[valid_indices]
+        logging.info(f"Filtered to {len(exp_temp)} data points within temperature range [{args.temp_min}, {args.temp_max}]")
+
+        # Check if any data points remain
+        if len(exp_temp) == 0:
+            logging.error(f"No experimental data points within temperature range [{args.temp_min}, {args.temp_max}]")
+            sys.exit(1)
+
         # Initial guess for parameters
         initial_params = [args.initial_Jxx, args.initial_Jyy, args.initial_Jzz]
         
