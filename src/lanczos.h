@@ -5115,13 +5115,19 @@ void finite_temperature_lanczos(
             Complex neg_alpha = Complex(-alpha[j], 0.0);
             cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
             
-            // Full reorthogonalization for numerical stability
-            for (int k = 0; k <= j; k++) {
+            // Local reorthogonalization against only the most recent vectors
+            // This is more lightweight than full reorthogonalization
+            if (j > 0) {
+                // Reorthogonalize against the current vector again (twice is more stable)
                 Complex overlap;
-                cblas_zdotc_sub(N, lanczos_basis[k].data(), 1, w.data(), 1, &overlap);
-                
+                cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &overlap);
                 Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, lanczos_basis[k].data(), 1, w.data(), 1);
+                cblas_zaxpy(N, &neg_overlap, v_current.data(), 1, w.data(), 1);
+                
+                // Reorthogonalize against the previous vector
+                cblas_zdotc_sub(N, v_prev.data(), 1, w.data(), 1, &overlap);
+                neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, v_prev.data(), 1, w.data(), 1);
             }
             
             // beta_{j+1} = ||w||
