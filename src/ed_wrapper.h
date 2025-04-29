@@ -12,6 +12,7 @@ enum class DiagonalizationMethod {
     LANCZOS,               // Standard Lanczos algorithm
     LANCZOS_SELECTIVE,     // Lanczos with selective reorthogonalization
     LANCZOS_NO_ORTHO,      // Lanczos without reorthogonalization
+    BLOCK_LANCZOS,         // Block Lanczos
     SHIFT_INVERT,          // Shift-invert Lanczos
     SHIFT_INVERT_ROBUST,   // Robust shift-invert Lanczos
     CG,                    // Conjugate gradient
@@ -246,7 +247,15 @@ EDResults exact_diagonalization_core(
                 results.thermo_data.free_energy = tpq_results.free_energy;
             }
             break;
-            
+        
+        case DiagonalizationMethod::BLOCK_LANCZOS:
+            std::cout << "Using block Lanczos method" << std::endl;
+            block_lanczos(H, hilbert_space_dim, 
+                        params.max_iterations, params.num_eigenvalues, 
+                        params.tolerance, results.eigenvalues, 
+                        params.output_dir, params.compute_eigenvectors, params.block_size);
+            break;
+
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;
             break;

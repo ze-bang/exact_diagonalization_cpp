@@ -1029,179 +1029,172 @@ public:
         int num_site;
         trans_file >> dum >> num_site;
         trans_file.close();
+        
 
-        // Read the symmetry group
-        // Read automorphisms
+        // Read max clique and power representations from JSON files
+        std::string max_clique_path = dir + "/automorphism_results/max_clique.json";
+
+        // Read max clique
         std::vector<std::vector<int>> max_clique_here;
-        std::ifstream auto_file(dir + "/automorphisms.txt");
-        if (!auto_file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + "/automorphisms.txt");
+        std::ifstream max_clique_file(max_clique_path);
+        if (!max_clique_file.is_open()) {
+            throw std::runtime_error("Cannot open max_clique.json file: " + max_clique_path);
         }
-        std::string line;
-        while (std::getline(auto_file, line)) {
-            if (line.find("Auto") != std::string::npos) {
-                size_t start = line.find('[');
-                size_t end = line.find(']');
-                if (start != std::string::npos && end != std::string::npos) {
-                    std::string permStr = line.substr(start + 1, end - start - 1);
-                    std::stringstream ss(permStr);
-                    std::vector<int> perm;
-                    int val;
-                    while (ss >> val) {
-                        perm.push_back(val);
-                        if (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
-                    }
-                    max_clique_here.push_back(perm);
+
+        // Helper function to parse JSON arrays
+        auto parseJsonArrays = [](std::ifstream& file, std::vector<std::vector<int>>& result) {
+            std::string line;
+            bool insideMainArray = false;
+            
+            while (std::getline(file, line)) {
+                // Skip comment lines
+                if (line.find("//") != std::string::npos) continue;
+                
+                // Trim whitespace
+                line.erase(0, line.find_first_not_of(" \t\r\n"));
+                if (line.empty()) continue;
+                
+                if (!insideMainArray && line.find("[") != std::string::npos) {
+                    // Start of the main array
+                    insideMainArray = true;
+                    continue;
                 }
-            }
-        }
-        auto_file.close();
-
-        // Print the automorphisms
-        std::cout << "Automorphisms:" << std::endl;
-        for (const auto& perm : max_clique_here) {
-            std::cout << "[";
-            for (size_t i = 0; i < perm.size(); ++i) {
-                std::cout << perm[i];
-                if (i < perm.size() - 1) std::cout << ", ";
-            }
-            std::cout << "]" << std::endl;
-        }
-
-
-        // Read generators
-        std::vector<std::vector<int>> minimal_generators_perms;
-        std::vector<int> generator_orders;
-        std::ifstream gen_file(dir + "/generators.txt");
-        if (!gen_file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + "/generators.txt");
-        }
-        while (std::getline(gen_file, line)) {
-            if (line.find("Generator") != std::string::npos) {
-                size_t start = line.find('[');
-                size_t end = line.find(']');
-                size_t order_pos = line.find("Order:");
-                if (start != std::string::npos && end != std::string::npos && order_pos != std::string::npos) {
-                    // Extract permutation
-                    std::string permStr = line.substr(start + 1, end - start - 1);
-                    std::stringstream ss(permStr);
-                    std::vector<int> perm;
-                    int val;
-                    while (ss >> val) {
-                        perm.push_back(val);
-                        if (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
-                    }
-                    minimal_generators_perms.push_back(perm);
+                
+                if (insideMainArray) {
+                    size_t open_bracket = line.find("[");
+                    size_t close_bracket = line.find("]");
                     
-                    // Extract order
-                    int order;
-                    std::stringstream orderSs(line.substr(order_pos + 7));
-                    orderSs >> order;
-                    generator_orders.push_back(order);
-                }
-            }
-        }
-        gen_file.close();
-
-        // Read power representations
-        std::vector<std::vector<int>> power_representation;
-        std::ifstream power_file(dir + "/power_representations.txt");
-        if (!power_file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + "/power_representations.txt");
-        }
-        while (std::getline(power_file, line)) {
-            if (line.find("Automorphism") != std::string::npos) {
-                size_t start = line.rfind('[');
-                size_t end = line.rfind(']');
-                if (start != std::string::npos && end != std::string::npos) {
-                    std::string powerStr = line.substr(start + 1, end - start - 1);
-                    std::stringstream ss(powerStr);
-                    std::vector<int> powers;
-                    int val;
-                    while (ss >> val) {
-                        powers.push_back(val);
-                        if (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
+                    if (open_bracket != std::string::npos && close_bracket != std::string::npos) {
+                        // This line contains a complete inner array
+                        std::string content = line.substr(open_bracket + 1, close_bracket - open_bracket - 1);
+                        std::istringstream iss(content);
+                        std::vector<int> values;
+                        int value;
+                        while (iss >> value) {
+                            values.push_back(value);
+                            // Skip comma
+                            if (iss.peek() == ',') iss.ignore();
+                        }
+                        result.push_back(values);
                     }
-                    power_representation.push_back(powers);
+                    
+                    // Check if we've reached the end of the main array
+                    if (close_bracket != std::string::npos && open_bracket == std::string::npos) {
+                        break;
+                    }
                 }
             }
-        }
-        power_file.close();
+        };
 
-        // Read quantum numbers
+        // Parse both files
+        parseJsonArrays(max_clique_file, max_clique_here);
+
+        max_clique_file.close();
+        // Validation
+        if (max_clique_here.empty()) {
+            throw std::runtime_error("Failed to parse max_clique.json or file is empty");
+        }
+
+        std::cout << "Loaded " << max_clique_here.size() << " permutations in max clique" << std::endl;
+        
+        MinimalGeneratorFinder minimal_finder;
+        std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
+        
+        std::cout << "Minimal generators:\n";
+        int count_temp = 0;
+        for (const auto& generator : minimal_generators.first) {
+            std::cout << "Generator: ";
+            for (int index : generator) {
+                std::cout << index << " ";
+            }
+            std::cout << "with order: ";
+            std::cout << minimal_generators.second[count_temp] << " ";
+            count_temp++;
+            std::cout << std::endl;
+        }
+
+        AutomorphismPowerRepresentation automorphism_power_representation;
+        std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
+        std::cout << "Power representation generated.\n";
+        std::cout << "Symmetrized Hamiltonain generated.\n";
+
+    
+
         std::vector<std::vector<int>> all_quantum_numbers;
-        std::ifstream qn_file(dir + "/quantum_numbers.txt");
-        if (!qn_file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + "/quantum_numbers.txt");
-        }
-        while (std::getline(qn_file, line)) {
-            if (line.find("Quantum numbers") != std::string::npos) {
-                size_t start = line.find('[');
-                size_t end = line.find(']');
-                if (start != std::string::npos && end != std::string::npos) {
-                    std::string qnStr = line.substr(start + 1, end - start - 1);
-                    std::stringstream ss(qnStr);
-                    std::vector<int> qnums;
-                    int val;
-                    while (ss >> val) {
-                        qnums.push_back(val);
-                        if (ss.peek() == ',' || ss.peek() == ' ') ss.ignore();
-                    }
-                    all_quantum_numbers.push_back(qnums);
-                }
+        std::vector<int> current_qnums(minimal_generators.first.size(), 0);
+
+        std::function<void(size_t)> generate_quantum_numbers = [&](size_t position) {
+            if (position == minimal_generators.first.size()) {
+                all_quantum_numbers.push_back(current_qnums);
+                return;
             }
-        }
-        qn_file.close();
+            
+            for (int i = 0; i < minimal_generators.second[position]; i++) {
+                current_qnums[position] = i;
+                generate_quantum_numbers(position + 1);
+            }
+        };
 
+        generate_quantum_numbers(0);
 
-        // Create directories for symmetrized basis
+        std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
+
+        // Create a directory for the symmetrized basis states
         std::string sym_basis_dir = dir + "/sym_basis";
         std::string mkdir_command = "mkdir -p " + sym_basis_dir;
         system(mkdir_command.c_str());
-
-        // Prepare to store unique symmetrized basis vectors
         std::vector<std::vector<Complex>> unique_sym_basis;
-        std::vector<int> symmetrized_block_ham_sizes;
 
-        // We'll need a file path string for the output
+        // Create a filename based on the quantum numbers
         std::string filename = sym_basis_dir + "/sym_basis";
 
-        // Initialize the symmetrized block ham sizes
-        this->symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
+        symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
+        int count = 0;
+        // For each symmetry sector (combination of quantum numbers)
+        for (const auto& e_i : all_quantum_numbers) {            
+            
 
-        // For each basis state, try to symmetrize with different quantum numbers
-        int total_states = 1 << num_site;
-        for (int basis = 0; basis < total_states; basis++) {
-            bool basis_processed = false;
+            // Total number of basis states in the Hilbert space
+            size_t total_basis_states = 1 << n_bits_;
             
-            // Try each quantum number combination
-            for (size_t qn_idx = 0; qn_idx < all_quantum_numbers.size(); qn_idx++) {
-                // Generate symmetrized basis vector for this basis and quantum number
-                std::vector<Complex> sym_vec = sym_basis_e_(basis, max_clique_here, power_representation, 
-                                                          generator_orders, all_quantum_numbers[qn_idx]);
-                
-                // Check if this is a valid non-zero vector
-                double norm = 0.0;
-                for (const auto& val : sym_vec) {
-                    norm += std::norm(val);
+            // For each standard basis state
+            for (size_t basis = 0; basis < total_basis_states; basis++) {
+                // Generate the symmetrized basis vector for this state
+                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+                // Check if this symmetrized basis vector is zero (can happen in some symmetry sectors)
+                double norm_squared = 0.0;
+                for (const auto& val : sym_basis_vec) {
+                    norm_squared += std::norm(val);
                 }
                 
-                if (norm > 1e-8) {
-                    // This is a valid symmetrized basis vector, add it
-                    unique_sym_basis.push_back(sym_vec);
+                if (norm_squared < 1e-10) {
+                    continue; // Skip zero vectors
+                }
+                
+                // Check if this symmetrized basis vector is already in our collection
+                bool is_unique = true;
+                for (const auto& existing_vec : unique_sym_basis) {
+                    // Calculate overlap between the vectors
+                    Complex overlap(0.0, 0.0);
+                    for (size_t i = 0; i < total_basis_states; i++) {
+                        overlap += std::conj(existing_vec[i]) * sym_basis_vec[i];
+                    }
                     
-                    // Increment the corresponding block size
-                    this->symmetrized_block_ham_sizes[qn_idx]++;
-                    
-                    // Mark this basis as processed
-                    basis_processed = true;
-                    break;  // We found a valid quantum number for this basis
+                    // If the absolute value of the overlap is close to 1, the vectors
+                    // are the same up to a global phase factor exp(i*θ)
+                    if (std::abs(std::abs(overlap) - 1.0) < 1e-10) {
+                        is_unique = false;
+                        break;
+                    }
+                }
+                
+                // If the symmetrized basis vector is unique, add it to our collection
+                if (is_unique) {
+                    unique_sym_basis.push_back(sym_basis_vec);
+                    symmetrized_block_ham_sizes[count]++;
                 }
             }
-            
-            if (!basis_processed) {
-                std::cout << "Warning: Basis state " << basis << " couldn't be symmetrized with any quantum number." << std::endl;
-            }
+            count++;
         }
         
         // Write the number of unique basis vectors
