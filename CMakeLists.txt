@@ -39,7 +39,7 @@ if(APPLE)
         link_directories("${BREW_PREFIX}/opt/openblas/lib")
         link_directories("${BREW_PREFIX}/opt/lapack/lib")
     endif()
-else()
+elseif(LINUX)
     # Linux-specific settings
     # Standard paths for libraries
     include_directories("/usr/include")

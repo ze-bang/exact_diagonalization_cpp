@@ -21,6 +21,7 @@ A high-performance C++ library for exact diagonalization of quantum spin systems
     - Matplotlib
     - tqdm
     - SciPy
+    - networkx
 
 ## Installation
 
@@ -32,12 +33,7 @@ cd exact_diagonalization_cpp
 # Create build directory
 mkdir build && cd build
 
-# Configure and build
-cmake ..
-make -j4
 
-# Run tests (optional)
-ctest
 ```
 
 ## Symmetrized Exact Diagonalization
