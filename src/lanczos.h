@@ -4848,283 +4848,6 @@ Complex calculate_matrix_element(
     return matrix_element;
 }
 
-// Finite Temperature Lanczos Method (FTLM) for thermal expectation values
-ThermodynamicData finite_temperature_lanczos_method(
-    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    int N,                                                // Hilbert space dimension
-    int num_samples = 20,                                 // Number of random starting vectors
-    int m = 100,                                          // Lanczos iterations per sample
-    double T_min = 0.01,                                  // Minimum temperature
-    double T_max = 10.0,                                  // Maximum temperature
-    int num_points = 100,                                 // Number of temperature points
-    std::string dir = "",                                 // Directory for temporary files
-    std::vector<std::function<void(const Complex*, Complex*, int)>> observables = {} // Optional observables
-) {
-    ThermodynamicData results;
-    
-    // Generate logarithmically spaced temperature points
-    results.temperatures.resize(num_points);
-    const double log_T_min = std::log(T_min);
-    const double log_T_max = std::log(T_max);
-    const double log_T_step = (log_T_max - log_T_min) / (num_points - 1);
-    
-    for (int i = 0; i < num_points; i++) {
-        results.temperatures[i] = std::exp(log_T_min + i * log_T_step);
-    }
-    
-    // Initialize results vectors
-    results.energy.resize(num_points, 0.0);
-    results.specific_heat.resize(num_points, 0.0);
-    results.entropy.resize(num_points, 0.0);
-    results.free_energy.resize(num_points, 0.0);
-    
-    // Vectors for accumulating values across samples
-    std::vector<double> Z_T(num_points, 0.0);  // Partition function
-    std::vector<double> E_T(num_points, 0.0);  // Energy
-    std::vector<double> E2_T(num_points, 0.0); // Energy squared
-    
-    // Vectors for observable expectation values if provided
-    std::vector<std::vector<Complex>> obs_values;
-    if (!observables.empty()) {
-        obs_values.resize(observables.size(), std::vector<Complex>(num_points, Complex(0.0, 0.0)));
-    }
-    
-    // Create random number generator
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    
-    // Create directory for temporary files
-    std::string temp_dir = dir + "/ftlm_temp";
-    system(("mkdir -p " + temp_dir).c_str());
-    
-    std::cout << "FTLM: Starting with " << num_samples << " samples, " 
-              << m << " Lanczos iterations per sample" << std::endl;
-    
-    // Loop over random samples
-    for (int sample = 0; sample < num_samples; sample++) {
-        std::cout << "FTLM: Processing sample " << sample + 1 << " of " << num_samples << std::endl;
-        
-        // Generate random starting vector
-        ComplexVector v_start(N);
-        for (int i = 0; i < N; i++) {
-            v_start[i] = Complex(dist(gen), dist(gen));
-        }
-        
-        // Normalize
-        double norm = cblas_dznrm2(N, v_start.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, v_start.data(), 1);
-        
-        // Perform Lanczos iteration to generate basis and tridiagonal matrix
-        ComplexVector v_prev(N, Complex(0.0, 0.0));
-        ComplexVector v_curr = v_start;
-        ComplexVector v_next(N);
-        ComplexVector w(N);
-        
-        // Store Lanczos vectors for later reconstruction
-        std::vector<ComplexVector> lanczos_vectors;
-        lanczos_vectors.push_back(v_curr);
-        
-        // Initialize alpha and beta for tridiagonal matrix
-        std::vector<double> alpha;  // Diagonal elements
-        std::vector<double> beta;   // Off-diagonal elements
-        beta.push_back(0.0);        // β_0 is not used
-        
-        // Lanczos iteration to build tridiagonal matrix
-        for (int j = 0; j < m; j++) {
-            // w = H*v_j
-            H(v_curr.data(), w.data(), N);
-            
-            // w = w - beta_j * v_{j-1}
-            if (j > 0) {
-                Complex neg_beta = Complex(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            // alpha_j = <v_j, w>
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_curr.data(), 1, w.data(), 1, &dot_product);
-            alpha.push_back(std::real(dot_product));
-            
-            // w = w - alpha_j * v_j
-            Complex neg_alpha = Complex(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_curr.data(), 1, w.data(), 1);
-            
-            // Reorthogonalization for numerical stability
-            for (int k = 0; k <= j; k++) {
-                Complex overlap;
-                cblas_zdotc_sub(N, lanczos_vectors[k].data(), 1, w.data(), 1, &overlap);
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, lanczos_vectors[k].data(), 1, w.data(), 1);
-            }
-            
-            // beta_{j+1} = ||w||
-            norm = cblas_dznrm2(N, w.data(), 1);
-            beta.push_back(norm);
-            
-            // Check for invariant subspace
-            if (norm < 1e-10) {
-                std::cout << "FTLM: Invariant subspace found at iteration " << j + 1 << std::endl;
-                break;
-            }
-            
-            // v_{j+1} = w / beta_{j+1}
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            // Store for next iteration
-            v_prev = v_curr;
-            v_curr = v_next;
-            
-            // Store Lanczos vector for later reconstruction
-            if (j < m - 1) {
-                lanczos_vectors.push_back(v_curr);
-            }
-        }
-        
-        // Diagonalize tridiagonal matrix
-        int actual_m = alpha.size();
-        std::vector<double> eigenvalues(actual_m);
-        std::vector<double> eigenvectors_T(actual_m * actual_m);
-        
-        // Call LAPACK
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', actual_m, 
-                                alpha.data(), &beta[1], eigenvectors_T.data(), actual_m);
-        
-        if (info != 0) {
-            std::cerr << "FTLM: LAPACKE_dstevd failed with code " << info << std::endl;
-            continue;
-        }
-        
-        // Compute matrix elements of observables if provided
-        std::vector<std::vector<Complex>> obs_matrix_elements;
-        if (!observables.empty()) {
-            obs_matrix_elements.resize(observables.size(), 
-                                     std::vector<Complex>(actual_m, Complex(0.0, 0.0)));
-            
-            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
-                auto& A = observables[obs_idx];
-                
-                // For each eigenstate in the Krylov subspace
-                for (int i = 0; i < actual_m; i++) {
-                    // Reconstruct eigenstate in original basis
-                    ComplexVector psi_i(N, Complex(0.0, 0.0));
-                    for (int j = 0; j < actual_m; j++) {
-                        Complex coef(eigenvectors_T[j * actual_m + i], 0.0);
-                        cblas_zaxpy(N, &coef, lanczos_vectors[j].data(), 1, psi_i.data(), 1);
-                    }
-                    
-                    // Apply observable
-                    ComplexVector A_psi(N);
-                    A(psi_i.data(), A_psi.data(), N);
-                    
-                    // Compute <psi_i|A|psi_i>
-                    Complex expectation;
-                    cblas_zdotc_sub(N, psi_i.data(), 1, A_psi.data(), 1, &expectation);
-                    
-                    obs_matrix_elements[obs_idx][i] = expectation;
-                }
-            }
-        }
-        
-        // For each temperature, compute contribution to partition function and thermal averages
-        for (int t = 0; t < num_points; t++) {
-            double beta = 1.0 / results.temperatures[t];
-            double Z_sample = 0.0;
-            double E_sample = 0.0;
-            double E2_sample = 0.0;
-            std::vector<Complex> obs_sample(observables.size(), Complex(0.0, 0.0));
-            
-            // Project the initial random vector onto the eigenbasis of the tridiagonal matrix
-            std::vector<double> overlaps(actual_m);
-            for (int i = 0; i < actual_m; i++) {
-                // The overlap is just the first component of the eigenvector
-                // because the initial Lanczos vector is the first standard basis vector
-                // in the Krylov subspace
-                overlaps[i] = eigenvectors_T[i * actual_m + 0];
-            }
-            
-            // Accumulate contributions to the trace
-            for (int i = 0; i < actual_m; i++) {
-                double boltzmann = std::exp(-beta * eigenvalues[i]);
-                double weight = overlaps[i] * overlaps[i] * boltzmann;
-                
-                Z_sample += weight;
-                E_sample += eigenvalues[i] * weight;
-                E2_sample += eigenvalues[i] * eigenvalues[i] * weight;
-                
-                // Accumulate observable expectation values
-                for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
-                    obs_sample[obs_idx] += obs_matrix_elements[obs_idx][i] * weight;
-                }
-            }
-            
-            // Factor N accounts for the trace normalization
-            Z_T[t] += Z_sample * N;
-            E_T[t] += E_sample * N;
-            E2_T[t] += E2_sample * N;
-            
-            for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
-                obs_values[obs_idx][t] += obs_sample[obs_idx] * Complex(N, 0);
-            }
-        }
-        
-        // Progress reporting
-        if ((sample + 1) % 5 == 0 || sample == num_samples - 1) {
-            std::cout << "FTLM: Completed " << sample + 1 << " samples" << std::endl;
-            // Show current estimate of ground state energy
-            std::cout << "  Current estimate of ground state energy: " << eigenvalues[0] << std::endl;
-        }
-    }
-    
-    // Finalize results by averaging over samples
-    for (int t = 0; t < num_points; t++) {
-        double T = results.temperatures[t];
-        double Z = Z_T[t] / num_samples;
-        double E = E_T[t] / num_samples;
-        double E2 = E2_T[t] / num_samples;
-        
-        // Thermal averages
-        results.energy[t] = E / Z;
-        results.specific_heat[t] = (E2 / Z - (E / Z) * (E / Z)) / (T * T);
-        results.free_energy[t] = -T * std::log(Z);
-        results.entropy[t] = (results.energy[t] - results.free_energy[t]) / T;
-        
-        // Normalize observable expectation values
-        for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
-            obs_values[obs_idx][t] /= (num_samples * Z);
-        }
-    }
-    
-    // Save observable results if provided
-    if (!observables.empty()) {
-        std::string obs_dir = dir + "/ftlm_observables";
-        system(("mkdir -p " + obs_dir).c_str());
-        
-        for (size_t obs_idx = 0; obs_idx < observables.size(); obs_idx++) {
-            std::string filename = obs_dir + "/observable_" + std::to_string(obs_idx) + ".dat";
-            std::ofstream outfile(filename);
-            
-            if (outfile.is_open()) {
-                outfile << "# Temperature Real Imaginary" << std::endl;
-                for (int t = 0; t < num_points; t++) {
-                    outfile << results.temperatures[t] << " " 
-                          << obs_values[obs_idx][t].real() << " "
-                          << obs_values[obs_idx][t].imag() << std::endl;
-                }
-                outfile.close();
-                std::cout << "FTLM: Observable " << obs_idx << " saved to " << filename << std::endl;
-            }
-        }
-    }
-    
-    // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
-    
-    return results;
-}
-
 // Compute thermal expectation values of S^+, S^-, S^z operators at each site
 void compute_spin_expectations(
     const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
@@ -5269,6 +4992,327 @@ void compute_spin_expectations(
     }
 }
 
+
+// Finite Temperature Lanczos Method (FTLM) implementation
+void finite_temperature_lanczos(
+    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
+    int N,                                               // Dimension of Hilbert space
+    int num_samples,                                     // Number of random vectors
+    int lanczos_iterations,                              // Number of Lanczos iterations per sample
+    const std::vector<double>& temperatures,             // Temperatures to evaluate
+    ThermodynamicData& thermo_data,                      // Output: Thermodynamic quantities
+    std::map<std::string, std::function<void(const Complex*, Complex*, int)>> observables = {}, // Observable operators
+    std::map<std::string, std::vector<Complex>>* obs_results = nullptr, // Output: Observable results
+    std::string out_dir = "",                            // Output directory for detailed results
+    double tol = 1e-10                                   // Tolerance
+) {
+    std::cout << "Starting Finite Temperature Lanczos Method with " << num_samples 
+              << " samples and " << lanczos_iterations << " Lanczos iterations per sample" << std::endl;
+    
+    // Initialize output data structure
+    int num_temps = temperatures.size();
+    thermo_data.temperatures = temperatures;
+    thermo_data.energy.resize(num_temps, 0.0);
+    thermo_data.specific_heat.resize(num_temps, 0.0);
+    thermo_data.entropy.resize(num_temps, 0.0);
+    thermo_data.free_energy.resize(num_temps, 0.0);
+    
+    // Initialize observable results if provided
+    if (obs_results) {
+        for (const auto& obs_pair : observables) {
+            (*obs_results)[obs_pair.first].resize(num_temps, Complex(0.0, 0.0));
+        }
+    }
+    
+    // Create output directory if needed
+    if (!out_dir.empty()) {
+        std::string cmd = "mkdir -p " + out_dir;
+        system(cmd.c_str());
+    }
+    
+    // Vectors to store partial sums for each temperature
+    std::vector<double> Z(num_temps, 0.0);              // Partition function
+    std::vector<double> E_sum(num_temps, 0.0);          // Energy sum
+    std::vector<double> E2_sum(num_temps, 0.0);         // Energy^2 sum
+    
+    // Maps to store observable sums
+    std::map<std::string, std::vector<Complex>> obs_sums;
+    if (obs_results) {
+        for (const auto& obs_pair : observables) {
+            obs_sums[obs_pair.first].resize(num_temps, Complex(0.0, 0.0));
+        }
+    }
+    
+    // Random number generator
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    
+    // Loop over random vectors
+    for (int r = 0; r < num_samples; r++) {
+        // Generate random starting vector
+        ComplexVector v_current(N);
+        for (int i = 0; i < N; i++) {
+            v_current[i] = Complex(dist(gen), dist(gen));
+        }
+        
+        // Normalize
+        double norm = cblas_dznrm2(N, v_current.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, v_current.data(), 1);
+        
+        // Store initial random vector
+        ComplexVector r_vector = v_current;
+        
+        // Calculate observable expectation values for random vector
+        std::map<std::string, Complex> obs_values;
+        if (obs_results) {
+            for (const auto& obs_pair : observables) {
+                const auto& obs_name = obs_pair.first;
+                const auto& obs_op = obs_pair.second;
+                
+                // Apply operator to random vector
+                ComplexVector Ar(N);
+                obs_op(r_vector.data(), Ar.data(), N);
+                
+                // Compute <r|A|r>
+                Complex obs_value;
+                cblas_zdotc_sub(N, r_vector.data(), 1, Ar.data(), 1, &obs_value);
+                
+                obs_values[obs_name] = obs_value;
+            }
+        }
+        
+        // Storage for basis vectors
+        std::vector<ComplexVector> lanczos_basis;
+        lanczos_basis.push_back(v_current);
+        
+        // Initialize alpha and beta vectors for tridiagonal matrix
+        std::vector<double> alpha;  // Diagonal elements
+        std::vector<double> beta;   // Off-diagonal elements
+        beta.push_back(0.0);        // β_0 is not used
+        
+        ComplexVector v_prev(N, Complex(0.0, 0.0));
+        ComplexVector v_next(N);
+        ComplexVector w(N);
+        
+        // Lanczos iteration
+        for (int j = 0; j < lanczos_iterations; j++) {
+            // w = H*v_j
+            H(v_current.data(), w.data(), N);
+            
+            // w = w - beta_j * v_{j-1}
+            if (j > 0) {
+                Complex neg_beta = Complex(-beta[j], 0.0);
+                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+            }
+            
+            // alpha_j = <v_j, w>
+            Complex dot_product;
+            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+            alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+            
+            // w = w - alpha_j * v_j
+            Complex neg_alpha = Complex(-alpha[j], 0.0);
+            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+            
+            // Full reorthogonalization for numerical stability
+            for (int k = 0; k <= j; k++) {
+                Complex overlap;
+                cblas_zdotc_sub(N, lanczos_basis[k].data(), 1, w.data(), 1, &overlap);
+                
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, lanczos_basis[k].data(), 1, w.data(), 1);
+            }
+            
+            // beta_{j+1} = ||w||
+            norm = cblas_dznrm2(N, w.data(), 1);
+            beta.push_back(norm);
+            
+            // Check for invariant subspace
+            if (norm < tol) {
+                std::cout << "Invariant subspace detected at iteration " << j << " for sample " << r << std::endl;
+                break;
+            }
+            
+            // v_{j+1} = w / beta_{j+1}
+            for (int i = 0; i < N; i++) {
+                v_next[i] = w[i] / norm;
+            }
+            
+            // Update for next iteration
+            v_prev = v_current;
+            v_current = v_next;
+            lanczos_basis.push_back(v_current);
+        }
+        
+        // Construct and solve tridiagonal matrix
+        int m = alpha.size();
+        
+        // Allocate arrays for LAPACKE
+        std::vector<double> diag = alpha;    // Copy of diagonal elements
+        std::vector<double> offdiag(m-1);    // Off-diagonal elements
+        
+        for (int i = 0; i < m-1; i++) {
+            offdiag[i] = beta[i+1];
+        }
+        
+        // Allocate space for eigenvalues and eigenvectors
+        std::vector<double> eigenvalues(m);
+        std::vector<double> eigenvectors(m*m);
+        
+        // Solve for eigenvalues and eigenvectors
+        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), eigenvectors.data(), m);
+        
+        if (info != 0) {
+            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+            continue;
+        }
+        
+        // Save eigenvalues to file if output directory provided
+        if (!out_dir.empty()) {
+            std::string evals_file = out_dir + "/ftlm_evals_sample_" + std::to_string(r) + ".dat";
+            std::ofstream evals_out(evals_file);
+            if (evals_out.is_open()) {
+                evals_out << "# Index Eigenvalue Overlap_squared\n";
+                for (int j = 0; j < m; j++) {
+                    double overlap_squared = eigenvectors[j*m] * eigenvectors[j*m];
+                    evals_out << j << " " << eigenvalues[j] << " " << overlap_squared << "\n";
+                }
+                evals_out.close();
+            }
+        }
+        
+        // Calculate contribution to thermodynamic quantities
+        for (int t = 0; t < num_temps; t++) {
+            double beta = 1.0 / temperatures[t];
+            
+            // Calculate partition function contribution
+            double Z_r = 0.0;
+            double E_r = 0.0;
+            double E2_r = 0.0;
+            
+            // Observable contributions
+            std::map<std::string, Complex> obs_r;
+            if (obs_results) {
+                for (const auto& obs_pair : observables) {
+                    obs_r[obs_pair.first] = Complex(0.0, 0.0);
+                }
+            }
+            
+            for (int j = 0; j < m; j++) {
+                // Get overlap with initial random vector
+                double overlap_squared = eigenvectors[j*m] * eigenvectors[j*m];
+                
+                // Boltzmann factor
+                double boltzmann = std::exp(-beta * eigenvalues[j]);
+                
+                // Contribution to partition function
+                double contribution = overlap_squared * boltzmann;
+                
+                Z_r += contribution;
+                E_r += contribution * eigenvalues[j];
+                E2_r += contribution * eigenvalues[j] * eigenvalues[j];
+                
+                // Contribution to observable expectations
+                if (obs_results) {
+                    for (const auto& obs_pair : observables) {
+                        const auto& obs_name = obs_pair.first;
+                        obs_r[obs_name] += contribution * obs_values[obs_name];
+                    }
+                }
+            }
+            
+            // Add to running sums
+            Z[t] += Z_r;
+            E_sum[t] += E_r;
+            E2_sum[t] += E2_r;
+            
+            // Add observable contributions
+            if (obs_results) {
+                for (const auto& obs_pair : observables) {
+                    const auto& obs_name = obs_pair.first;
+                    obs_sums[obs_name][t] += obs_r[obs_name];
+                }
+            }
+        }
+        
+        // Progress reporting
+        if ((r+1) % 10 == 0 || r == num_samples-1) {
+            std::cout << "FTLM: Completed " << r+1 << " of " << num_samples << " samples" << std::endl;
+        }
+    }
+    
+    // Calculate final thermodynamic quantities
+    double normalization = static_cast<double>(N) / num_samples;
+    
+    for (int t = 0; t < num_temps; t++) {
+        // Normalize by effective dimension and number of samples
+        Z[t] *= normalization;
+        E_sum[t] *= normalization;
+        E2_sum[t] *= normalization;
+        
+        // Normalize observables
+        if (obs_results) {
+            for (const auto& obs_pair : observables) {
+                const auto& obs_name = obs_pair.first;
+                obs_sums[obs_name][t] *= normalization;
+                (*obs_results)[obs_name][t] = obs_sums[obs_name][t] / Z[t];
+            }
+        }
+        
+        // Partition function and free energy
+        double beta = 1.0 / temperatures[t];
+        thermo_data.free_energy[t] = -temperatures[t] * std::log(Z[t]);
+        
+        // Energy
+        thermo_data.energy[t] = E_sum[t] / Z[t];
+        
+        // Specific heat
+        double E_avg = thermo_data.energy[t];
+        double E2_avg = E2_sum[t] / Z[t];
+        thermo_data.specific_heat[t] = beta * beta * (E2_avg - E_avg * E_avg);
+        
+        // Entropy
+        thermo_data.entropy[t] = beta * thermo_data.energy[t] + std::log(Z[t]);
+    }
+    
+    // Save thermodynamic results if output directory provided
+    if (!out_dir.empty()) {
+        std::string thermo_file = out_dir + "/ftlm_thermodynamics.dat";
+        std::ofstream thermo_out(thermo_file);
+        if (thermo_out.is_open()) {
+            thermo_out << "# Temperature Free_Energy Energy Specific_Heat Entropy\n";
+            for (int t = 0; t < num_temps; t++) {
+                thermo_out << temperatures[t] << " " 
+                           << thermo_data.free_energy[t] << " "
+                           << thermo_data.energy[t] << " "
+                           << thermo_data.specific_heat[t] << " "
+                           << thermo_data.entropy[t] << "\n";
+            }
+            thermo_out.close();
+        }
+        
+        // Save observable results
+        if (obs_results) {
+            for (const auto& obs_pair : observables) {
+                const auto& obs_name = obs_pair.first;
+                std::string obs_file = out_dir + "/ftlm_" + obs_name + ".dat";
+                std::ofstream obs_out(obs_file);
+                if (obs_out.is_open()) {
+                    obs_out << "# Temperature Real_Part Imaginary_Part\n";
+                    for (int t = 0; t < num_temps; t++) {
+                        obs_out << temperatures[t] << " " 
+                               << (*obs_results)[obs_name][t].real() << " "
+                               << (*obs_results)[obs_name][t].imag() << "\n";
+                    }
+                    obs_out.close();
+                }
+            }
+        }
+    }
+    
+    std::cout << "Finite Temperature Lanczos Method completed successfully" << std::endl;
+}
 
 
 #endif // LANCZOS_H
