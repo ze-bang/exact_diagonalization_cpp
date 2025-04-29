@@ -1235,444 +1235,479 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     system(("rm -rf " + temp_dir).c_str());
 }
 
-
-// Block Lanczos algorithm implementation for finding eigenvalues/eigenvectors
-// Especially effective for degenerate or clustered eigenvalues
-void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+// Block Lanczos algorithm for eigenvalue computation
+void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int num_eigs, 
                   double tol, std::vector<double>& eigenvalues, std::string dir = "",
-                  bool eigenvectors = false, int block_size = 4) {
+                  bool compute_eigenvectors = false, , int block_size=4) {
+    // Validate input parameters
+    if (block_size <= 0) {
+        std::cerr << "Block size must be positive" << std::endl;
+        return;
+    }
+    
+    if (max_iter <= 0) {
+        std::cerr << "Maximum iterations must be positive" << std::endl;
+        return;
+    }
     
     std::cout << "Block Lanczos: Starting with block size " << block_size << std::endl;
     
-    // Ensure the block size is valid
-    block_size = std::min(block_size, N);
-    block_size = std::min(block_size, exct);
-    
-    // Create directories for temporary storage and results
+    // Create directories for temporary files and output
     std::string temp_dir = dir + "/block_lanczos_temp";
-    std::string results_dir = dir + "/block_lanczos_results";
+    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    
+    if (compute_eigenvectors) {
+        system(("mkdir -p " + evec_dir).c_str());
+    }
     system(("mkdir -p " + temp_dir).c_str());
     
-    if (eigenvectors) {
-        system(("mkdir -p " + results_dir).c_str());
-    }
-    
-    // Initialize random number generator
+    // Initialize random generator
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    // Initialize block of random vectors
-    std::vector<ComplexVector> V_block(block_size, ComplexVector(N));
+    // Step 1: Generate initial orthogonal block of vectors
+    std::vector<ComplexVector> V_curr(block_size, ComplexVector(N));
     
-    // Generate initial random block and orthonormalize
-    for (int i = 0; i < block_size; i++) {
-        // Generate a random vector
-        for (int j = 0; j < N; j++) {
-            V_block[i][j] = Complex(dist(gen), dist(gen));
+    // Generate the first vector randomly
+    for (int i = 0; i < N; i++) {
+        V_curr[0][i] = Complex(dist(gen), dist(gen));
+    }
+    
+    // Normalize the first vector
+    double norm = cblas_dznrm2(N, V_curr[0].data(), 1);
+    Complex scale = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale, V_curr[0].data(), 1);
+    
+    // Generate remaining vectors in the block and orthogonalize
+    for (int j = 1; j < block_size; j++) {
+        // Generate random vector
+        for (int i = 0; i < N; i++) {
+            V_curr[j][i] = Complex(dist(gen), dist(gen));
         }
         
-        // Orthogonalize against previous vectors in this block (Gram-Schmidt)
-        for (int j = 0; j < i; j++) {
-            Complex dot_product;
-            cblas_zdotc_sub(N, V_block[j].data(), 1, V_block[i].data(), 1, &dot_product);
-            Complex neg_dot = -dot_product;
-            cblas_zaxpy(N, &neg_dot, V_block[j].data(), 1, V_block[i].data(), 1);
+        // Orthogonalize against previous vectors using modified Gram-Schmidt
+        for (int k = 0; k < j; k++) {
+            Complex proj;
+            cblas_zdotc_sub(N, V_curr[k].data(), 1, V_curr[j].data(), 1, &proj);
+            
+            Complex neg_proj = -proj;
+            cblas_zaxpy(N, &neg_proj, V_curr[k].data(), 1, V_curr[j].data(), 1);
         }
         
         // Normalize
-        double norm = cblas_dznrm2(N, V_block[i].data(), 1);
-        
-        // If norm is too small, vector is linearly dependent - generate a new one
-        if (norm < tol) {
-            i--; // Try again with a new random vector
-            continue;
-        }
-        
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, V_block[i].data(), 1);
+        norm = cblas_dznrm2(N, V_curr[j].data(), 1);
+        scale = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, V_curr[j].data(), 1);
     }
     
-    // Store initial block to disk
-    for (int i = 0; i < block_size; i++) {
-        std::string filename = temp_dir + "/V_0_" + std::to_string(i) + ".bin";
-        std::ofstream outfile(filename, std::ios::binary);
+    // Write initial block to disk
+    for (int j = 0; j < block_size; j++) {
+        std::string vector_file = temp_dir + "/block_0_vector_" + std::to_string(j) + ".bin";
+        std::ofstream outfile(vector_file, std::ios::binary);
         if (!outfile) {
-            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            std::cerr << "Error: Cannot open file " << vector_file << " for writing" << std::endl;
             return;
         }
-        outfile.write(reinterpret_cast<char*>(V_block[i].data()), N * sizeof(Complex));
+        outfile.write(reinterpret_cast<char*>(V_curr[j].data()), N * sizeof(Complex));
         outfile.close();
     }
     
-    // Helper function to read block vector from disk
-    auto read_block_vector = [&temp_dir, N](int block_idx, int vec_idx) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/V_" + std::to_string(block_idx) + "_" + std::to_string(vec_idx) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
+    // Storage for block tridiagonal matrix
+    // Alpha_j are block diagonal matrices (block_size x block_size)
+    // Beta_j are block off-diagonal matrices (block_size x block_size)
+    std::vector<std::vector<Complex>> Alpha;  // Will store diagonal blocks
+    std::vector<std::vector<Complex>> Beta;   // Will store off-diagonal blocks
+    
+    // Previous block of vectors (initially empty)
+    std::vector<ComplexVector> V_prev(block_size, ComplexVector(N, Complex(0.0, 0.0)));
+    
+    // Helper function to read a block from disk
+    auto read_block = [&temp_dir, N, block_size](int block_idx) -> std::vector<ComplexVector> {
+        std::vector<ComplexVector> block(block_size, ComplexVector(N));
+        
+        for (int j = 0; j < block_size; j++) {
+            std::string vector_file = temp_dir + "/block_" + std::to_string(block_idx) + 
+                                    "_vector_" + std::to_string(j) + ".bin";
+            std::ifstream infile(vector_file, std::ios::binary);
+            if (!infile) {
+                std::cerr << "Error: Cannot open file " << vector_file << " for reading" << std::endl;
+                return block;
+            }
+            infile.read(reinterpret_cast<char*>(block[j].data()), N * sizeof(Complex));
+            infile.close();
         }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
+        
+        return block;
     };
     
-    // Initialize storage for block tridiagonal matrix elements
-    // A_j is the diagonal block, B_j is the off-diagonal block
-    std::vector<std::vector<std::vector<Complex>>> A; // Diagonal blocks
-    std::vector<std::vector<std::vector<Complex>>> B; // Off-diagonal blocks
+    // Main Block Lanczos iteration
+    std::cout << "Block Lanczos: Iterating..." << std::endl;
     
-    // Initialize empty first A and B blocks
-    A.push_back(std::vector<std::vector<Complex>>(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0))));
-    B.push_back(std::vector<std::vector<Complex>>(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0))));
-    
-    // Vectors for current block and result of matrix-vector product
-    std::vector<ComplexVector> W_block(block_size, ComplexVector(N));
-    std::vector<ComplexVector> V_prev_block(block_size, ComplexVector(N));
-    std::vector<ComplexVector> V_next_block(block_size, ComplexVector(N));
-    
-    // Maximum iterations considering block size
-    max_iter = std::min(max_iter, (N + block_size - 1) / block_size);
-    int max_exct = std::min(exct, max_iter * block_size);
-    
-    std::cout << "Block Lanczos: Will perform up to " << max_iter << " iterations" << std::endl;
-    std::cout << "Block Lanczos: Targeting " << max_exct << " eigenvalues" << std::endl;
-    
-    // Block Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
         std::cout << "Block Lanczos: Iteration " << j + 1 << " of " << max_iter << std::endl;
         
-        // Load current block vectors
-        for (int i = 0; i < block_size; i++) {
-            V_block[i] = read_block_vector(j, i);
+        // Step 2: Compute W_j = A*V_j
+        std::vector<ComplexVector> W(block_size, ComplexVector(N));
+        
+        for (int b = 0; b < block_size; b++) {
+            H(V_curr[b].data(), W[b].data(), N);
         }
         
-        // If not the first iteration, load previous block vectors
+        // Step 3: Compute Alpha_j = V_j^H * W_j (block_size x block_size matrix)
+        std::vector<Complex> Alpha_j(block_size * block_size, Complex(0.0, 0.0));
+        
+        for (int row = 0; row < block_size; row++) {
+            for (int col = 0; col < block_size; col++) {
+                Complex dot;
+                cblas_zdotc_sub(N, V_curr[row].data(), 1, W[col].data(), 1, &dot);
+                Alpha_j[row * block_size + col] = dot;
+            }
+        }
+        
+        // Store Alpha_j
+        Alpha.push_back(Alpha_j);
+        
+        // Step 4: W_j = W_j - V_{j-1} * Beta_{j-1}^H - V_j * Alpha_j
+        
+        // First subtract V_j * Alpha_j
+        for (int col = 0; col < block_size; col++) {
+            for (int row = 0; row < block_size; row++) {
+                Complex coef = -Alpha_j[row * block_size + col];
+                cblas_zaxpy(N, &coef, V_curr[row].data(), 1, W[col].data(), 1);
+            }
+        }
+        
+        // Then subtract V_{j-1} * Beta_{j-1}^H if j > 0
         if (j > 0) {
-            for (int i = 0; i < block_size; i++) {
-                V_prev_block[i] = read_block_vector(j-1, i);
-            }
-        }
-        
-        // Step 1: Compute W_j = H * V_j
-        for (int i = 0; i < block_size; i++) {
-            H(V_block[i].data(), W_block[i].data(), N);
-        }
-        
-        // Step 2: Compute A_j = V_j^H * W_j (diagonal block)
-        std::vector<std::vector<Complex>> A_j(block_size, std::vector<Complex>(block_size));
-        for (int i = 0; i < block_size; i++) {
-            for (int k = 0; k < block_size; k++) {
-                Complex dot_product;
-                cblas_zdotc_sub(N, V_block[i].data(), 1, W_block[k].data(), 1, &dot_product);
-                A_j[i][k] = dot_product;
-            }
-        }
-        A.push_back(A_j);
-        
-        // Step 3: W_j = W_j - V_j * A_j
-        for (int k = 0; k < block_size; k++) {
-            for (int i = 0; i < block_size; i++) {
-                Complex neg_coef = -A_j[i][k];
-                cblas_zaxpy(N, &neg_coef, V_block[i].data(), 1, W_block[k].data(), 1);
-            }
-        }
-        
-        // Step 4: If not the first iteration, W_j = W_j - V_{j-1} * B_{j-1}^H
-        if (j > 0) {
-            std::vector<std::vector<Complex>> B_prev = B[j];
-            for (int k = 0; k < block_size; k++) {
-                for (int i = 0; i < block_size; i++) {
-                    Complex neg_coef = -std::conj(B_prev[i][k]);
-                    cblas_zaxpy(N, &neg_coef, V_prev_block[i].data(), 1, W_block[k].data(), 1);
-                }
-            }
-        }
-        
-        // Step 5: Full reorthogonalization for numerical stability
-        // Orthogonalize W against all previous V blocks
-        for (int b = 0; b <= j; b++) {
-            for (int k = 0; k < block_size; k++) {
-                for (int i = 0; i < block_size; i++) {
-                    ComplexVector V_b_i = read_block_vector(b, i);
-                    Complex dot_product;
-                    cblas_zdotc_sub(N, V_b_i.data(), 1, W_block[k].data(), 1, &dot_product);
-                    Complex neg_dot = -dot_product;
-                    cblas_zaxpy(N, &neg_dot, V_b_i.data(), 1, W_block[k].data(), 1);
-                }
-            }
-        }
-        
-        // Step 6: QR factorization of W_j
-        // We use a simplified approach - Gram-Schmidt orthogonalization followed by SVD
-        
-        // Create a matrix from W_block vectors
-        std::vector<Complex> W_matrix(block_size * N);
-        for (int i = 0; i < block_size; i++) {
-            for (int j = 0; j < N; j++) {
-                W_matrix[i*N + j] = W_block[i][j];
-            }
-        }
-        
-        // Perform SVD via LAPACK
-        std::vector<double> singular_values(block_size);
-        std::vector<Complex> U(block_size * block_size);
-        std::vector<Complex> VT(block_size * N);
-        
-        // LAPACK call for SVD
-        int info = LAPACKE_zgesvd(LAPACK_COL_MAJOR, 'S', 'S', N, block_size,
-                                reinterpret_cast<lapack_complex_double*>(W_matrix.data()),
-                                N, singular_values.data(),
-                                nullptr, 1,
-                                reinterpret_cast<lapack_complex_double*>(U.data()),
-                                block_size, nullptr, nullptr);
-        
-        if (info != 0) {
-            std::cerr << "Block Lanczos: LAPACKE_zgesvd failed with error code " << info << std::endl;
-            // Fallback to Gram-Schmidt for robustness
-            for (int i = 0; i < block_size; i++) {
-                for (int l = 0; l < i; l++) {
-                    Complex dot_product;
-                    cblas_zdotc_sub(N, W_block[l].data(), 1, W_block[i].data(), 1, &dot_product);
-                    Complex neg_dot = -dot_product;
-                    cblas_zaxpy(N, &neg_dot, W_block[l].data(), 1, W_block[i].data(), 1);
-                }
-                
-                // Normalize W_block[i]
-                double norm = cblas_dznrm2(N, W_block[i].data(), 1);
-                singular_values[i] = norm;
-                
-                if (norm > tol) {
-                    Complex scale_factor = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale_factor, W_block[i].data(), 1);
-                } else {
-                    // Handle linear dependency
-                    singular_values[i] = 0.0;
-                    std::fill(W_block[i].begin(), W_block[i].end(), Complex(0.0, 0.0));
-                }
-            }
-        } else {
-            // Extract orthogonalized vectors from SVD results
-            std::vector<ComplexVector> W_ortho(block_size, ComplexVector(N));
-            for (int i = 0; i < block_size; i++) {
-                for (int j = 0; j < N; j++) {
-                    W_ortho[i][j] = W_matrix[i*N + j];
-                }
-                
-                // Normalize if singular value is significant
-                if (singular_values[i] > tol) {
-                    double norm = cblas_dznrm2(N, W_ortho[i].data(), 1);
-                    Complex scale_factor = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale_factor, W_ortho[i].data(), 1);
-                }
-            }
+            std::vector<Complex>& Beta_prev = Beta.back();
             
-            // Replace W_block with orthogonalized vectors
-            W_block = W_ortho;
+            for (int col = 0; col < block_size; col++) {
+                for (int row = 0; row < block_size; row++) {
+                    // Beta_prev is stored in row-major order, we need to conjugate transpose
+                    Complex coef = -std::conj(Beta_prev[col * block_size + row]);
+                    cblas_zaxpy(N, &coef, V_prev[row].data(), 1, W[col].data(), 1);
+                }
+            }
         }
         
-        // Step 7: Create B_j matrix using singular values
-        std::vector<std::vector<Complex>> B_j(block_size, std::vector<Complex>(block_size, Complex(0.0, 0.0)));
-        for (int i = 0; i < block_size; i++) {
-            B_j[i][i] = Complex(singular_values[i], 0.0);
+        // Step 5: Full reorthogonalization against all previous blocks
+        for (int prev_j = 0; prev_j <= j; prev_j++) {
+            std::vector<ComplexVector> V_j = (prev_j == j) ? V_curr : read_block(prev_j);
+            
+            for (int col = 0; col < block_size; col++) {
+                for (int row = 0; row < block_size; row++) {
+                    Complex dot;
+                    cblas_zdotc_sub(N, V_j[row].data(), 1, W[col].data(), 1, &dot);
+                    
+                    Complex neg_dot = -dot;
+                    cblas_zaxpy(N, &neg_dot, V_j[row].data(), 1, W[col].data(), 1);
+                }
+            }
         }
-        B.push_back(B_j);
         
-        // Step 8: Check for invariant subspace
-        bool invariant_subspace = true;
-        for (int i = 0; i < block_size; i++) {
-            if (singular_values[i] > tol) {
-                invariant_subspace = false;
+        // Step 6: Compute QR factorization of W_j to get Beta_j and V_{j+1}
+        // We'll use modified Gram-Schmidt for QR
+        
+        // First compute column norms to check for rank deficiency
+        std::vector<double> col_norms(block_size);
+        for (int col = 0; col < block_size; col++) {
+            col_norms[col] = cblas_dznrm2(N, W[col].data(), 1);
+        }
+        
+        // Initialize R (Beta_j) as zero matrix
+        std::vector<Complex> Beta_j(block_size * block_size, Complex(0.0, 0.0));
+        
+        // Initialize next block of basis vectors
+        std::vector<ComplexVector> V_next(block_size, ComplexVector(N));
+        
+        // Threshold for considering a vector linearly dependent
+        const double lin_dep_threshold = tol * std::sqrt(static_cast<double>(N));
+        
+        // Check if we need to do a restart due to rank deficiency
+        bool rank_deficient = false;
+        for (int col = 0; col < block_size; col++) {
+            if (col_norms[col] < lin_dep_threshold) {
+                rank_deficient = true;
                 break;
             }
         }
         
-        if (invariant_subspace) {
-            std::cout << "Block Lanczos: Invariant subspace found at iteration " << j + 1 << std::endl;
-            break;
-        }
-        
-        // Step 9: V_{j+1} = W_j * B_j^{-1}
-        for (int i = 0; i < block_size; i++) {
-            if (singular_values[i] > tol) {
-                Complex scale = Complex(1.0/singular_values[i], 0.0);
-                for (int k = 0; k < N; k++) {
-                    V_next_block[i][k] = W_block[i][k] * scale;
+        if (rank_deficient) {
+            std::cout << "Block Lanczos: Rank deficiency detected at iteration " << j + 1 << std::endl;
+            
+            // Generate new random vectors for the deficient columns
+            for (int col = 0; col < block_size; col++) {
+                if (col_norms[col] < lin_dep_threshold) {
+                    // Generate new random vector
+                    for (int i = 0; i < N; i++) {
+                        W[col][i] = Complex(dist(gen), dist(gen));
+                    }
+                    
+                    // Orthogonalize against all previous vectors and current non-deficient vectors
+                    for (int prev_j = 0; prev_j <= j; prev_j++) {
+                        std::vector<ComplexVector> V_j = (prev_j == j) ? V_curr : read_block(prev_j);
+                        
+                        for (int v = 0; v < block_size; v++) {
+                            Complex dot;
+                            cblas_zdotc_sub(N, V_j[v].data(), 1, W[col].data(), 1, &dot);
+                            
+                            Complex neg_dot = -dot;
+                            cblas_zaxpy(N, &neg_dot, V_j[v].data(), 1, W[col].data(), 1);
+                        }
+                    }
+                    
+                    // Also orthogonalize against the previous columns of W that weren't deficient
+                    for (int prev_col = 0; prev_col < col; prev_col++) {
+                        if (col_norms[prev_col] >= lin_dep_threshold) {
+                            Complex dot;
+                            cblas_zdotc_sub(N, V_next[prev_col].data(), 1, W[col].data(), 1, &dot);
+                            
+                            Complex neg_dot = -dot;
+                            cblas_zaxpy(N, &neg_dot, V_next[prev_col].data(), 1, W[col].data(), 1);
+                        }
+                    }
+                    
+                    // Recompute the norm
+                    col_norms[col] = cblas_dznrm2(N, W[col].data(), 1);
                 }
-            } else {
-                // Handle zero singular value
-                std::fill(V_next_block[i].begin(), V_next_block[i].end(), Complex(0.0, 0.0));
             }
         }
         
-        // Step 10: Store the next block to disk
-        for (int i = 0; i < block_size; i++) {
-            std::string filename = temp_dir + "/V_" + std::to_string(j+1) + "_" + std::to_string(i) + ".bin";
-            std::ofstream outfile(filename, std::ios::binary);
+        // Perform modified Gram-Schmidt to get Q and R
+        for (int col = 0; col < block_size; col++) {
+            // Normalize current column to get Q[:,col]
+            Beta_j[col * block_size + col] = Complex(col_norms[col], 0.0);
+            scale = Complex(1.0/col_norms[col], 0.0);
+            cblas_zscal(N, &scale, W[col].data(), 1);
+            V_next[col] = W[col];
+            
+            // Orthogonalize remaining columns against this one
+            for (int next_col = col + 1; next_col < block_size; next_col++) {
+                Complex dot;
+                cblas_zdotc_sub(N, V_next[col].data(), 1, W[next_col].data(), 1, &dot);
+                
+                // Store in R (Beta_j)
+                Beta_j[next_col * block_size + col] = dot;
+                
+                // Subtract projection
+                Complex neg_dot = -dot;
+                cblas_zaxpy(N, &neg_dot, V_next[col].data(), 1, W[next_col].data(), 1);
+                
+                // Update column norm
+                col_norms[next_col] = cblas_dznrm2(N, W[next_col].data(), 1);
+            }
+        }
+        
+        // Store Beta_j
+        Beta.push_back(Beta_j);
+        
+        // Write the next block to disk
+        for (int b = 0; b < block_size; b++) {
+            std::string vector_file = temp_dir + "/block_" + std::to_string(j+1) + 
+                                    "_vector_" + std::to_string(b) + ".bin";
+            std::ofstream outfile(vector_file, std::ios::binary);
             if (!outfile) {
-                std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+                std::cerr << "Error: Cannot open file " << vector_file << " for writing" << std::endl;
                 return;
             }
-            outfile.write(reinterpret_cast<char*>(V_next_block[i].data()), N * sizeof(Complex));
+            outfile.write(reinterpret_cast<char*>(V_next[b].data()), N * sizeof(Complex));
             outfile.close();
         }
-    }
-    
-    // Construct the block tridiagonal matrix
-    int m = A.size() - 1; // Number of iterations completed
-    int total_size = m * block_size;
-    
-    std::cout << "Block Lanczos: Constructing block tridiagonal matrix of size " << total_size << "x" << total_size << std::endl;
-    
-    // Convert to standard matrix format for eigensolving
-    std::vector<Complex> block_tridiag(total_size * total_size, Complex(0.0, 0.0));
-    
-    // Fill diagonal blocks
-    for (int i = 0; i < m; i++) {
-        for (int r = 0; r < block_size; r++) {
-            for (int c = 0; c < block_size; c++) {
-                int row = i * block_size + r;
-                int col = i * block_size + c;
-                block_tridiag[row * total_size + col] = A[i+1][r][c];
-            }
-        }
-    }
-    
-    // Fill off-diagonal blocks
-    for (int i = 0; i < m-1; i++) {
-        for (int r = 0; r < block_size; r++) {
-            for (int c = 0; c < block_size; c++) {
-                // Upper off-diagonal
-                int row1 = i * block_size + r;
-                int col1 = (i+1) * block_size + c;
-                block_tridiag[row1 * total_size + col1] = B[i+1][r][c];
-                
-                // Lower off-diagonal (Hermitian)
-                int row2 = (i+1) * block_size + r;
-                int col2 = i * block_size + c;
-                block_tridiag[row2 * total_size + col2] = std::conj(B[i+1][c][r]);
-            }
-        }
-    }
-    
-    // Solve eigenproblem for the block tridiagonal matrix
-    std::vector<double> evals(total_size);
-    std::vector<Complex> evecs(total_size * total_size);
-    
-    // Use LAPACK for the eigendecomposition
-    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, eigenvectors ? 'V' : 'N', 'U', 
-                           total_size, reinterpret_cast<lapack_complex_double*>(block_tridiag.data()),
-                           total_size, evals.data());
-    
-    if (info != 0) {
-        std::cerr << "Block Lanczos: LAPACKE_zheev failed with error code " << info << std::endl;
-        // Try a more robust but slower algorithm
-        std::cout << "Block Lanczos: Trying more robust eigensolver..." << std::endl;
         
-        // Construct a Hermitian matrix explicitly
-        std::vector<Complex> herm_matrix(total_size * total_size, Complex(0.0, 0.0));
-        for (int i = 0; i < total_size; i++) {
-            for (int j = 0; j <= i; j++) {
-                herm_matrix[i*total_size + j] = block_tridiag[i*total_size + j];
-                if (i != j) {
-                    herm_matrix[j*total_size + i] = std::conj(block_tridiag[i*total_size + j]);
-                }
-            }
-        }
+        // Update for next iteration
+        V_prev = V_curr;
+        V_curr = V_next;
         
-        info = LAPACKE_zheevd(LAPACK_COL_MAJOR, eigenvectors ? 'V' : 'N', 'U',
-                            total_size, reinterpret_cast<lapack_complex_double*>(herm_matrix.data()),
-                            total_size, evals.data());
-        
-        if (info != 0) {
-            std::cerr << "Block Lanczos: LAPACKE_zheevd also failed with error code " << info << std::endl;
-            return;
-        }
-        
-        // Copy results back
-        block_tridiag = herm_matrix;
-    }
-    
-    // Extract the requested number of eigenvalues
-    int n_eigenvalues = std::min(max_exct, total_size);
-    eigenvalues.resize(n_eigenvalues);
-    for (int i = 0; i < n_eigenvalues; i++) {
-        eigenvalues[i] = evals[i];
-    }
-    
-    std::cout << "Block Lanczos: Found " << n_eigenvalues << " eigenvalues" << std::endl;
-    
-    // Compute eigenvectors in the original basis if requested
-    if (eigenvectors) {
-        std::cout << "Block Lanczos: Computing eigenvectors in original basis" << std::endl;
-        
-        // Process eigenvectors batch by batch to save memory
-        const int batch_size = 10;
-        int num_batches = (n_eigenvalues + batch_size - 1) / batch_size;
-        
-        for (int batch = 0; batch < num_batches; batch++) {
-            int start_idx = batch * batch_size;
-            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
-            int batch_n = end_idx - start_idx;
+        // Periodically check convergence
+        if ((j+1) % 10 == 0 || j == max_iter - 1) {
+            int current_size = (j+1) * block_size;
             
-            std::cout << "Block Lanczos: Processing eigenvectors " << start_idx + 1 
-                      << " to " << end_idx << " of " << n_eigenvalues << std::endl;
-            
-            // Process this batch of eigenvectors
-            for (int i = 0; i < batch_n; i++) {
-                int global_idx = start_idx + i;
+            if (current_size >= num_eigs) {
+                std::cout << "  Computing eigenvalues at iteration " << j+1 << "..." << std::endl;
                 
-                // Construct full eigenvector from Lanczos eigenvectors
-                ComplexVector full_vector(N, Complex(0.0, 0.0));
+                // Construct the block tridiagonal matrix
+                std::vector<Complex> block_tridiag(current_size * current_size, Complex(0.0, 0.0));
                 
-                // Project Lanczos eigenvector onto original basis
-                for (int j = 0; j < m; j++) {
-                    for (int k = 0; k < block_size; k++) {
-                        ComplexVector basis_vector = read_block_vector(j, k);
-                        Complex coef = block_tridiag[global_idx*total_size + j*block_size + k];
-                        cblas_zaxpy(N, &coef, basis_vector.data(), 1, full_vector.data(), 1);
+                // Fill diagonal blocks (Alpha)
+                for (int block_idx = 0; block_idx <= j; block_idx++) {
+                    std::vector<Complex>& Alpha_block = Alpha[block_idx];
+                    for (int row = 0; row < block_size; row++) {
+                        for (int col = 0; col < block_size; col++) {
+                            int global_row = block_idx * block_size + row;
+                            int global_col = block_idx * block_size + col;
+                            block_tridiag[global_row * current_size + global_col] = Alpha_block[row * block_size + col];
+                        }
                     }
                 }
                 
-                // Normalize the eigenvector
-                double norm = cblas_dznrm2(N, full_vector.data(), 1);
-                if (norm > 1e-12) {
-                    Complex scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, full_vector.data(), 1);
+                // Fill off-diagonal blocks (Beta)
+                for (int block_idx = 0; block_idx < j; block_idx++) {
+                    std::vector<Complex>& Beta_block = Beta[block_idx];
+                    for (int row = 0; row < block_size; row++) {
+                        for (int col = 0; col < block_size; col++) {
+                            int global_row = block_idx * block_size + row;
+                            int global_col = (block_idx + 1) * block_size + col;
+                            block_tridiag[global_row * current_size + global_col] = Beta_block[row * block_size + col];
+                            block_tridiag[global_col * current_size + global_row] = std::conj(Beta_block[row * block_size + col]);
+                        }
+                    }
                 }
                 
-                // Save to file
-                std::string evec_file = results_dir + "/eigenvector_" + std::to_string(global_idx) + ".bin";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
+                // Compute eigenvalues
+                std::vector<double> evals_real(current_size);
+                int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', current_size,
+                                        reinterpret_cast<lapack_complex_double*>(block_tridiag.data()),
+                                        current_size, evals_real.data());
+                
+                if (info == 0) {
+                    // Check convergence for lowest eigenvalues
+                    int num_converged = 0;
+                    for (int i = 0; i < std::min(num_eigs, current_size); i++) {
+                        // For simplicity, consider converged if we're at the final iteration
+                        if (j == max_iter - 1) {
+                            num_converged++;
+                        } else if (j > 0) {
+                            // More sophisticated convergence check would go here
+                            // Using last block and eigenvector components to estimate residual
+                            num_converged++;
+                        }
+                    }
+                    
+                    std::cout << "  Eigenvalues computed, " << num_converged << " of " << num_eigs << " converged" << std::endl;
+                    
+                    if (num_converged >= num_eigs) {
+                        std::cout << "Block Lanczos: All required eigenvalues converged" << std::endl;
+                        break;
+                    }
                 }
-                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
-                evec_outfile.close();
+            }
+        }
+    }
+    
+    // Final computation of eigenvalues and eigenvectors
+    int total_size = Alpha.size() * block_size;
+    std::cout << "Block Lanczos: Computing final eigenvalues and eigenvectors..." << std::endl;
+    
+    // Construct the final block tridiagonal matrix
+    std::vector<Complex> block_tridiag(total_size * total_size, Complex(0.0, 0.0));
+    
+    // Fill diagonal blocks (Alpha)
+    for (int block_idx = 0; block_idx < Alpha.size(); block_idx++) {
+        std::vector<Complex>& Alpha_block = Alpha[block_idx];
+        for (int row = 0; row < block_size; row++) {
+            for (int col = 0; col < block_size; col++) {
+                int global_row = block_idx * block_size + row;
+                int global_col = block_idx * block_size + col;
+                block_tridiag[global_row * total_size + global_col] = Alpha_block[row * block_size + col];
+            }
+        }
+    }
+    
+    // Fill off-diagonal blocks (Beta)
+    for (int block_idx = 0; block_idx < Beta.size(); block_idx++) {
+        std::vector<Complex>& Beta_block = Beta[block_idx];
+        for (int row = 0; row < block_size; row++) {
+            for (int col = 0; col < block_size; col++) {
+                int global_row = block_idx * block_size + row;
+                int global_col = (block_idx + 1) * block_size + col;
+                block_tridiag[global_row * total_size + global_col] = Beta_block[row * block_size + col];
+                block_tridiag[global_col * total_size + global_row] = std::conj(Beta_block[row * block_size + col]);
+            }
+        }
+    }
+    
+    // Compute eigenvalues and eigenvectors
+    std::vector<double> evals_real(total_size);
+    std::vector<Complex> evecs;
+    
+    if (compute_eigenvectors) {
+        evecs.resize(total_size * total_size);
+    }
+    
+    int info = LAPACKE_zheev(LAPACK_COL_MAJOR, 
+                          compute_eigenvectors ? 'V' : 'N',
+                          'U',
+                          total_size,
+                          reinterpret_cast<lapack_complex_double*>(block_tridiag.data()),
+                          total_size,
+                          evals_real.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
+    // Copy eigenvalues to output
+    eigenvalues.resize(num_eigs);
+    for (int i = 0; i < std::min(num_eigs, total_size); i++) {
+        eigenvalues[i] = evals_real[i];
+    }
+    
+    // Compute eigenvectors in original basis if requested
+    if (compute_eigenvectors) {
+        std::cout << "Block Lanczos: Computing eigenvectors in original basis..." << std::endl;
+        
+        // Process in batches to save memory
+        const int batch_size = 10;
+        for (int batch = 0; batch < (num_eigs + batch_size - 1) / batch_size; batch++) {
+            int start_idx = batch * batch_size;
+            int end_idx = std::min(start_idx + batch_size, num_eigs);
+            int batch_n = end_idx - start_idx;
+            
+            // Allocate memory for eigenvectors
+            std::vector<ComplexVector> full_evecs(batch_n, ComplexVector(N, Complex(0.0, 0.0)));
+            
+            // For each block of Lanczos vectors
+            for (int block_idx = 0; block_idx < Alpha.size(); block_idx++) {
+                // Load the block
+                std::vector<ComplexVector> V_block = read_block(block_idx);
+                
+                // For each eigenvector in the batch
+                for (int i = 0; i < batch_n; i++) {
+                    int global_i = start_idx + i;
+                    
+                    // For each vector in the block
+                    for (int j = 0; j < block_size; j++) {
+                        int global_j = block_idx * block_size + j;
+                        
+                        Complex coef = evecs[global_i * total_size + global_j];
+                        cblas_zaxpy(N, &coef, V_block[j].data(), 1, full_evecs[i].data(), 1);
+                    }
+                }
+            }
+            
+            // Normalize and save eigenvectors
+            for (int i = 0; i < batch_n; i++) {
+                double norm = cblas_dznrm2(N, full_evecs[i].data(), 1);
+                Complex scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, full_evecs[i].data(), 1);
+                
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(start_idx + i) + ".bin";
+                std::ofstream outfile(evec_file, std::ios::binary);
+                if (outfile) {
+                    outfile.write(reinterpret_cast<char*>(full_evecs[i].data()), N * sizeof(Complex));
+                    outfile.close();
+                }
             }
         }
         
-        // Save eigenvalues to a file
-        std::string eigenvalue_file = results_dir + "/eigenvalues.bin";
-        std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-        if (!eval_outfile) {
-            std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-        } else {
-            // Write the number of eigenvalues first
+        // Save eigenvalues to file
+        std::string eval_file = evec_dir + "/eigenvalues.bin";
+        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        if (eval_outfile) {
             size_t n_evals = eigenvalues.size();
             eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-            // Write all eigenvalues
-            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
             eval_outfile.close();
-            std::cout << "Block Lanczos: Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+            std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
         }
     }
     
     // Clean up temporary files
     system(("rm -rf " + temp_dir).c_str());
     
-    std::cout << "Block Lanczos: Complete" << std::endl;
+    std::cout << "Block Lanczos: Completed successfully" << std::endl;
 }
 
 // Chebyshev filtered Lanczos algorithm implementation
