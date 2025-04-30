@@ -182,13 +182,13 @@ EDResults exact_diagonalization_core(
                                params.output_dir, params.compute_eigenvectors);
             break;
         
-        case DiagonalizationMethod::ARPACK:
-            std::cout << "Using ARPACK method" << std::endl;
-            arpack_diagonalization(H, hilbert_space_dim, params.max_iterations, 
-                             params.num_eigenvalues, params.tolerance, 
-                             results.eigenvalues, params.output_dir, 
-                             params.compute_eigenvectors);
-            break;
+        // case DiagonalizationMethod::ARPACK:
+        //     std::cout << "Using ARPACK method" << std::endl;
+        //     arpack_diagonalization(H, hilbert_space_dim, params.max_iterations, 
+        //                      params.num_eigenvalues, params.tolerance, 
+        //                      results.eigenvalues, params.output_dir, 
+        //                      params.compute_eigenvectors);
+        //     break;
             
         case DiagonalizationMethod::mTPQ:
             std::cout << "Using microcanonical TPQ (Thermal Pure Quantum states) method" << std::endl;
