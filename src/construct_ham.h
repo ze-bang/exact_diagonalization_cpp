@@ -1031,72 +1031,78 @@ public:
         trans_file.close();
         
 
-        // Read max clique and power representations from JSON files
+        // Read max clique from JSON file
         std::string max_clique_path = dir + "/automorphism_results/max_clique.json";
-
+        std::cout << "Loading max clique from: " << max_clique_path << std::endl;
+        
         // Read max clique
         std::vector<std::vector<int>> max_clique_here;
         std::ifstream max_clique_file(max_clique_path);
         if (!max_clique_file.is_open()) {
             throw std::runtime_error("Cannot open max_clique.json file: " + max_clique_path);
         }
-
-        // Helper function to parse JSON arrays
-        auto parseJsonArrays = [](std::ifstream& file, std::vector<std::vector<int>>& result) {
-            std::string line;
-            bool insideMainArray = false;
-            
-            while (std::getline(file, line)) {
-                // Skip comment lines
-                if (line.find("//") != std::string::npos) continue;
-                
-                // Trim whitespace
-                line.erase(0, line.find_first_not_of(" \t\r\n"));
-                if (line.empty()) continue;
-                
-                if (!insideMainArray && line.find("[") != std::string::npos) {
-                    // Start of the main array
-                    insideMainArray = true;
-                    continue;
-                }
-                
-                if (insideMainArray) {
-                    size_t open_bracket = line.find("[");
-                    size_t close_bracket = line.find("]");
-                    
-                    if (open_bracket != std::string::npos && close_bracket != std::string::npos) {
-                        // This line contains a complete inner array
-                        std::string content = line.substr(open_bracket + 1, close_bracket - open_bracket - 1);
-                        std::istringstream iss(content);
-                        std::vector<int> values;
-                        int value;
-                        while (iss >> value) {
-                            values.push_back(value);
-                            // Skip comma
-                            if (iss.peek() == ',') iss.ignore();
-                        }
-                        result.push_back(values);
-                    }
-                    
-                    // Check if we've reached the end of the main array
-                    if (close_bracket != std::string::npos && open_bracket == std::string::npos) {
-                        break;
-                    }
-                }
-            }
-        };
-
-        // Parse both files
-        parseJsonArrays(max_clique_file, max_clique_here);
-
+        
+        // Read the entire file content
+        std::string json_content((std::istreambuf_iterator<char>(max_clique_file)),
+                      std::istreambuf_iterator<char>());
         max_clique_file.close();
-        // Validation
+        
+        // Simple JSON array parser
+        size_t pos = 0;
+        // Find start of array
+        pos = json_content.find('[', pos);
+        if (pos == std::string::npos) {
+            throw std::runtime_error("Invalid JSON format in max_clique.json");
+        }
+        pos++; // Move past the opening bracket
+        
+        // Parse each inner array
+        while (pos < json_content.size()) {
+            // Skip whitespace and find start of inner array
+            while (pos < json_content.size() && (json_content[pos] == ' ' || json_content[pos] == '\n' || 
+              json_content[pos] == '\r' || json_content[pos] == '\t')) pos++;
+            
+            if (pos >= json_content.size() || json_content[pos] == ']') break; // End of outer array
+            
+            if (json_content[pos] != '[') {
+            pos++; // Skip commas and other characters
+            continue;
+            }
+            
+            // Found start of inner array
+            pos++; // Move past the opening bracket
+            std::vector<int> permutation;
+            
+            // Parse the inner array
+            std::string num_str;
+            while (pos < json_content.size() && json_content[pos] != ']') {
+            char c = json_content[pos++];
+            if (std::isdigit(c)) {
+                num_str += c;
+            } else if (!num_str.empty() && (c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t')) {
+                permutation.push_back(std::stoi(num_str));
+                num_str.clear();
+            }
+            }
+            
+            // Add the last number if there is one
+            if (!num_str.empty()) {
+            permutation.push_back(std::stoi(num_str));
+            }
+            
+            // Add the permutation to the list
+            if (!permutation.empty()) {
+            max_clique_here.push_back(permutation);
+            }
+            
+            pos++; // Move past the closing bracket
+        }
+        
         if (max_clique_here.empty()) {
             throw std::runtime_error("Failed to parse max_clique.json or file is empty");
         }
-
-        std::cout << "Loaded " << max_clique_here.size() << " permutations in max clique" << std::endl;
         
+        std::cout << "Loaded " << max_clique_here.size() << " permutations in max clique" << std::endl;
         MinimalGeneratorFinder minimal_finder;
         std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
         
