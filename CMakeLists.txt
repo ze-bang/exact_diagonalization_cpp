@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(ExactDiagonalization LANGUAGES CXX C CUDA)
+project(ExactDiagonalization LANGUAGES CXX C)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -143,43 +143,43 @@ else()
     message(STATUS "  OpenMP Support: NO")
 endif()
 
-# Add test_lanczos executable
-add_executable(test_lanczos ${SRC_DIR}/test_lanczos.cpp)
+# # Add test_lanczos executable
+# add_executable(test_lanczos ${SRC_DIR}/test_lanczos.cpp)
 
-# Link test_lanczos with the same libraries as ED
-target_link_libraries(test_lanczos
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${ARPACK_LIBRARY}
-)
+# # Link test_lanczos with the same libraries as ED
+# target_link_libraries(test_lanczos
+#     ${BLAS_LIBRARIES}
+#     ${LAPACK_LIBRARIES}
+#     ${LAPACKE_LIBRARIES}
+#     ${ARPACK_LIBRARY}
+# )
 
-# Add MPI if enabled
-if(WITH_MPI)
-    target_link_libraries(test_lanczos ${MPI_CXX_LIBRARIES})
-endif()
+# # Add MPI if enabled
+# if(WITH_MPI)
+#     target_link_libraries(test_lanczos ${MPI_CXX_LIBRARIES})
+# endif()
 
-# Add CUDA if enabled
-if(WITH_CUDA)
-    target_link_libraries(test_lanczos 
-        lanczos_cuda
-        ${CUDA_LIBRARIES}
-        ${CUBLAS_LIBRARY}
-        ${CUSOLVER_LIBRARY}
-    )
-endif()
+# # Add CUDA if enabled
+# if(WITH_CUDA)
+#     target_link_libraries(test_lanczos 
+#         lanczos_cuda
+#         ${CUDA_LIBRARIES}
+#         ${CUBLAS_LIBRARY}
+#         ${CUSOLVER_LIBRARY}
+#     )
+# endif()
 
-# Apply the same optimization flags as the main executable
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(test_lanczos PRIVATE -O3 -march=native)
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(test_lanczos PRIVATE -g)
-    endif()
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
-    target_compile_options(test_lanczos PRIVATE -O3 -xHost)
-endif()
+# # Apply the same optimization flags as the main executable
+# if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+#     target_compile_options(test_lanczos PRIVATE -O3 -march=native)
+#     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+#         target_compile_options(test_lanczos PRIVATE -g)
+#     endif()
+# elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+#     target_compile_options(test_lanczos PRIVATE -O3 -xHost)
+# endif()
 
-# Add OpenMP to test_lanczos if available
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(test_lanczos OpenMP::OpenMP_CXX)
-endif()
+# # Add OpenMP to test_lanczos if available
+# if(OpenMP_CXX_FOUND)
+#     target_link_libraries(test_lanczos OpenMP::OpenMP_CXX)
+# endif()
