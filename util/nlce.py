@@ -59,7 +59,7 @@ def get_num_sites(file_path):
 
 def run_ed_for_cluster(args):
     """Run ED for a single cluster"""
-    cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options = args
+    cluster_id, order, ed_executable, ham_dir, ed_dir, ed_options, symmetrized = args
     
     # Create output directory for ED results
     cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
@@ -95,6 +95,9 @@ def run_ed_for_cluster(args):
         f'--output={cluster_ed_dir}/output',
         f'--num_sites={num_sites}'
     ]
+
+    if symmetrized:
+        cmd.append('--symmetrized')
     
     # Add thermodynamic parameters if required
     if ed_options["thermo"]:
@@ -154,6 +157,8 @@ def main():
     
     # SI units
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
+
+    parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
     
     args = parser.parse_args()
     
@@ -260,13 +265,13 @@ def main():
             "thermo": args.thermo,
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
-            "temp_bins": args.temp_bins
+            "temp_bins": args.temp_bins,
         }
         
         # Prepare arguments for each cluster
         ed_tasks = []
         for cluster_id, order, _ in clusters:
-            ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options))
+            ed_tasks.append((cluster_id, order, args.ed_executable, ham_dir, ed_dir, ed_options, args.symmetrized))
         
         if args.parallel:
             logging.info(f"Running ED in parallel with {args.num_cores} cores")
@@ -415,6 +420,7 @@ def main():
         
         if args.order_cutoff:
             nlc_params.append(f'--order_cutoff={args.order_cutoff}')
+        
         
         logging.info(f"Running command: {' '.join(nlc_params)}")
         try:

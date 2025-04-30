@@ -57,7 +57,7 @@ def run_nlce_for_order(order, args):
         f'--method={args.method}',
         f'--temp_min={args.temp_min}',
         f'--temp_max={args.temp_max}',
-        f'--temp_bins={args.temp_bins}',
+        f'--temp_bins={args.temp_bins}'
     ]
     
     # Add optional arguments

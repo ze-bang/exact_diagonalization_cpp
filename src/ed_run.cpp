@@ -172,7 +172,7 @@ int main(int argc, char* argv[]) {
     
     // Create output directories
     std::string standard_output = params.output_dir;
-    std::string symmetrized_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/symmetrized";
+    std::string symmetrized_output = params.output_dir;
     std::string thermo_output = params.output_dir.substr(0, params.output_dir.rfind("/")) + "/thermo";
     
     std::string cmd = "mkdir -p " + standard_output;
