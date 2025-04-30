@@ -21,6 +21,7 @@
 #include <fstream>
 #include <set>
 #include <thread>
+#include <mpi.h>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -1238,7 +1239,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
 // Block Lanczos algorithm for eigenvalue computation
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int num_eigs, 
                   double tol, std::vector<double>& eigenvalues, std::string dir = "",
-                  bool compute_eigenvectors = false, , int block_size=4) {
+                  bool compute_eigenvectors = false, int block_size=4) {
     // Validate input parameters
     if (block_size <= 0) {
         std::cerr << "Block size must be positive" << std::endl;
