@@ -1238,7 +1238,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
 // Block Lanczos algorithm for eigenvalue computation
 void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int num_eigs, 
                   double tol, std::vector<double>& eigenvalues, std::string dir = "",
-                  bool compute_eigenvectors = false, , int block_size=4) {
+                  bool compute_eigenvectors = false, int block_size=4) {
     // Validate input parameters
     if (block_size <= 0) {
         std::cerr << "Block size must be positive" << std::endl;
@@ -3688,7 +3688,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             for (int i = 0; i < m-1; i++) {
                 // Compute Givens rotation to zero out the bulge
                 double c, s;
-                LAPACKE_dlartg(x, z, &c, &s, &x);
+                LAPACKE_dlartgs(x, z, c, &s, &x);
                 
                 // Apply the Givens rotation to the tridiagonal matrix
                 // It creates a bulge that we need to chase down
