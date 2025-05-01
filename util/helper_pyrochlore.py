@@ -253,6 +253,48 @@ def plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table
     plt.savefig(f"{output_dir}pyrochlore_lattice.png", dpi=300, bbox_inches='tight')
     plt.close()
 
+
+def one_body_correlations(file_name, All_N, output_dir):
+    num_green_one  = All_N
+    f        = open(output_dir+file_name, 'wt')
+    f.write("==================="+"\n")
+    f.write("loc "+"{0:8d}".format(num_green_one)+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    for i in range(3):
+        for all_i in range(0,All_N):
+            f.write(" {0:8d} ".format(i) \
+            +" {0:8d}   ".format(all_i)     \
+            +" {0:8f}   ".format(1)     \
+            +" {0:8f}   ".format(0)
+            +"\n")
+    f.close()
+
+
+def two_body_correlations(file_name, All_N, output_dir):
+    num_green_two  = All_N*All_N
+    f        = open(output_dir+file_name, 'wt')
+    f.write("==================="+"\n")
+    f.write("loc "+"{0:8d}".format(num_green_two)+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    for i in range(3):
+        for j in range(3):
+            for all_i in range(0,All_N):
+                for all_j in range(0,All_N):
+                    f.write(" {0:8d} ".format(i) \
+                    +" {0:8d}   ".format(all_i)     \
+                    +" {0:8d}   ".format(j)     \
+                    +" {0:8d}   ".format(all_j)     \
+                    +" {0:8f}   ".format(1) \
+                    +" {0:8f}   ".format(0) \
+                    +"\n")
+    f.close()
+
+
+
 def main():
     # Parse arguments
     args = parse_arguments()
@@ -312,6 +354,11 @@ def main():
     write_site_positions(output_dir, dim1, dim2, dim3)
     write_lattice_parameters(output_dir)
     plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table)
+
+    # Write one-body and two-body correlation functions
+    one_body_correlations(f"one_body_correlation.dat", dim1*dim2*dim3*4, output_dir)
+    two_body_correlations(f"two_body_correlation.dat", dim1*dim2*dim3*4, output_dir)
+
     
     print(f"Generated pyrochlore lattice Hamiltonian with dimensions {dim1}x{dim2}x{dim3}")
     print(f"Boundary conditions: {'Periodic' if use_pbc else 'Open'}")

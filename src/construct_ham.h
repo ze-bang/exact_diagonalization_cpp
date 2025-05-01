@@ -1404,6 +1404,70 @@ public:
         std::cout << "File read complete." << std::endl;    
     }
 
+    void loadonebodycorrelation(const int Op, const int indx) { 
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            // Check if all bits match their expected values
+            if (Op == 2){
+                return {basis, Complex(1.0,0.0)*0.5*pow(-1,(basis >> indx) & 1)};
+            }
+            else{
+                if (((basis >> indx) & 1) != Op) {
+                    // Flip the A bit
+                    int flipped_basis = basis ^ (1 << indx);
+                    return {flipped_basis, Complex(1.0, 0.0)};                    
+                }
+            }
+            // Default case: no transformation applies
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+
+    void loadtwobodycorrelation(const int Op1, const int indx1, const int Op2, const int indx2){
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            // Check what type of operators we're dealing with
+            if (Op1 == 2 && Op2 == 2) {
+                // Both are identity operators with phase factors
+                int bit1 = (basis >> indx1) & 1;
+                int bit2 = (basis >> indx2) & 1;
+                return {basis, Complex(1.0, 0.0)* 0.25 * pow(-1, bit1) * pow(-1, bit2)};
+            } 
+            else if (Op1 == 2) {
+                // Op1 is identity with phase, Op2 is bit flip
+                int bit1 = (basis >> indx1) & 1;
+                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                
+                if (bit2_matches) {
+                    int flipped_basis = basis ^ (1 << indx2);
+                    return {flipped_basis, Complex(1.0, 0.0) * 0.5 * pow(-1, bit1)};
+                }
+            } 
+            else if (Op2 == 2) {
+                // Op2 is identity with phase, Op1 is bit flip
+                int bit2 = (basis >> indx2) & 1;
+                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                
+                if (bit1_matches) {
+                    // Flip the first bit
+                    int flipped_basis = basis ^ (1 << indx1);
+                    return {flipped_basis, Complex(1.0, 0.0) * 0.5 * pow(-1, bit2)};
+                }
+            } 
+            else {
+                // Both are bit flip operators
+                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                
+                if (bit1_matches && bit2_matches) {
+                    // Flip both bits
+                    int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
+                    return {flipped_basis, Complex(1.0, 0.0)};
+                }
+            }
+            // Default case: no transformation applies
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+
     // Build symmetrized sparse matrices for each block and save them to files
     void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
         if (symmetrized_block_ham_sizes.empty()) {
