@@ -400,34 +400,30 @@ EDResults exact_diagonalization_core(
                         for (int i = 0; i < num_temps; i++) {
                             double T = std::exp(log_temp_min + i * log_temp_step);
                             double beta = 1.0 / T;
-                            
-                            try {
                                 // Compute thermal expectation
-                                Complex expectation = calculate_thermal_expectation(
-                                    apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
-                                
-                                // Write to file
-                                if (prefix == "one_body_correlations") {
-                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                                << std::setw(12) << std::setprecision(6) << beta << " "
-                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                                } else if (prefix == "two_body_correlations") {
-                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                                << std::setw(12) << std::setprecision(6) << beta << " "
-                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                                << std::setw(12) << std::setprecision(6) << Op2 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx2 << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                                }
-                            }
-                            catch (const std::exception& e) {
-                                std::cerr << "Error at T=" << T << ": " << e.what() << std::endl;
-                                results_file << T << " " << beta << " NaN NaN" << std::endl;
+                            Complex expectation = calculate_thermal_expectation(
+                                apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
+                            
+                            std::cout << "T: " << T << ", beta: " << beta << ", expectation: " 
+                                        << expectation.real() << " + " << expectation.imag() << "i" << std::endl;
+
+                            // Write to file
+                            if (prefix == "one_body_correlations") {
+                                results_file << std::setw(12) << std::setprecision(6) << T << " "
+                                            << std::setw(12) << std::setprecision(6) << beta << " "
+                                            << std::setw(12) << std::setprecision(6) << Op1 << " "
+                                            << std::setw(12) << std::setprecision(6) << indx1 << " "
+                                            << std::setw(12) << std::setprecision(6) << expectation.real() << " "
+                                            << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
+                            } else if (prefix == "two_body_correlations") {
+                                results_file << std::setw(12) << std::setprecision(6) << T << " "
+                                            << std::setw(12) << std::setprecision(6) << beta << " "
+                                            << std::setw(12) << std::setprecision(6) << Op1 << " "
+                                            << std::setw(12) << std::setprecision(6) << Op2 << " "
+                                            << std::setw(12) << std::setprecision(6) << indx1 << " "
+                                            << std::setw(12) << std::setprecision(6) << indx2 << " "
+                                            << std::setw(12) << std::setprecision(6) << expectation.real() << " "
+                                            << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
                             }
                         }
                     }

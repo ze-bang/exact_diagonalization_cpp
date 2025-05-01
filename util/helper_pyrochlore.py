@@ -356,8 +356,8 @@ def main():
     plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table)
 
     # Write one-body and two-body correlation functions
-    one_body_correlations(f"one_body_correlation.dat", dim1*dim2*dim3*4, output_dir)
-    two_body_correlations(f"two_body_correlation.dat", dim1*dim2*dim3*4, output_dir)
+    one_body_correlations(f"one_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
+    two_body_correlations(f"two_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
 
     
     print(f"Generated pyrochlore lattice Hamiltonian with dimensions {dim1}x{dim2}x{dim3}")
