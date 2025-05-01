@@ -56,6 +56,8 @@ struct EDParameters {
     double temp_max = 20;
     int num_temp_bins = 100;
     int num_sites = 0; // Number of sites in the system
+
+    bool calc_observables = false; // Calculate custom observables
 };
 
 // Main wrapper function for exact diagonalization
@@ -261,10 +263,144 @@ EDResults exact_diagonalization_core(
             break;
     }
     
-    // Divide each eigenvalue by the number of sites
-    // for (auto& eigenvalue : results.eigenvalues) {
-    //     eigenvalue /= params.num_sites;
-    // }
+    if (params.compute_eigenvectors) {
+        std::cout << "Eigenvectors computed and saved to " << params.output_dir << std::endl;
+    }
+
+    if (params.calc_observables) {
+        // Call the function to calculate observables
+        std::cout << "Calculating custom observables..." << std::endl;
+        // This would call the appropriate function to calculate observables
+        // Calculate thermal expectation values for correlation operators
+        std::cout << "Calculating thermal expectation values for correlation operators..." << std::endl;
+
+        // Create a directory for thermal correlation results
+        std::string output_correlations_dir = params.output_dir + "/thermal_correlations";
+        std::string cmd_mkdir = "mkdir -p " + output_correlations_dir;
+        system(cmd_mkdir.c_str());
+
+        // Get the base directory where correlation files might be located
+        std::string base_dir;
+        if (!interaction_file.empty()) {
+            size_t pos = interaction_file.find_last_of("/\\");
+            base_dir = (pos != std::string::npos) ? interaction_file.substr(0, pos) : ".";
+        } else {
+            base_dir = ".";
+        }
+
+        std::cout << "Looking for correlation files in: " << base_dir << std::endl;
+
+        // Define correlation file patterns to search for
+        std::vector<std::pair<std::string, std::string>> patterns = {
+            {"one_body_correlations", "one_body_correlations*.dat"},
+            {"two_body_correlations", "two_body_correlations*.dat"}
+        };
+
+        // Process each type of correlation file
+        for (const auto& [prefix, pattern] : patterns) {
+            // Find matching files
+            std::string temp_list_file = output_correlations_dir + "/" + prefix + "_files.txt";
+            std::string find_command = "find \"" + base_dir + "\" -name \"" + pattern + "\" 2>/dev/null > \"" + temp_list_file + "\"";
+            system(find_command.c_str());
+            
+            // Read the list of files
+            std::ifstream file_list(temp_list_file);
+            if (!file_list.is_open()) continue;
+            
+            std::string correlation_file;
+            int file_count = 0;
+            
+            while (std::getline(file_list, correlation_file)) {
+                if (correlation_file.empty()) continue;
+                file_count++;
+                
+                // Extract operator type from filename
+                size_t prefix_pos = correlation_file.find(prefix);
+                if (prefix_pos == std::string::npos) continue;
+                
+                std::string op_type = correlation_file.substr(prefix_pos + prefix.length());
+                size_t dot_pos = op_type.find(".dat");
+                if (dot_pos != std::string::npos) {
+                    op_type = op_type.substr(0, dot_pos);
+                }
+                
+                std::cout << "Processing " << prefix << " file: " << correlation_file << std::endl;
+                
+                try {
+                    // Load the operator
+                    Operator correlation_op(params.num_sites);
+
+                    // if one body operator
+                    if (prefix == "one_body_correlations") {
+                        correlation_op.loadFromFile(correlation_file);
+                    }
+                    // if two body operator
+                    else if (prefix == "two_body_correlations") {
+                        correlation_op.loadFromInterAllFile(correlation_file);
+                    }
+                    
+                    // Create a lambda to apply the operator
+                    auto apply_correlation_op = [&correlation_op](const Complex* in, Complex* out, int n) {
+                        std::vector<Complex> in_vec(in, in + n);
+                        std::vector<Complex> out_vec = correlation_op.apply(in_vec);
+                        std::copy(out_vec.begin(), out_vec.end(), out);
+                    };
+                    
+                    // Compute thermal expectations at different temperatures
+                    std::string results_file_path = output_correlations_dir + "/thermal_expectation_" + 
+                                                  prefix + op_type + ".dat";
+                    std::ofstream results_file(results_file_path);
+                    
+                    if (!results_file.is_open()) {
+                        std::cerr << "Error: Could not open output file: " << results_file_path << std::endl;
+                        continue;
+                    }
+                    
+                    // Write header
+                    results_file << "# Temperature Beta Real_Expectation Imag_Expectation" << std::endl;
+                    
+                    // Calculate thermal expectations at temperature points
+                    int num_temps = std::min(params.num_temp_bins, 20);
+                    double log_temp_min = std::log(params.temp_min);
+                    double log_temp_max = std::log(params.temp_max);
+                    double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, num_temps - 1);
+                    
+                    for (int i = 0; i < num_temps; i++) {
+                        double T = std::exp(log_temp_min + i * log_temp_step);
+                        double beta = 1.0 / T;
+                        
+                        try {
+                            // Compute thermal expectation
+                            Complex expectation = calculate_thermal_expectation(
+                                apply_correlation_op, hilbert_space_dim, beta, params.output_dir);
+                            
+                            // Write to file
+                            results_file << std::setw(12) << std::setprecision(6) << T << " "
+                                        << std::setw(12) << std::setprecision(6) << beta << " "
+                                        << std::setw(12) << std::setprecision(6) << expectation.real() << " "
+                                        << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "Error at T=" << T << ": " << e.what() << std::endl;
+                            results_file << T << " " << beta << " NaN NaN" << std::endl;
+                        }
+                    }
+                    
+                    results_file.close();
+                    std::cout << "Thermal expectations saved to: " << results_file_path << std::endl;
+                }
+                catch (const std::exception& e) {
+                    std::cerr << "Error processing " << correlation_file << ": " << e.what() << std::endl;
+                }
+            }
+            
+            file_list.close();
+            std::cout << "Processed " << file_count << " " << prefix << " files" << std::endl;
+            std::remove(temp_list_file.c_str());
+        }
+
+        std::cout << "Thermal expectation calculations complete!" << std::endl;
+    }
 
     return results;
 }

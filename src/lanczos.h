@@ -395,7 +395,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     int info;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/lanczos_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -797,7 +797,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     int info;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/lanczos_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -1098,7 +1098,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     int info;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/lanczos_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -1254,7 +1254,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     
     // Create directories for temporary files and output
     std::string temp_dir = dir + "/block_lanczos_temp";
-    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -2256,7 +2256,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     }
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/shift_invert_lanczos_results";
+    std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
     
@@ -2914,7 +2914,7 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
     }
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/robust_shift_invert_lanczos_results";
+    std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
     
@@ -3033,7 +3033,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Full diagonalization: Starting for matrix of dimension " << N << std::endl;
     
     // Create directory for output if needed
-    std::string evec_dir = dir;
+    std::string evec_dir = dir + "/eigenvectors";
     if (compute_eigenvectors && !dir.empty()) {
         std::string cmd = "mkdir -p " + evec_dir;
         system(cmd.c_str());
@@ -3128,7 +3128,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     
     // Create directories for output
     std::string temp_dir = dir + "/krylov_schur_temp";
-    std::string evec_dir = dir + "/krylov_schur_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -3590,7 +3590,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         auto compute_and_save_eigenvectors = [&]() {
             if (!compute_eigenvectors || dir.empty()) return;
             
-            std::string evec_dir = dir + "/irl_eigenvectors";
+            std::string evec_dir = dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
@@ -3773,7 +3773,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             
             // Compute and save eigenvectors if requested
             if (compute_eigenvectors && !dir.empty()) {
-                std::string evec_dir = dir + "/irl_eigenvectors";
+                std::string evec_dir = dir + "/eigenvectors";
                 std::string cmd = "mkdir -p " + evec_dir;
                 system(cmd.c_str());
                 
@@ -4495,7 +4495,7 @@ void arpack_diagonalization(std::function<void(const Complex*, Complex*, int)> H
     std::cout << "Computing " << exct << " eigenvalues" << std::endl;
     
     // Create directory for output if needed
-    std::string evec_dir = dir;
+    std::string evec_dir = dir + "/eigenvectors";
     if (compute_eigenvectors && !dir.empty()) {
         std::string cmd = "mkdir -p " + evec_dir;
         system(cmd.c_str());

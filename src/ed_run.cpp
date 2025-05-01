@@ -30,6 +30,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --measure-spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+        std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
         return 1;
     }
 
@@ -152,6 +153,13 @@ int main(int argc, char* argv[]) {
         else if (arg.find("--num_sites=") == 0) {
             params.num_sites = std::stoi(arg.substr(12));
             num_sites_specified = true;
+        }
+        else if (arg == "--calc_observables") {
+            params.compute_eigenvectors = true;
+            params.calc_observables = true;
+        }
+        else {
+            std::cerr << "Unknown option: " << arg << std::endl;
         }
     }
     
