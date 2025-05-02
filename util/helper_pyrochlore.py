@@ -177,6 +177,19 @@ def write_lattice_parameters(output_dir):
         for i, vector in enumerate(basis):
             f.write(f"{i} {vector[0]:.6f} {vector[1]:.6f} {vector[2]:.6f}\n")
 
+
+def lattice_pos(site_indx, dim1, dim2, dim3):
+    
+    """Convert site index to 3D lattice position"""
+    i = site_indx // (dim2 * dim3 * 4)
+    j = (site_indx // (dim3 * 4)) % dim2
+    k = (site_indx // 4) % dim3
+    u = site_indx % 4
+
+    position = i * basis[0] + j * basis[1] + k * basis[2] + site_basis[u]
+
+    return position
+
 def plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table):
     """Plot the pyrochlore lattice showing sites and their nearest neighbor connections"""
     # Calculate all site positions
@@ -293,6 +306,25 @@ def two_body_correlations(file_name, All_N, output_dir):
                     +"\n")
     f.close()
 
+def spin_operators(Op, Q, file_name, All_N, output_dir):
+    num_green_one  = All_N
+    f        = open(output_dir+file_name, 'wt')
+    f.write("==================="+"\n")
+    f.write("loc "+"{0:8d}".format(num_green_one)+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    f.write("==================="+"\n")
+    for all_i in range(0,All_N):
+        pos = lattice_pos(all_i, dim1, dim2, dim3)
+        factor = np.exp(1j*Q[0]*pos[0]+1j*Q[1]*pos[1]+1j*Q[2]*pos[2])
+
+        f.write(" {0:8d} ".format(Op)   \
+        +" {0:8d}   ".format(all_i)     \
+        +" {0:8f}   ".format(np.real(factor))     \
+        +" {0:8f}   ".format(np.imag(factor))     \
+        +"\n")
+
+    f.close()
 
 
 def main():
@@ -359,7 +391,14 @@ def main():
     one_body_correlations(f"one_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
     two_body_correlations(f"two_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
 
-    
+    spin_operators(0, [0, 0, 0], "obervables_S+_Gamma.dat", dim1*dim2*dim3*4, output_dir)
+    spin_operators(1, [0, 0, 0], "obervables_S-_Gamma.dat", dim1*dim2*dim3*4, output_dir)
+    spin_operators(2, [0, 0, 0], "obervables_Sz_Gamma.dat", dim1*dim2*dim3*4, output_dir)
+
+    spin_operators(0, [2*np.pi, 0, 0], "obervables_S+_X.dat", dim1*dim2*dim3*4, output_dir)
+    spin_operators(1, [2*np.pi, 0, 0], "obervables_S-_X.dat", dim1*dim2*dim3*4, output_dir)
+    spin_operators(2, [2*np.pi, 0, 0], "obervables_Sz_X.dat", dim1*dim2*dim3*4, output_dir)
+
     print(f"Generated pyrochlore lattice Hamiltonian with dimensions {dim1}x{dim2}x{dim3}")
     print(f"Boundary conditions: {'Periodic' if use_pbc else 'Open'}")
     print(f"Output saved to {output_dir}")

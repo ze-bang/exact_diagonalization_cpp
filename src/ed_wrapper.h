@@ -6,6 +6,7 @@
 #include "CG.h"
 #include "lanczos.h"
 #include "construct_ham.h"
+#include "observables.h"
 #include <sys/stat.h>
 // Enum for available diagonalization methods
 enum class DiagonalizationMethod {
