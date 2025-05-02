@@ -3456,6 +3456,33 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     int k = exct;                             // Number of desired eigenvalues
     int p = m - k;                            // Number of shifts per restart
     int max_restarts = 100;                   // Maximum number of implicit restarts
+    const int reorth_window = 10;             // Number of recent vectors to use for reorthogonalization
+    
+    // Helper functions to read/write basis vectors from/to disk
+    auto write_basis_vector = [&temp_dir, N](int index, const ComplexVector& vec) {
+        std::string filename = temp_dir + "/irl_vector_" + std::to_string(index) + ".bin";
+        std::ofstream outfile(filename, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+            return false;
+        }
+        outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
+        outfile.close();
+        return true;
+    };
+    
+    auto read_basis_vector = [&temp_dir, N](int index) -> ComplexVector {
+        ComplexVector vec(N);
+        std::string filename = temp_dir + "/irl_vector_" + std::to_string(index) + ".bin";
+        std::ifstream infile(filename, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
+            return vec;
+        }
+        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+        infile.close();
+        return vec;
+    };
     
     // Initialize random starting vector
     std::mt19937 gen(std::random_device{}());
@@ -3471,14 +3498,17 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     Complex scale_factor = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
+    // Write initial basis vector to disk
+    write_basis_vector(0, v_current);
+    
     // Initialize vectors for the Lanczos process
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
     ComplexVector w(N);
     
-    // Storage for Lanczos basis vectors
-    std::vector<ComplexVector> V;
-    V.push_back(v_current);
+    // Ring buffer for recent vectors (for selective orthogonalization)
+    std::deque<ComplexVector> recent_vectors;
+    recent_vectors.push_back(v_current);
     
     // Initialize tridiagonal matrix elements
     std::vector<double> alpha;  // Diagonal elements
@@ -3488,12 +3518,13 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     // Main loop for implicit restarts
     int iteration = 0;
     bool converged = false;
+    int current_size = 1;  // Current size of the Lanczos factorization
     
     while (!converged && iteration < max_restarts) {
         std::cout << "IRL: Starting iteration " << iteration + 1 << " of maximum " << max_restarts << std::endl;
         
         // Build or extend the Lanczos factorization to dimension m
-        int j_start = V.size();
+        int j_start = current_size;
         
         for (int j = j_start; j < m; j++) {
             // w = H*v_j
@@ -3514,13 +3545,22 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             Complex neg_alpha = Complex(-alpha[j], 0.0);
             cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
             
-            // Full reorthogonalization against all previous vectors
-            for (int i = 0; i <= j; i++) {
+            // Selective reorthogonalization against recent vectors only
+            for (const auto& vec : recent_vectors) {
                 Complex overlap;
-                cblas_zdotc_sub(N, V[i].data(), 1, w.data(), 1, &overlap);
+                cblas_zdotc_sub(N, vec.data(), 1, w.data(), 1, &overlap);
                 
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, V[i].data(), 1, w.data(), 1);
+                if (std::abs(overlap) > tol) {
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, vec.data(), 1, w.data(), 1);
+                    
+                    // Double-check orthogonality (optional)
+                    cblas_zdotc_sub(N, vec.data(), 1, w.data(), 1, &overlap);
+                    if (std::abs(overlap) > tol) {
+                        neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, vec.data(), 1, w.data(), 1);
+                    }
+                }
             }
             
             // beta_{j+1} = ||w||
@@ -3539,13 +3579,21 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 v_next[i] = w[i] / norm;
             }
             
-            // Store basis vector
-            V.push_back(v_next);
+            // Store basis vector to disk
+            write_basis_vector(j+1, v_next);
+            
+            // Update recent vectors ring buffer
+            recent_vectors.push_back(v_next);
+            if (recent_vectors.size() > reorth_window) {
+                recent_vectors.pop_front();
+            }
             
             // Update for next iteration
             v_prev = v_current;
             v_current = v_next;
         }
+        
+        current_size = m;  // Update current factorization size
         
         // At this point, we have a Lanczos factorization of dimension m
         // H*V_m = V_m*T_m + beta_m*v_{m+1}*e_m^T
@@ -3573,9 +3621,6 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Check convergence for the k wanted eigenvalues
         bool all_converged = true;
         for (int i = 0; i < k; i++) {
-            // Ritz value is evals[i]
-            // Corresponding Ritz vector is sum_j evecs[i*m+j] * V[j]
-            
             // Compute residual norm ||(H - lambda_i*I)y_i||
             // Simplified: beta_m * |last component of eigenvector|
             double residual = beta[m-1] * std::abs(evecs[i*m + (m-1)]);
@@ -3600,10 +3645,23 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             for (int i = 0; i < k; i++) {
                 ComplexVector eigenvector(N, Complex(0.0, 0.0));
                 
-                // Compute linear combination of Lanczos vectors
-                for (int j = 0; j < m; j++) {
-                    Complex coef(evecs[i*m + j], 0.0);
-                    cblas_zaxpy(N, &coef, V[j].data(), 1, eigenvector.data(), 1);
+                // Process basis vectors in batches to reduce memory usage
+                const int batch_size = 50;
+                for (int batch_start = 0; batch_start < m; batch_start += batch_size) {
+                    int batch_end = std::min(batch_start + batch_size, m);
+                    
+                    // Read this batch of basis vectors
+                    std::vector<ComplexVector> basis_batch;
+                    for (int j = batch_start; j < batch_end; j++) {
+                        basis_batch.push_back(read_basis_vector(j));
+                    }
+                    
+                    // Compute contribution from this batch
+                    for (int j = 0; j < batch_end - batch_start; j++) {
+                        int j_global = batch_start + j;
+                        Complex coef(evecs[i*m + j_global], 0.0);
+                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, eigenvector.data(), 1);
+                    }
                 }
                 
                 // Normalize eigenvector
@@ -3691,8 +3749,6 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 LAPACKE_dlartgs(x, z, c, &s, &x);
                 
                 // Apply the Givens rotation to the tridiagonal matrix
-                // It creates a bulge that we need to chase down
-                
                 if (i < m-2) {
                     z = -s * e[i+2];
                     e[i+2] *= c;
@@ -3709,14 +3765,14 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             }
         }
         
-        // The updated tridiagonal matrix is now stored in q (diagonal) and e (off-diagonal)
-        
-        // Recover the updated Lanczos vector v_k
+        // Now compute the new starting vector for the next restart
         ComplexVector new_v(N, Complex(0.0, 0.0));
         
+        // Load the first k basis vectors to form the new starting point
         for (int i = 0; i < k; i++) {
-            Complex coef(evecs[i*m], 0.0);  // Coefficient from first row of evecs
-            cblas_zaxpy(N, &coef, V[i].data(), 1, new_v.data(), 1);
+            ComplexVector basis_i = read_basis_vector(i);
+            Complex coef(evecs[i*m], 0.0);  // First component of the i-th eigenvector
+            cblas_zaxpy(N, &coef, basis_i.data(), 1, new_v.data(), 1);
         }
         
         // Normalize the new starting vector
@@ -3724,16 +3780,21 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         scale_factor = Complex(1.0/norm, 0.0);
         cblas_zscal(N, &scale_factor, new_v.data(), 1);
         
-        // Reset Lanczos vectors and tridiagonal matrix elements
-        V.resize(k);  // Keep only k Lanczos vectors
+        // Reset the Lanczos process with the new vector
         v_current = new_v;
         v_prev = ComplexVector(N, Complex(0.0, 0.0));
         
-        // Update alpha and beta for the next iteration
-        alpha.resize(k);  // Keep first k diagonal elements
-        beta.resize(k+1); // Keep corresponding off-diagonal elements
+        // Write the new starting vector to disk
+        write_basis_vector(0, v_current);
         
-        // Update diagonal and off-diagonal from the QR process
+        // Clear the recent vectors and add the new starting vector
+        recent_vectors.clear();
+        recent_vectors.push_back(v_current);
+        
+        // Reset the tridiagonal matrix elements for the new restart
+        alpha.resize(k);
+        beta.resize(k+1);
+        
         for (int i = 0; i < k; i++) {
             alpha[i] = q[i];
         }
@@ -3741,6 +3802,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             beta[i] = e[i];
         }
         
+        current_size = k;
         iteration++;
     }
     
@@ -3783,10 +3845,23 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 for (int i = 0; i < num_vals; i++) {
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
                     
-                    // Compute linear combination of Lanczos vectors
-                    for (int j = 0; j < final_m; j++) {
-                        Complex coef(evecs[i*final_m + j], 0.0);
-                        cblas_zaxpy(N, &coef, V[j].data(), 1, eigenvector.data(), 1);
+                    // Process basis vectors in batches
+                    const int batch_size = 50;
+                    for (int batch_start = 0; batch_start < final_m; batch_start += batch_size) {
+                        int batch_end = std::min(batch_start + batch_size, final_m);
+                        
+                        // Load this batch of basis vectors
+                        std::vector<ComplexVector> basis_batch;
+                        for (int j = batch_start; j < batch_end; j++) {
+                            basis_batch.push_back(read_basis_vector(j));
+                        }
+                        
+                        // Apply coefficients
+                        for (int j = 0; j < batch_end - batch_start; j++) {
+                            int j_global = batch_start + j;
+                            Complex coef(evecs[i*final_m + j_global], 0.0);
+                            cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, eigenvector.data(), 1);
+                        }
                     }
                     
                     // Normalize eigenvector
