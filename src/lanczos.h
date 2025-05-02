@@ -21,6 +21,7 @@
 #include <fstream>
 #include <set>
 #include <thread>
+#include <chrono>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -250,132 +251,42 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 // tol: Tolerance for convergence and detecting invariant subspaces
 // eigenvalues: Output vector to store the eigenvalues
 // eigenvectors: Output matrix to store the eigenvectors (optional)
-#include <chrono>
 // Lanczos algorithm implementation with basis vectors stored on disk
 // Lanczos algorithm implementation with basis vectors stored on disk
-void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
-             double tol, std::vector<double>& eigenvalues, std::string dir = "",
-             bool eigenvectors = false) {
-    
-    // Initialize random starting vector
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    ComplexVector v_current(N);
-    
-    #pragma omp parallel for
-    for (int i = 0; i < N; i++) {
-        double real = dist(gen);
-        double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
-    }
-
-    std::cout << "Lanczos: Initial vector generated" << std::endl;
-    
-    // Normalize the starting vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale_factor, v_current.data(), 1);
-    
-    // Create a directory for temporary basis vector files
-    std::string temp_dir = dir+"/lanczos_basis_vectors";
-    std::string cmd = "mkdir -p " + temp_dir;
-    system(cmd.c_str());
-
-    // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
-        return;
-    }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
-    
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Initialize alpha and beta vectors for tridiagonal matrix
-    std::vector<double> alpha;  // Diagonal elements
-    std::vector<double> beta;   // Off-diagonal elements
-    beta.push_back(0.0);        // β_0 is not used
-    
-    max_iter = std::min(N, max_iter);
-    
-    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
-    std::cout << "Tolerance = " << tol << std::endl;
-    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
-    std::cout << "Lanczos: Iterating..." << std::endl;   
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+// Helper function to read a basis vector from file
+ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
+    ComplexVector vec(N);
+    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+    std::ifstream infile(filename, std::ios::binary);
+    if (!infile) {
+        std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
         return vec;
-    };
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
-        H(v_current.data(), w.data(), N);
-        
-        // w = w - beta_j * v_{j-1}
-        if (j > 0) {
-            Complex neg_beta = Complex(-beta[j], 0.0);
-            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-        }
-        
-        // alpha_j = <v_j, w>
-        Complex dot_product;
-        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-        // beta_{j+1} = ||w||
-        norm = cblas_dznrm2(N, w.data(), 1);
-        beta.push_back(norm);
-        
-        // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
-        }
-        
-        // Store basis vector to file
-        if (eigenvectors){
-            if (j < max_iter - 1) {
-                std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
-                std::ofstream outfile(next_basis_file, std::ios::binary);
-                if (!outfile) {
-                    std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
-                    return;
-                }
-                outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-                outfile.close();
-            }    
-        }
-
-        // Update for next iteration
-        v_prev = v_current;
-        v_current = v_next;
     }
-    
-    // Construct and solve tridiagonal matrix
-    int m = alpha.size();
-    
-    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
+    infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+    return vec;
+}
 
+// Helper function to write a basis vector to file
+bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
+    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+    std::ofstream outfile(filename, std::ios::binary);
+    if (!outfile) {
+        std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
+        return false;
+    }
+    outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
+    outfile.close();
+    return true;
+}
+
+// Helper function to solve tridiagonal eigenvalue problem
+int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector<double>& beta, 
+                            int m, int exct, std::vector<double>& eigenvalues, 
+                            const std::string& temp_dir, const std::string& evec_dir, 
+                            bool eigenvectors, int N) {
+    // Save only the first exct eigenvalues, or all of them if m < exct
+    int n_eigenvalues = std::min(exct, m);
+    
     // Allocate arrays for LAPACKE
     std::vector<double> diag = alpha;    // Copy of diagonal elements
     std::vector<double> offdiag(m-1);    // Off-diagonal elements
@@ -384,27 +295,16 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
-
-    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
-    // Save only the first exct eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> evals(m);        // For eigenvalues    
     // Workspace parameters
     char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
     int info;
     
-    // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/eigenvectors";
-    std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    system(cmd_mkdir.c_str());
-
     if (eigenvectors) {
         // Need space for eigenvectors but m might be too large for full allocation
         // Instead of computing all eigenvectors at once, compute them in batches
         const int batch_size = 1000; // Adjust based on available memory
         int num_batches = (n_eigenvalues + batch_size - 1) / batch_size; // Ceiling division
-
         
         // First compute all eigenvalues without eigenvectors
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
@@ -412,8 +312,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
         if (info != 0) {
             std::cerr << "LAPACKE_dstevd failed with error code " << info 
                   << " when computing eigenvalues" << std::endl;
-            system(("rm -rf " + temp_dir).c_str());
-            return;
+            return info;
         }
         
         // Then compute eigenvectors in batches using dstevr which allows range selection
@@ -440,16 +339,16 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
                      diag_copy.data(), offdiag_copy.data(), 
                      0.0, 0.0, // vl, vu not used with 'I' range option
                      start_idx + 1, end_idx + 1, // FORTRAN 1-indexing
-                     1e-6, // abstol, set to 0 for default
+                     1e-6, // abstol
                      &m_found,
                      batch_evals.data(), batch_evecs.data(), m, 
                      isuppz.data());
             
             if (info != 0 || m_found != batch_n) {
-            std::cerr << "LAPACKE_dstevr failed with error code " << info 
-                  << " when computing eigenvectors for batch " << batch + 1 
-                  << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
-            continue;
+                std::cerr << "LAPACKE_dstevr failed with error code " << info 
+                      << " when computing eigenvectors for batch " << batch + 1 
+                      << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
+                continue;
             }
 
             std::cout << "  Found " << m_found << " eigenvectors in this batch." << std::endl;
@@ -458,12 +357,12 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
             for (int i = 0; i < batch_n; i++) {
                 int global_idx = start_idx + i;
                 
-                // Transform the eigenvector
                 // Initialize full vector
                 std::cout << "  Transforming eigenvector " << global_idx + 1 << std::endl;
                 ComplexVector full_vector(N, Complex(0.0, 0.0));
+                
                 // Read basis vectors in batches to reduce disk I/O
-                const int basis_batch_size = 100;  // Adjust based on available memory
+                const int basis_batch_size = 100;
                 for (int batch_start = 0; batch_start < m; batch_start += basis_batch_size) {
                     int batch_end = std::min(batch_start + basis_batch_size, m);
                     
@@ -471,7 +370,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
                     std::vector<ComplexVector> basis_batch;
                     basis_batch.reserve(batch_end - batch_start);
                     for (int j = batch_start; j < batch_end; j++) {
-                        basis_batch.push_back(read_basis_vector(j, N));
+                        basis_batch.push_back(read_basis_vector(temp_dir, j, N));
                     }
                     
                     // Compute contribution from this batch
@@ -481,6 +380,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
                         cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
                     }
                 }
+                
                 std::cout << "  Normalizing eigenvector " << global_idx + 1 << std::endl;
                 // Normalize
                 double norm = cblas_dznrm2(N, full_vector.data(), 1);
@@ -515,13 +415,6 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
     }
     
-    if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-        // Clean up temporary files before returning
-        system(("rm -rf " + temp_dir).c_str());
-        return;
-    }
-    
     // Copy eigenvalues
     eigenvalues.resize(n_eigenvalues);
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
@@ -540,10 +433,128 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
         eval_outfile.close();
         std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
     }
+    
+    return info;
+}
+
+void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
+             double tol, std::vector<double>& eigenvalues, std::string dir = "",
+             bool eigenvectors = false) {
+    
+    // Initialize random starting vector
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    ComplexVector v_current(N);
+    
+    #pragma omp parallel for
+    for (int i = 0; i < N; i++) {
+        double real = dist(gen);
+        double imag = dist(gen);
+        #pragma omp critical
+        {
+            v_current[i] = Complex(real, imag);
+        }
+    }
+
+    std::cout << "Lanczos: Initial vector generated" << std::endl;
+    
+    // Normalize the starting vector
+    double norm = cblas_dznrm2(N, v_current.data(), 1);
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zscal(N, &scale_factor, v_current.data(), 1);
+    
+    // Create a directory for temporary basis vector files
+    std::string temp_dir = dir+"/lanczos_basis_vectors";
+    std::string cmd = "mkdir -p " + temp_dir;
+    system(cmd.c_str());
+
+    // Write the first basis vector to file
+    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
+        return;
+    }
+    
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
+    ComplexVector w(N);
+    
+    // Initialize alpha and beta vectors for tridiagonal matrix
+    std::vector<double> alpha;  // Diagonal elements
+    std::vector<double> beta;   // Off-diagonal elements
+    beta.push_back(0.0);        // β_0 is not used
+    
+    max_iter = std::min(N, max_iter);
+    
+    std::cout << "Begin Lanczos iterations with max_iter = " << max_iter << std::endl;
+    std::cout << "Tolerance = " << tol << std::endl;
+    std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
+    std::cout << "Lanczos: Iterating..." << std::endl;   
+    
+    // Lanczos iteration
+    for (int j = 0; j < max_iter; j++) {
+        // w = H*v_j
+        std::cout << "Iteration " << j + 1 << " of " << max_iter << std::endl;
+        H(v_current.data(), w.data(), N);
+        
+        // w = w - beta_j * v_{j-1}
+        if (j > 0) {
+            Complex neg_beta = Complex(-beta[j], 0.0);
+            cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
+        }
+        
+        // alpha_j = <v_j, w>
+        Complex dot_product;
+        cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
+        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha = Complex(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
+        
+        // beta_{j+1} = ||w||
+        norm = cblas_dznrm2(N, w.data(), 1);
+        beta.push_back(norm);
+        
+        // v_{j+1} = w / beta_{j+1}
+        for (int i = 0; i < N; i++) {
+            v_next[i] = w[i] / norm;
+        }
+        
+        // Store basis vector to file if eigenvectors are needed
+        if (eigenvectors && j < max_iter - 1) {
+            if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
+                return;
+            }
+        }
+
+        // Update for next iteration
+        v_prev = v_current;
+        v_current = v_next;
+    }
+    
+    // Construct and solve tridiagonal matrix
+    int m = alpha.size();
+    
+    std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
+    std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
+    
+    // Write eigenvalues and eigenvectors to files
+    std::string evec_dir = dir + "/eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
+
+    // Solve the tridiagonal eigenvalue problem
+    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
+    
+    if (info != 0) {
+        std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
+        // Clean up temporary files before returning
+        system(("rm -rf " + temp_dir).c_str());
+        return;
+    }
+    
     // Clean up temporary files
     system(("rm -rf " + temp_dir).c_str());
 }
-
 
 // Lanczos algorithm with selective reorthogonalization
 void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
@@ -578,14 +589,9 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     system(cmd.c_str());
 
     // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -602,19 +608,6 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
-    };
     
     // Parameters for selective reorthogonalization
     const double orth_threshold = 1e-5;  // Threshold for selective reorthogonalization
@@ -678,7 +671,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         //         // Skip recent vectors that were already orthogonalized
         //         bool is_recent = false;
         //         for (const auto& vec : recent_vectors) {
-        //             ComplexVector recent_v = read_basis_vector(k, N);
+        //             ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
         //             double diff = 0.0;
         //             for (int i = 0; i < N; i++) {
         //                 diff += std::norm(vec[i] - recent_v[i]);
@@ -691,7 +684,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         //         if (is_recent) continue;
                 
         //         // Read basis vector k from file
-        //         ComplexVector basis_k = read_basis_vector(k, N);
+        //         ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
                 
         //         Complex overlap;
         //         cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
@@ -707,7 +700,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         //         // Skip recent vectors that were already orthogonalized
         //         bool is_recent = false;
         //         for (const auto& vec : recent_vectors) {
-        //             ComplexVector recent_v = read_basis_vector(k, N);
+        //             ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
         //             double diff = 0.0;
         //             for (int i = 0; i < N; i++) {
         //                 diff += std::norm(vec[i] - recent_v[i]);
@@ -720,7 +713,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         //         if (is_recent) continue;
                 
         //         // Read basis vector k from file
-        //         ComplexVector basis_k = read_basis_vector(k, N);
+        //         ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
                 
         //         // Check if orthogonalization against this vector is needed
         //         Complex overlap;
@@ -752,14 +745,9 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         
         // Store basis vector to file
         if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
-            std::ofstream outfile(next_basis_file, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+            if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
-            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-            outfile.close();
         }
         
         // Update for next iteration
@@ -777,169 +765,23 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     int m = alpha.size();
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
-
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    #pragma omp parallel for
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
-    }
-
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
-    
-    // Save only the first exct eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> evals(m);        // For eigenvalues    
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
-    int info;
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
-    if (eigenvectors) {
-        // Need space for eigenvectors but m might be too large for full allocation
-        // Instead of computing all eigenvectors at once, compute them in batches
-        const int batch_size = 100; // Adjust based on available memory
-        int num_batches = (n_eigenvalues + batch_size - 1) / batch_size; // Ceiling division
-
-        
-        // First compute all eigenvalues without eigenvectors
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
-        
-        if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info 
-                  << " when computing eigenvalues" << std::endl;
-            system(("rm -rf " + temp_dir).c_str());
-            return;
-        }
-        
-        // Then compute eigenvectors in batches using dstevr which allows range selection
-        for (int batch = 0; batch < num_batches; batch++) {
-            int start_idx = batch * batch_size;
-            int end_idx = std::min(start_idx + batch_size, n_eigenvalues) - 1;
-            int batch_n = end_idx - start_idx + 1;
-            
-            std::cout << "Computing eigenvectors batch " << batch + 1 << "/" << num_batches 
-                  << " (indices " << start_idx << " to " << end_idx << ")" << std::endl;
-            
-            // Allocate memory just for this batch
-            std::vector<double> batch_evals(batch_n);
-            std::vector<double> batch_evecs(m * batch_n);
-            std::vector<int> isuppz(2 * batch_n);
-            
-            // Make a copy of the tridiagonal matrix data for dstevr
-            std::vector<double> diag_copy = diag;
-            std::vector<double> offdiag_copy(offdiag);
-            
-            int m_found;
-            // Compute eigenvectors for this batch using index range
-            info = LAPACKE_dstevr(LAPACK_COL_MAJOR, 'V', 'I', m, 
-                     diag_copy.data(), offdiag_copy.data(), 
-                     0.0, 0.0, // vl, vu not used with 'I' range option
-                     start_idx + 1, end_idx + 1, // FORTRAN 1-indexing
-                     1e-8, // abstol
-                     &m_found,
-                     batch_evals.data(), batch_evecs.data(), m, 
-                     isuppz.data());
-            
-            if (info != 0 || m_found != batch_n) {
-                std::cerr << "LAPACKE_dstevr failed with error code " << info 
-                      << " when computing eigenvectors for batch " << batch + 1 
-                      << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
-                continue;
-            }
-            
-            // Read basis vectors in batches to reduce disk I/O
-            const int basis_batch_size = 50;  // Adjust based on available memory
-            
-            // Transform and save each eigenvector in this batch
-            for (int i = 0; i < batch_n; i++) {
-                int global_idx = start_idx + i;
-                
-                // Initialize full vector
-                ComplexVector full_vector(N, Complex(0.0, 0.0));
-                
-                for (int basis_start = 0; basis_start < m; basis_start += basis_batch_size) {
-                    int basis_end = std::min(basis_start + basis_batch_size, m);
-                    
-                    // Read this batch of basis vectors
-                    std::vector<ComplexVector> basis_batch;
-                    basis_batch.reserve(basis_end - basis_start);
-                    for (int j = basis_start; j < basis_end; j++) {
-                        basis_batch.push_back(read_basis_vector(j, N));
-                    }
-                    
-                    // Compute contribution from this batch
-                    for (int j = 0; j < basis_end - basis_start; j++) {
-                        int j_global = basis_start + j;
-                        Complex coef(batch_evecs[i*m + j_global], 0.0);
-                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
-                    }
-                }
-                
-                // Normalize
-                double norm = cblas_dznrm2(N, full_vector.data(), 1);
-                if (norm > 1e-12) {
-                    Complex scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, full_vector.data(), 1);
-                }
-                
-                // Save to file
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".bin";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
-                }
-                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
-                evec_outfile.close();
-                
-                // Print progress occasionally
-                if (global_idx % 10 == 0 || global_idx == n_eigenvalues - 1) {
-                    std::cout << "  Saved eigenvector " << global_idx + 1 << " of " << n_eigenvalues << std::endl;
-                }
-            }
-            
-            // Clear memory by reassigning vectors to empty ones
-            std::vector<double>().swap(batch_evals);
-            std::vector<double>().swap(batch_evecs);
-            std::vector<int>().swap(isuppz);
-        }
-    } else {
-        // Just compute eigenvalues
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
-    }
+    // Solve the tridiagonal eigenvalue problem
+    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
     
-    // Copy eigenvalues
-    eigenvalues.resize(n_eigenvalues);
-    std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
-
-    // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (!eval_outfile) {
-        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
-    }
     // Clean up temporary files
     system(("rm -rf " + temp_dir).c_str());
 }
@@ -977,14 +819,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     system(cmd.c_str());
 
     // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -1001,19 +838,6 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
     std::cout << "Lanczos: Iterating..." << std::endl;   
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
-    };
     
     // Lanczos iteration
     for (int j = 0; j < max_iter; j++) {
@@ -1039,7 +863,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         // Full reorthogonalization (twice for numerical stability)
         for (int k = 0; k <= j; k++) {
             // Read basis vector k from file
-            ComplexVector basis_k = read_basis_vector(k, N);
+            ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
             
             Complex overlap;
             cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
@@ -1059,14 +883,9 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         
         // Store basis vector to file
         if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
-            std::ofstream outfile(next_basis_file, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+            if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
-            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-            outfile.close();
         }
         
         // Update for next iteration
@@ -1078,159 +897,23 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     int m = alpha.size();
     
     std::cout << "Lanczos: Constructing tridiagonal matrix" << std::endl;
-
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    #pragma omp parallel for
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
-    }
-
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
-    
-    // Save only the first exct eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> evals(m);        // For eigenvalues    
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
-    int info;
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
-    if (eigenvectors) {
-        // Need space for eigenvectors but m might be too large for full allocation
-        // Instead of computing all eigenvectors at once, compute them in batches
-        const int batch_size = 100; // Adjust based on available memory
-        int num_batches = (n_eigenvalues + batch_size - 1) / batch_size; // Ceiling division
-
-        
-        // First compute all eigenvalues without eigenvectors
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
-        
-        if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info 
-                  << " when computing eigenvalues" << std::endl;
-            system(("rm -rf " + temp_dir).c_str());
-            return;
-        }
-        
-        // Then compute eigenvectors in batches using dstevr which allows range selection
-        for (int batch = 0; batch < num_batches; batch++) {
-            int start_idx = batch * batch_size;
-            int end_idx = std::min(start_idx + batch_size, n_eigenvalues) - 1;
-            int batch_n = end_idx - start_idx + 1;
-            
-            std::cout << "Computing eigenvectors batch " << batch + 1 << "/" << num_batches 
-                  << " (indices " << start_idx << " to " << end_idx << ")" << std::endl;
-            
-            // Allocate memory just for this batch
-            std::vector<double> batch_evals(batch_n);
-            std::vector<double> batch_evecs(m * batch_n);
-            std::vector<int> isuppz(2 * batch_n);
-            
-            // Make a copy of the tridiagonal matrix data for dstevr
-            std::vector<double> diag_copy = diag;
-            std::vector<double> offdiag_copy(offdiag);
-            
-            int m_found;
-            // Compute eigenvectors for this batch using index range
-            info = LAPACKE_dstevr(LAPACK_COL_MAJOR, 'V', 'I', m, 
-                     diag_copy.data(), offdiag_copy.data(), 
-                     0.0, 0.0, // vl, vu not used with 'I' range option
-                     start_idx + 1, end_idx + 1, // FORTRAN 1-indexing
-                     0.0, // abstol, set to 0 for default
-                     &m_found,
-                     batch_evals.data(), batch_evecs.data(), m, 
-                     isuppz.data());
-            
-            if (info != 0 || m_found != batch_n) {
-            std::cerr << "LAPACKE_dstevr failed with error code " << info 
-                  << " when computing eigenvectors for batch " << batch + 1 
-                  << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
-            continue;
-            }
-            
-            // Transform and save each eigenvector in this batch
-            for (int i = 0; i < batch_n; i++) {
-                int global_idx = start_idx + i;
-                
-                // Read all basis vectors needed for transformation
-                std::vector<ComplexVector> basis_batch(m);
-                for (int j = 0; j < m; j++) {
-                    basis_batch[j] = read_basis_vector(j, N);
-                }
-                
-                // Transform the eigenvector
-                ComplexVector full_vector(N, Complex(0.0, 0.0));
-                for (int j = 0; j < m; j++) {
-                    Complex coef(batch_evecs[j*batch_n + i], 0.0);
-                    cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
-                }
-                
-                // Normalize
-                double norm = cblas_dznrm2(N, full_vector.data(), 1);
-                if (norm > 1e-12) {
-                    Complex scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, full_vector.data(), 1);
-                }
-                
-                // Save to file
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".bin";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
-                }
-                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
-                evec_outfile.close();
-                
-                // Print progress occasionally
-                if (global_idx % 10 == 0 || global_idx == n_eigenvalues - 1) {
-                    std::cout << "  Saved eigenvector " << global_idx + 1 << " of " << n_eigenvalues << std::endl;
-                }
-            }
-            
-            // Clear memory by reassigning vectors to empty ones
-            std::vector<double>().swap(batch_evals);
-            std::vector<double>().swap(batch_evecs);
-            std::vector<int>().swap(isuppz);
-        }
-    } else {
-        // Just compute eigenvalues
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
-    }
+    // Solve the tridiagonal eigenvalue problem
+    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, eigenvalues, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
     
-    // Copy eigenvalues
-    eigenvalues.resize(n_eigenvalues);
-    std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
-
-    
-    // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (!eval_outfile) {
-        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
-    }
     // Clean up temporary files
     system(("rm -rf " + temp_dir).c_str());
 }
@@ -2037,14 +1720,9 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     system(cmd.c_str());
 
     // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -2060,19 +1738,6 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     std::cout << "Begin Shift-invert Lanczos iterations with max_iter = " << max_iter << std::endl;
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
-    };
     
     // Helper function to solve the shift-invert system (H - sigma*I)x = v using CG
     auto solve_shifted_system = [&H, sigma, N, tol](const ComplexVector& v) -> ComplexVector {
@@ -2160,7 +1825,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         // Full reorthogonalization
         // for (int k = 0; k <= j; k++) {
         //     // Read basis vector k from file
-        //     ComplexVector basis_k = read_basis_vector(k, N);
+        //     ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
             
         //     Complex overlap;
         //     cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
@@ -2186,14 +1851,9 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         
         // Store basis vector to file
         if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
-            std::ofstream outfile(next_basis_file, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+            if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
-            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-            outfile.close();
         }
         
         // Update for next iteration
@@ -2205,193 +1865,36 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
     int m = alpha.size();
     
     std::cout << "Shift-invert Lanczos: Constructing tridiagonal matrix" << std::endl;
-
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    #pragma omp parallel for
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
-    }
-
     std::cout << "Shift-invert Lanczos: Solving tridiagonal matrix" << std::endl;
-    
-    // Save the requested number of eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> shift_invert_evals(m);  // Eigenvalues of shift-invert operator
-    std::vector<double> evecs;                 // For eigenvectors
-    
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
-    int info;
-    
-    if (eigenvectors) {
-        evecs.resize(m*m);
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), evecs.data(), m);
-    } else {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
-    }
-    
-    if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-        system(("rm -rf " + temp_dir).c_str());
-        return;
-    }
-    
-    // Convert shift-invert eigenvalues back to original spectrum
-    // For shift-invert: λ_original = σ + 1/λ_shift_invert
-    eigenvalues.resize(n_eigenvalues);
-    for (int i = 0; i < n_eigenvalues; i++) {
-        // Note: The largest eigenvalues of the shift-invert operator
-        // correspond to eigenvalues closest to sigma in the original spectrum
-        double shift_invert_eval = diag[m-1-i];  // Take from the largest values
-        
-        // Avoid division by zero
-        if (std::abs(shift_invert_eval) < 1e-10) {
-            eigenvalues[i] = sigma;
-        } else {
-            eigenvalues[i] = sigma + 1.0 / shift_invert_eval;
-        }
-    }
     
     // Write eigenvalues and eigenvectors to files
     std::string evec_dir = dir + "/eigenvectors";
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
     
-    // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (!eval_outfile) {
-        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    // Solve the tridiagonal eigenvalue problem
+    std::vector<double> shift_invert_evals;
+    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, shift_invert_evals, temp_dir, evec_dir, eigenvectors, N);
+    
+    if (info != 0) {
+        std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
+        system(("rm -rf " + temp_dir).c_str());
+        return;
     }
     
-    // Transform eigenvectors if requested
-    if (eigenvectors) {
-        std::cout << "Shift-invert Lanczos: Transforming eigenvectors" << std::endl;
+    // Convert shift-invert eigenvalues back to original spectrum
+    // For shift-invert: λ_original = σ + 1/λ_shift_invert
+    eigenvalues.resize(shift_invert_evals.size());
+    for (size_t i = 0; i < shift_invert_evals.size(); i++) {
+        // Note: The largest eigenvalues of the shift-invert operator
+        // correspond to eigenvalues closest to sigma in the original spectrum
+        double shift_invert_eval = shift_invert_evals[i];
         
-        // Process in batches to save memory
-        const int batch_size = 10;
-        for (int batch = 0; batch < (n_eigenvalues + batch_size - 1) / batch_size; batch++) {
-            int start_idx = batch * batch_size;
-            int end_idx = std::min(start_idx + batch_size, n_eigenvalues);
-            
-            std::cout << "Processing eigenvectors " << start_idx + 1 << " to " << end_idx 
-                      << " of " << n_eigenvalues << std::endl;
-            
-            // For each eigenvector in this batch
-            for (int i = start_idx; i < end_idx; i++) {
-                // The index in the evecs array (reverse order since we want closest to sigma)
-                int si_idx = m - 1 - i;
-                
-                // Calculate the full eigenvector in the original basis
-                ComplexVector full_vector(N, Complex(0.0, 0.0));
-                
-                // Read basis vectors in batches to reduce disk I/O
-                const int basis_batch_size = 100;
-                for (int basis_start = 0; basis_start < m; basis_start += basis_batch_size) {
-                    int basis_end = std::min(basis_start + basis_batch_size, m);
-                    
-                    // Read this batch of basis vectors
-                    std::vector<ComplexVector> basis_batch;
-                    basis_batch.reserve(basis_end - basis_start);
-                    for (int j = basis_start; j < basis_end; j++) {
-                        basis_batch.push_back(read_basis_vector(j, N));
-                    }
-                    
-                    // Compute contribution from this batch
-                    for (int j = 0; j < basis_end - basis_start; j++) {
-                        int j_global = basis_start + j;
-                        Complex coef(evecs[si_idx*m + j_global], 0.0);
-                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
-                    }
-                }
-                
-                // Normalize the eigenvector
-                double norm = cblas_dznrm2(N, full_vector.data(), 1);
-                Complex scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, full_vector.data(), 1);
-                
-                // Optionally refine the eigenvector using inverse iteration
-                // (H - lambda*I)x = previous_x
-                ComplexVector refined_vector = full_vector;
-                for (int refine_iter = 0; refine_iter < 3; refine_iter++) {
-                    // Create a shifted system for this specific eigenvalue
-                    auto lambda_shifted_system = [&H, &eigenvalues, i, N](const Complex* v, Complex* result, int size) {
-                        // Apply H to v
-                        H(v, result, size);
-                        // Subtract lambda*v
-                        double lambda = eigenvalues[i];
-                        for (int j = 0; j < size; j++) {
-                            result[j] -= lambda * v[j];
-                        }
-                    };
-                    
-                    // Solve the system
-                    ComplexVector temp_vec = refined_vector;
-                    refined_vector.assign(N, Complex(0.0, 0.0));
-                    
-                    // Use a simpler direct solver for refinement
-                    // In practice, we would use a more sophisticated method here
-                    auto shifted_H = [&H, &eigenvalues, i, N](const Complex* v, Complex* result, int size) {
-                        H(v, result, size);
-                        for (int j = 0; j < size; j++) {
-                            result[j] -= eigenvalues[i] * v[j];
-                        }
-                    };
-                    
-                    // Approximate solution using a few steps of CG
-                    ComplexVector r(temp_vec);
-                    ComplexVector p(r);
-                    ComplexVector Ap(N);
-                    
-                    for (int cg_iter = 0; cg_iter < 5; cg_iter++) {
-                        shifted_H(p.data(), Ap.data(), N);
-                        
-                        Complex r_dot_r, p_dot_Ap;
-                        cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_dot_r);
-                        cblas_zdotc_sub(N, p.data(), 1, Ap.data(), 1, &p_dot_Ap);
-                        
-                        Complex alpha = r_dot_r / p_dot_Ap;
-                        cblas_zaxpy(N, &alpha, p.data(), 1, refined_vector.data(), 1);
-                        
-                        Complex neg_alpha = -alpha;
-                        cblas_zaxpy(N, &neg_alpha, Ap.data(), 1, r.data(), 1);
-                        
-                        Complex r_new_dot_r_new;
-                        cblas_zdotc_sub(N, r.data(), 1, r.data(), 1, &r_new_dot_r_new);
-                        
-                        Complex beta = r_new_dot_r_new / r_dot_r;
-                        for (int j = 0; j < N; j++) {
-                            p[j] = r[j] + beta * p[j];
-                        }
-                    }
-                    
-                    // Normalize
-                    norm = cblas_dznrm2(N, refined_vector.data(), 1);
-                    scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, refined_vector.data(), 1);
-                }
-                
-                // Save to file
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
-                }
-                evec_outfile.write(reinterpret_cast<char*>(refined_vector.data()), N * sizeof(Complex));
-                evec_outfile.close();
-            }
+        // Avoid division by zero
+        if (std::abs(shift_invert_eval) < 1e-10) {
+            eigenvalues[i] = sigma;
+        } else {
+            eigenvalues[i] = sigma + 1.0 / shift_invert_eval;
         }
     }
     
@@ -2435,14 +1938,9 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
     system(cmd.c_str());
 
     // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
+    if (!write_basis_vector(temp_dir, 0, v_current, N)) {
         return;
     }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
     
     ComplexVector v_prev(N, Complex(0.0, 0.0));
     ComplexVector v_next(N);
@@ -2458,19 +1956,6 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
     std::cout << "Begin Robust Shift-invert Lanczos iterations with max_iter = " << max_iter << std::endl;
     std::cout << "Tolerance = " << tol << std::endl;
     std::cout << "Number of eigenvalues to compute = " << exct << std::endl;
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
-    };
     
     // Define the shifted operator (H - sigma*I)
     auto shifted_H = [&H, sigma, N](const Complex* v, Complex* result, int size) {
@@ -2718,7 +2203,7 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
         // Enhanced full reorthogonalization with modified Gram-Schmidt
         for (int k = 0; k <= j; k++) {
             // First orthogonalization pass
-            ComplexVector basis_k = read_basis_vector(k, N);
+            ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
             
             Complex overlap;
             cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
@@ -2814,14 +2299,9 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
         
         // Store basis vector to file
         if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
-            std::ofstream outfile(next_basis_file, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
+            if (!write_basis_vector(temp_dir, j+1, v_next, N)) {
                 return;
             }
-            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-            outfile.close();
         }
         
         // Update for next iteration
@@ -2833,41 +2313,25 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
     int m = alpha.size();
     
     std::cout << "Robust Shift-invert Lanczos: Constructing tridiagonal matrix" << std::endl;
-
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    #pragma omp parallel for
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
-    }
-
     std::cout << "Robust Shift-invert Lanczos: Solving tridiagonal matrix" << std::endl;
     
-    // Save the requested number of eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> shift_invert_evals(m);  // Eigenvalues of shift-invert operator
-    std::vector<double> evecs;                 // For eigenvectors
+    // Write eigenvalues and eigenvectors to files
+    std::string evec_dir = dir + "/eigenvectors";
+    std::string cmd_mkdir = "mkdir -p " + evec_dir;
+    system(cmd_mkdir.c_str());
     
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
-    int info;
-    
-    if (eigenvectors) {
-        evecs.resize(m*m);
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), evecs.data(), m);
-    } else {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
-    }
+    // Solve the tridiagonal eigenvalue problem
+    std::vector<double> shift_invert_evals;
+    int info = solve_tridiagonal_matrix(alpha, beta, m, exct, shift_invert_evals, temp_dir, evec_dir, eigenvectors, N);
     
     if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Try with a more stable but slower algorithm
         std::cout << "Attempting to use a more stable algorithm..." << std::endl;
         
         // Reset the arrays
-        diag = alpha;
+        std::vector<double> diag = alpha;
+        std::vector<double> offdiag(m-1);
         for (int i = 0; i < m-1; i++) {
             offdiag[i] = beta[i+1];
         }
@@ -2875,9 +2339,17 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
         // Use LAPACKE_dsterf for just eigenvalues (more stable)
         if (!eigenvectors) {
             info = LAPACKE_dsterf(m, diag.data(), offdiag.data());
+            if (info == 0) {
+                shift_invert_evals = diag;
+            }
         } else {
             // For eigenvectors, use QR algorithm with explicit shifts
-            info = LAPACKE_dsteqr(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), evecs.data(), m);
+            std::vector<double> evecs(m*m);
+            info = LAPACKE_dsteqr(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
+            if (info == 0) {
+                shift_invert_evals = diag;
+                // Would need to transform eigenvectors here as well
+            }
         }
         
         if (info != 0) {
@@ -2889,133 +2361,27 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
     
     // Convert shift-invert eigenvalues back to original spectrum
     // For shift-invert: λ_original = σ + 1/λ_shift_invert
-    eigenvalues.resize(n_eigenvalues);
+    eigenvalues.resize(shift_invert_evals.size());
     
     // Sort by proximity to sigma (largest shift-invert eigenvalues)
     std::vector<std::pair<double, int>> sorted_indices;
-    for (int i = 0; i < m; i++) {
-        sorted_indices.push_back({std::abs(diag[i]), i});
+    for (size_t i = 0; i < shift_invert_evals.size(); i++) {
+        sorted_indices.push_back({std::abs(shift_invert_evals[i]), i});
     }
     std::sort(sorted_indices.begin(), sorted_indices.end(), 
               [](const std::pair<double, int>& a, const std::pair<double, int>& b) {
                   return a.first > b.first;
               });
     
-    for (int i = 0; i < n_eigenvalues; i++) {
+    for (size_t i = 0; i < shift_invert_evals.size(); i++) {
         int idx = sorted_indices[i].second;
-        double shift_invert_eval = diag[idx];
+        double shift_invert_eval = shift_invert_evals[idx];
         
         // Avoid division by zero
         if (std::abs(shift_invert_eval) < 1e-10) {
             eigenvalues[i] = sigma;
         } else {
             eigenvalues[i] = sigma + 1.0 / shift_invert_eval;
-        }
-    }
-    
-    // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/eigenvectors";
-    std::string cmd_mkdir = "mkdir -p " + evec_dir;
-    system(cmd_mkdir.c_str());
-    
-    // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
-    std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
-    if (!eval_outfile) {
-        std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
-    } else {
-        // Write the number of eigenvalues first
-        size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
-        eval_outfile.close();
-        std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
-    }
-    
-    // Transform eigenvectors if requested
-    if (eigenvectors) {
-        std::cout << "Robust Shift-invert Lanczos: Transforming eigenvectors" << std::endl;
-        
-        // Process eigenvectors for the eigenvalues closest to the shift
-        for (int i = 0; i < n_eigenvalues; i++) {
-            int idx = sorted_indices[i].second;
-            
-            // Calculate the full eigenvector in the original basis
-            ComplexVector full_vector(N, Complex(0.0, 0.0));
-            
-            // Project Lanczos vectors
-            for (int j = 0; j < m; j++) {
-                ComplexVector basis_j = read_basis_vector(j, N);
-                Complex coef(evecs[idx*m + j], 0.0);
-                cblas_zaxpy(N, &coef, basis_j.data(), 1, full_vector.data(), 1);
-            }
-            
-            // Normalize the eigenvector
-            double vec_norm = cblas_dznrm2(N, full_vector.data(), 1);
-            Complex scale = Complex(1.0/vec_norm, 0.0);
-            cblas_zscal(N, &scale, full_vector.data(), 1);
-            
-            // Refine eigenvector using inverse iteration
-            double lambda = eigenvalues[i];
-            ComplexVector refined_vector = full_vector;
-            
-            // Apply (H - lambda*I)^(-1) a few times to improve eigenvector
-            for (int refine_iter = 0; refine_iter < 2; refine_iter++) {
-                // Define a new shifted system for this specific eigenvalue
-                auto lambda_shifted_H = [&H, lambda, N](const Complex* v, Complex* result, int size) {
-                    H(v, result, size);
-                    for (int j = 0; j < size; j++) {
-                        result[j] -= lambda * v[j];
-                    }
-                };
-                
-                // Solve the system using BiCGSTAB
-                ComplexVector temp = refined_vector;
-                auto solve_lambda_system = [&lambda_shifted_H, N, tol](const ComplexVector& v) -> ComplexVector {
-                    // Similar to solve_shifted_system_bicgstab but with the specific lambda
-                    // Implementation omitted for brevity - would use BiCGSTAB as above
-                    // Just a placeholder for a real implementation
-                    ComplexVector result(N);
-                    lambda_shifted_H(v.data(), result.data(), N);
-                    return result;
-                };
-                
-                // Apply inverse iteration step
-                refined_vector = solve_shifted_system_bicgstab(refined_vector);
-                
-                // Normalize
-                vec_norm = cblas_dznrm2(N, refined_vector.data(), 1);
-                scale = Complex(1.0/vec_norm, 0.0);
-                cblas_zscal(N, &scale, refined_vector.data(), 1);
-                
-                // Check improvement
-                ComplexVector check_Hv(N);
-                H(refined_vector.data(), check_Hv.data(), N);
-                for (int j = 0; j < N; j++) {
-                    check_Hv[j] -= lambda * refined_vector[j];
-                }
-                double residual = cblas_dznrm2(N, check_Hv.data(), 1);
-                
-                if (residual < tol) {
-                    break;  // Good enough
-                }
-            }
-            
-            // Save refined eigenvector to file
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-            std::ofstream evec_outfile(evec_file, std::ios::binary);
-            if (!evec_outfile) {
-                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                continue;
-            }
-            evec_outfile.write(reinterpret_cast<char*>(refined_vector.data()), N * sizeof(Complex));
-            evec_outfile.close();
-            
-            // Progress reporting
-            if ((i+1) % 10 == 0 || i == n_eigenvalues - 1) {
-                std::cout << "  Processed eigenvector " << i+1 << " of " << n_eigenvalues << std::endl;
-            }
         }
     }
     
@@ -3128,7 +2494,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     
     // Create directories for output
     std::string temp_dir = dir + "/krylov_schur_temp";
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string evec_dir = dir + "/krylov_schur_eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -3138,32 +2504,6 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     // Parameters
     int m = std::min(2*num_eigs + 20, max_iter);  // Maximum size of Krylov subspace
     int k = num_eigs;                            // Number of wanted eigenvalues
-    
-    // Helper functions to read/write vectors from/to disk
-    auto write_vector = [&temp_dir, N](int index, const ComplexVector& vec) {
-        std::string filename = temp_dir + "/krylov_vector_" + std::to_string(index) + ".bin";
-        std::ofstream outfile(filename, std::ios::binary);
-        if (!outfile) {
-            std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
-            return false;
-        }
-        outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
-        outfile.close();
-        return true;
-    };
-    
-    auto read_vector = [&temp_dir, N](int index) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/krylov_vector_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        infile.close();
-        return vec;
-    };
     
     // Initialize random starting vector
     ComplexVector v(N);
@@ -3180,7 +2520,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     cblas_zscal(N, &scale, v.data(), 1);
     
     // Write initial vector to disk
-    write_vector(0, v);
+    write_basis_vector(temp_dir, 0, v, N);
     
     // Storage for tridiagonal matrix
     std::vector<double> alpha(m, 0.0);  // Diagonal
@@ -3199,7 +2539,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         for (int j = j_start; j < m; j++) {
             // Read vector from disk
-            ComplexVector v_j = read_vector(j);
+            ComplexVector v_j = read_basis_vector(temp_dir, j, N);
             
             // w = H * v_j
             ComplexVector w(N);
@@ -3207,7 +2547,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
             
             // Orthogonalize against previous vectors (for Lanczos/Hermitian case)
             if (j > 0) {
-                ComplexVector v_j_minus_1 = read_vector(j-1);
+                ComplexVector v_j_minus_1 = read_basis_vector(temp_dir, j-1, N);
                 Complex neg_beta(-beta[j], 0.0);
                 cblas_zaxpy(N, &neg_beta, v_j_minus_1.data(), 1, w.data(), 1);
             }
@@ -3223,7 +2563,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
             
             // Full reorthogonalization for numerical stability
             for (int i = 0; i <= j; i++) {
-                ComplexVector v_i = read_vector(i);
+                ComplexVector v_i = read_basis_vector(temp_dir, i, N);
                 Complex ip;
                 cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &ip);
                 Complex neg_ip = -ip;
@@ -3244,50 +2584,49 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
             if (j < m-1) {
                 scale = Complex(1.0/beta[j+1], 0.0);
                 cblas_zscal(N, &scale, w.data(), 1);
-                write_vector(j+1, w);
+                write_basis_vector(temp_dir, j+1, w, N);
             }
         }
         
         // We have a Krylov decomposition: A*V_m = V_m*T_m + beta_m+1*v_m+1*e_m^T
         
-        // Compute eigendecomposition of the tridiagonal matrix
-        std::vector<double> d(m);  // Eigenvalues
-        std::vector<double> e(m-1);  // Subdiagonal elements
-        std::vector<double> z(m*m, 0.0);  // Eigenvectors in column-major order
-        
-        // Copy matrix elements to LAPACK format
-        for (int i = 0; i < m; i++) {
-            d[i] = alpha[i];
-        }
-        for (int i = 0; i < m-1; i++) {
-            e[i] = beta[i+1];
-        }
-        
-        // Call LAPACK to compute eigenvalues and eigenvectors of tridiagonal matrix
-        char jobz = 'V';  // Compute both eigenvalues and eigenvectors
-        int info = LAPACKE_dstev(LAPACK_COL_MAJOR, jobz, m, d.data(), e.data(), z.data(), m);
+        // Solve the tridiagonal eigenvalue problem using the helper function
+        std::vector<double> tridiag_eigenvalues;
+        int info = solve_tridiagonal_matrix(alpha, beta, m, m, tridiag_eigenvalues, temp_dir, evec_dir, false, N);
         
         if (info != 0) {
-            std::cerr << "Error in LAPACKE_dstev: " << info << std::endl;
+            std::cerr << "Error in tridiagonal eigenvalue solver: " << info << std::endl;
             break;
         }
         
         // Sort eigenvalues (smallest first) and corresponding eigenvectors
         std::vector<std::pair<double, int>> eig_pairs;
         for (int i = 0; i < m; i++) {
-            eig_pairs.push_back({d[i], i});
+            eig_pairs.push_back({tridiag_eigenvalues[i], i});
         }
         std::sort(eig_pairs.begin(), eig_pairs.end());
         
-        // Reorganize eigenvalues and eigenvectors
+        // Reorganize eigenvalues
         std::vector<double> sorted_evals(m);
-        std::vector<double> sorted_evecs(m*m);
-        
         for (int i = 0; i < m; i++) {
             sorted_evals[i] = eig_pairs[i].first;
-            int idx = eig_pairs[i].second;
-            for (int j = 0; j < m; j++) {
-                sorted_evecs[i*m + j] = z[idx*m + j];
+        }
+        
+        // Need to read eigenvectors from the tridiagonal solver output
+        std::vector<std::vector<double>> sorted_evecs(m, std::vector<double>(m));
+        for (int i = 0; i < m; i++) {
+            int orig_idx = eig_pairs[i].second;
+            // Read eigenvector from file
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(orig_idx) + ".bin";
+            std::ifstream infile(evec_file, std::ios::binary);
+            if (infile) {
+                ComplexVector evec_complex(m);
+                infile.read(reinterpret_cast<char*>(evec_complex.data()), m * sizeof(Complex));
+                infile.close();
+                // Extract real part for symmetric case
+                for (int j = 0; j < m; j++) {
+                    sorted_evecs[i][j] = std::real(evec_complex[j]);
+                }
             }
         }
         
@@ -3297,7 +2636,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         for (int i = 0; i < k && i < m; i++) {
             // Residual for Ritz pair: ||A*x - λ*x|| = |β_m+1 * e_m^T * y|
-            residuals[i] = std::abs(beta[m] * sorted_evecs[i*m + (m-1)]);
+            residuals[i] = std::abs(beta[m] * sorted_evecs[i][m-1]);
             if (residuals[i] < tol) {
                 nconv++;
             }
@@ -3320,8 +2659,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     // Compute Ritz vector: u = V * z_i
                     ComplexVector ritz_vector(N, Complex(0.0, 0.0));
                     for (int j = 0; j < m; j++) {
-                        ComplexVector v_j = read_vector(j);
-                        Complex coef(sorted_evecs[i*m + j], 0.0);
+                        ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+                        Complex coef(sorted_evecs[i][j], 0.0);
                         cblas_zaxpy(N, &coef, v_j.data(), 1, ritz_vector.data(), 1);
                     }
                     
@@ -3365,17 +2704,12 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         for (int i = 0; i < k; i++) {
             ComplexVector v_new(N, Complex(0.0, 0.0));
             for (int j = 0; j < m; j++) {
-                ComplexVector v_j = read_vector(j);
-                Complex coef(sorted_evecs[i*m + j], 0.0);
+                ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+                Complex coef(sorted_evecs[i][j], 0.0);
                 cblas_zaxpy(N, &coef, v_j.data(), 1, v_new.data(), 1);
             }
             // Write to temporary location
-            std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(i) + ".bin";
-            std::ofstream outfile(filename, std::ios::binary);
-            if (outfile) {
-                outfile.write(reinterpret_cast<const char*>(v_new.data()), N * sizeof(Complex));
-                outfile.close();
-            }
+            write_basis_vector(new_temp_dir, i, v_new, N);
         }
         
         // Step 2: Update the tridiagonal matrix to diagonal form (Schur form for symmetric case)
@@ -3392,18 +2726,11 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         // Orthogonalize against the new basis
         for (int j = 0; j < k; j++) {
-            std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(j) + ".bin";
-            std::ifstream infile(filename, std::ios::binary);
-            if (infile) {
-                ComplexVector v_j(N);
-                infile.read(reinterpret_cast<char*>(v_j.data()), N * sizeof(Complex));
-                infile.close();
-                
-                Complex ip;
-                cblas_zdotc_sub(N, v_j.data(), 1, v_k_plus_1.data(), 1, &ip);
-                Complex neg_ip = -ip;
-                cblas_zaxpy(N, &neg_ip, v_j.data(), 1, v_k_plus_1.data(), 1);
-            }
+            ComplexVector v_j = read_basis_vector(new_temp_dir, j, N);
+            Complex ip;
+            cblas_zdotc_sub(N, v_j.data(), 1, v_k_plus_1.data(), 1, &ip);
+            Complex neg_ip = -ip;
+            cblas_zaxpy(N, &neg_ip, v_j.data(), 1, v_k_plus_1.data(), 1);
         }
         
         // Normalize
@@ -3412,12 +2739,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         cblas_zscal(N, &scale, v_k_plus_1.data(), 1);
         
         // Write the k+1 vector to temporary location
-        std::string filename = new_temp_dir + "/krylov_vector_" + std::to_string(k) + ".bin";
-        std::ofstream outfile(filename, std::ios::binary);
-        if (outfile) {
-            outfile.write(reinterpret_cast<const char*>(v_k_plus_1.data()), N * sizeof(Complex));
-            outfile.close();
-        }
+        write_basis_vector(new_temp_dir, k, v_k_plus_1, N);
         
         // Replace old vectors with new ones
         system(("rm -rf " + temp_dir).c_str());
@@ -3467,25 +2789,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     int m = std::min(2*num_eigs + 10, max_iter);  // Size of Krylov subspace
     int k = num_eigs;                             // Number of desired eigenvalues
     
-    // Helper function to write/read vectors to/from disk
-    auto write_vector = [&temp_dir, N](int index, const ComplexVector& vec) {
-        std::string filename = temp_dir + "/vector_" + std::to_string(index) + ".bin";
-        std::ofstream outfile(filename, std::ios::binary);
-        outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
-        outfile.close();
-    };
-    
-    auto read_vector = [&temp_dir, N](int index) -> ComplexVector {
-        std::string filename = temp_dir + "/vector_" + std::to_string(index) + ".bin";
-        std::ifstream infile(filename, std::ios::binary);
-        ComplexVector vec(N);
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        infile.close();
-        return vec;
-    };
-    
     // Store the first basis vector
-    write_vector(0, v_current);
+    write_basis_vector(temp_dir, 0, v_current, N);
     
     // Variables for Lanczos iteration
     std::vector<double> alpha(m+1, 0.0);  // Diagonal elements (alpha[0] unused)
@@ -3528,7 +2833,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             
             // Full reorthogonalization for numerical stability
             for (int i = 1; i <= j; i++) {
-                ComplexVector v_i = read_vector(i-1);
+                ComplexVector v_i = read_basis_vector(temp_dir, i-1, N);
                 Complex overlap;
                 cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &overlap);
                 Complex neg_overlap = -overlap;
@@ -3553,37 +2858,46 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             if (j < m) {
                 v_prev = v_current;
                 v_current = w;
-                write_vector(j, v_current);
+                write_basis_vector(temp_dir, j, v_current, N);
             }
         }
         
-        // Step 2: Solve the tridiagonal eigenvalue problem T_m y = λ y
-        std::vector<double> d(m);      // Diagonal elements for LAPACK
-        std::vector<double> e(m-1);    // Off-diagonal elements for LAPACK
-        std::vector<double> z(m*m);    // Eigenvectors of tridiagonal matrix
+        // Step 2: Solve the tridiagonal eigenvalue problem using the helper function
+        // Adjust alpha and beta arrays for solve_tridiagonal_matrix
+        std::vector<double> tridiag_alpha(m);
+        std::vector<double> tridiag_beta(m+1);
+        tridiag_beta[0] = 0.0;
         
         for (int i = 0; i < m; i++) {
-            d[i] = alpha[i+1];
-            if (i < m-1) {
-                e[i] = beta[i+1];
+            tridiag_alpha[i] = alpha[i+1];
+            if (i < m) {
+                tridiag_beta[i+1] = beta[i+1];
             }
         }
         
-        // Solve eigenvalue problem using LAPACK
-        int info = LAPACKE_dstev(LAPACK_COL_MAJOR, 'V', m, d.data(), e.data(), z.data(), m);
+        std::vector<double> tridiag_eigenvalues;
+        int info = solve_tridiagonal_matrix(tridiag_alpha, tridiag_beta, m, m, tridiag_eigenvalues, temp_dir, evec_dir, false, N);
         
         if (info != 0) {
-            std::cerr << "LAPACKE_dstev failed with error " << info << std::endl;
+            std::cerr << "Error in tridiagonal eigenvalue solver: " << info << std::endl;
             break;
         }
         
         // Step 3: Check convergence on Ritz values
         bool all_converged = true;
         for (int i = 0; i < k; i++) {
-            double residual = std::abs(beta[m] * z[(i+1)*m - 1]);
-            if (residual > tol) {
-                all_converged = false;
-                break;
+            // We need to read the eigenvector from file to calculate the residual
+            ComplexVector evec(m);
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::ifstream infile(evec_file, std::ios::binary);
+            if (infile) {
+                infile.read(reinterpret_cast<char*>(evec.data()), m * sizeof(Complex));
+                infile.close();
+                double residual = std::abs(beta[m] * std::abs(evec[m-1]));
+                if (residual > tol) {
+                    all_converged = false;
+                    break;
+                }
             }
         }
         
@@ -3594,7 +2908,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
             // Copy converged eigenvalues
             eigenvalues.resize(k);
             for (int i = 0; i < k; i++) {
-                eigenvalues[i] = d[i];
+                eigenvalues[i] = tridiag_eigenvalues[i];
             }
             
             // Compute eigenvectors if requested
@@ -3605,24 +2919,33 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                     // Form eigenvector as linear combination of Lanczos vectors
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
                     
-                    for (int j = 0; j < m; j++) {
-                        ComplexVector v_j = read_vector(j);
-                        Complex coef(z[i*m + j], 0.0);
-                        cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
+                    // Read eigenvector of tridiagonal matrix
+                    std::string tri_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                    ComplexVector tri_evec(m);
+                    std::ifstream infile(tri_evec_file, std::ios::binary);
+                    if (infile) {
+                        infile.read(reinterpret_cast<char*>(tri_evec.data()), m * sizeof(Complex));
+                        infile.close();
+                        
+                        for (int j = 0; j < m; j++) {
+                            ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+                            Complex coef = tri_evec[j];
+                            cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
+                        }
+                        
+                        // Normalize
+                        double vec_norm = cblas_dznrm2(N, eigenvector.data(), 1);
+                        if (vec_norm > tol) {
+                            Complex scale = Complex(1.0/vec_norm, 0.0);
+                            cblas_zscal(N, &scale, eigenvector.data(), 1);
+                        }
+                        
+                        // Save to file
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                        std::ofstream evec_outfile(evec_file, std::ios::binary);
+                        evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+                        evec_outfile.close();
                     }
-                    
-                    // Normalize
-                    double vec_norm = cblas_dznrm2(N, eigenvector.data(), 1);
-                    if (vec_norm > tol) {
-                        Complex scale = Complex(1.0/vec_norm, 0.0);
-                        cblas_zscal(N, &scale, eigenvector.data(), 1);
-                    }
-                    
-                    // Save to file
-                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                    std::ofstream evec_outfile(evec_file, std::ios::binary);
-                    evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
-                    evec_outfile.close();
                 }
                 
                 // Save eigenvalues to file
@@ -3643,13 +2966,35 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Select shifts (unwanted eigenvalues)
         std::vector<double> shifts(m - k);
         for (int i = 0; i < m - k; i++) {
-            shifts[i] = d[m - 1 - i];  // Use the largest eigenvalues as shifts
+            shifts[i] = tridiag_eigenvalues[m - 1 - i];  // Use the largest eigenvalues as shifts
         }
         
         // QR algorithm with implicit shifting
         std::vector<double> q(m);  // Working array for shift application
-        std::vector<double> diag = d;  // Copy diagonal
-        std::vector<double> subdiag = e;  // Copy subdiagonal
+        std::vector<double> diag = tridiag_alpha;  // Copy diagonal
+        std::vector<double> subdiag(m-1);  // Copy subdiagonal
+        for (int i = 0; i < m-1; i++) {
+            subdiag[i] = tridiag_beta[i+1];
+        }
+        
+        // We also need the eigenvectors of the tridiagonal matrix
+        std::vector<ComplexVector> tri_evecs(m, ComplexVector(m));
+        for (int i = 0; i < m; i++) {
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::ifstream infile(evec_file, std::ios::binary);
+            if (infile) {
+                infile.read(reinterpret_cast<char*>(tri_evecs[i].data()), m * sizeof(Complex));
+                infile.close();
+            }
+        }
+        
+        // Extract real components for Hermitian case
+        std::vector<std::vector<double>> z(m, std::vector<double>(m));
+        for (int i = 0; i < m; i++) {
+            for (int j = 0; j < m; j++) {
+                z[i][j] = std::real(tri_evecs[j][i]);  // Note: transposed for column-major
+            }
+        }
         
         // Apply each shift using bulge-chasing
         for (int s = 0; s < m - k; s++) {
@@ -3688,10 +3033,10 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 
                 // Accumulate Q matrix for eigenvector computation
                 for (int j = 0; j < m; j++) {
-                    double z1 = z[i*m + j];
-                    double z2 = z[(i+1)*m + j];
-                    z[i*m + j] = c*z1 - ss*z2;
-                    z[(i+1)*m + j] = ss*z1 + c*z2;
+                    double z1 = z[i][j];
+                    double z2 = z[i+1][j];
+                    z[i][j] = c*z1 - ss*z2;
+                    z[i+1][j] = ss*z1 + c*z2;
                 }
             }
         }
@@ -3710,8 +3055,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // Compute v_{k+1} as linear combination of old Lanczos vectors
         v_next.assign(N, Complex(0.0, 0.0));
         for (int j = 0; j < m; j++) {
-            ComplexVector v_j = read_vector(j);
-            Complex coef(z[k*m + j], 0.0);
+            ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+            Complex coef(z[k][j], 0.0);
             cblas_zaxpy(N, &coef, v_j.data(), 1, v_next.data(), 1);
         }
         
@@ -3722,11 +3067,11 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         
         // Update last Lanczos vector for next iteration
         v_current = v_next;
-        write_vector(k, v_current);
+        write_basis_vector(temp_dir, k, v_current, N);
         
         // Prepare for next iteration - read v_{k-1} for use as v_prev
         if (k > 1) {
-            v_prev = read_vector(k-2);
+            v_prev = read_basis_vector(temp_dir, k-2, N);
         }
         
         iter++;
