@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.18)
-project(ExactDiagonalization LANGUAGES CXX C)
+project(ExactDiagonalization LANGUAGES CXX CUDA)
+set(CMAKE_CUDA_ARCHITECTURES "native")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
@@ -12,8 +13,10 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Options
-option(WITH_CUDA "Build with CUDA support" OFF)
+option(WITH_CUDA "Build with CUDA support" ON)
 option(WITH_MPI "Build with MPI support" ON)
+
+
 
 # Source directories
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -182,4 +185,31 @@ endif()
 # Add OpenMP to test_lanczos if available
 if(OpenMP_CXX_FOUND)
     target_link_libraries(test_lanczos OpenMP::OpenMP_CXX)
+endif()
+
+# Add test_lanczos_cuda executable (only if CUDA is enabled)
+if(WITH_CUDA)
+    cuda_add_executable(test_lanczos_cuda ${SRC_DIR}/test_lanczos_cuda.cu)
+
+    # Link with libraries
+    target_link_libraries(test_lanczos_cuda
+        lanczos_cuda
+        ${CUDA_LIBRARIES}
+        ${CUBLAS_LIBRARY}
+        ${CUSOLVER_LIBRARY}
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+    
+    # Add MPI if enabled
+    if(WITH_MPI)
+        target_link_libraries(test_lanczos_cuda ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    # Add OpenMP to test_lanczos_cuda if available
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(test_lanczos_cuda OpenMP::OpenMP_CXX)
+    endif()
 endif()
