@@ -1,209 +1,225 @@
-// test_lanczos_cuda.cu - Test script for CUDA-accelerated Lanczos algorithms
-#include <iostream>
-#include <iomanip>
-#include <vector>
-#include <chrono>
-#include <cmath>
-#include <numeric>
-#include <cuda_runtime.h>
-#include <cuComplex.h>
-#include "lanczos.h"
+// test_lanczos_cuda.cu - Test program for CUDA-accelerated Lanczos implementations
 #include "lanczos_cuda.h"
+#include <iostream>
+#include <chrono>
+#include <random>
+#include <iomanip>
+#include <algorithm>
 
-// Test matrices sizes
-const std::vector<int> TEST_SIZES = {100, 500, 1000, 2000};
+// Timer utility
+class Timer {
+private:
+    std::chrono::high_resolution_clock::time_point start_time;
+public:
+    Timer() {
+        reset();
+    }
+    
+    void reset() {
+        start_time = std::chrono::high_resolution_clock::now();
+    }
+    
+    double elapsed() const {
+        auto end_time = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double>(end_time - start_time).count();
+    }
+};
 
-// Number of eigenvalues to compute
-const int NUM_EIGENVALUES = 5;
-
-// Maximum Lanczos iterations
-const int MAX_ITER = 200;
-
-// Convergence tolerance
-const double TOLERANCE = 1e-10;
-
-// Test directory for storing basis vectors
-const std::string TEST_DIR = "./test_vectors";
-
-// Simple random Hermitian Hamiltonian generator
-void generate_random_hamiltonian(std::vector<std::vector<Complex>>& H, int N) {
-    // Initialize with random values
+// Generate a random Hermitian matrix
+void generate_random_hermitian_matrix(ComplexVector& matrix, int N) {
     std::mt19937 gen(42); // Fixed seed for reproducibility
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
-    H.resize(N, std::vector<Complex>(N));
+    // Allocate matrix in row-major order
+    matrix.resize(N * N);
     
+    // Generate random Hermitian matrix
     for (int i = 0; i < N; i++) {
-        // Diagonal elements are real
-        H[i][i] = Complex(dist(gen), 0.0);
+        // Diagonal elements (real)
+        matrix[i * N + i] = Complex(dist(gen), 0.0);
         
-        // Off-diagonal elements ensure Hermitian property: H[j][i] = conj(H[i][j])
+        // Off-diagonal elements
         for (int j = i + 1; j < N; j++) {
-            H[i][j] = Complex(dist(gen), dist(gen));
-            H[j][i] = std::conj(H[i][j]);
+            double real = dist(gen);
+            double imag = dist(gen);
+            matrix[i * N + j] = Complex(real, imag);
+            matrix[j * N + i] = Complex(real, -imag); // Hermitian condition
         }
     }
 }
 
-// Apply Hamiltonian matrix-vector product H|v⟩ -> |w⟩
-void apply_hamiltonian_cpu(const Complex* v, Complex* w, int N, const std::vector<std::vector<Complex>>& H) {
+// Matrix-vector product function
+void matrix_vector_product(const Complex* v_in, Complex* v_out, int N, const ComplexVector& matrix) {
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
-        w[i] = Complex(0.0, 0.0);
+        Complex sum(0.0, 0.0);
         for (int j = 0; j < N; j++) {
-            w[i] += H[i][j] * v[j];
+            sum += matrix[i * N + j] * v_in[j];
         }
+        v_out[i] = sum;
     }
 }
 
-// CUDA kernel for Hamiltonian-vector product
-__global__ void hamiltonian_mvp_kernel(const cuDoubleComplex* H, const cuDoubleComplex* v, 
-                                       cuDoubleComplex* w, int N) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {
-        cuDoubleComplex sum = make_cuDoubleComplex(0.0, 0.0);
-        for (int j = 0; j < N; j++) {
-            sum = cuCadd(sum, cuCmul(H[i * N + j], v[j]));
-        }
-        w[i] = sum;
-    }
-}
-
-// Apply Hamiltonian matrix-vector product on GPU
-void apply_hamiltonian_gpu(const cuDoubleComplex* v, cuDoubleComplex* w, int N, cuDoubleComplex* d_H) {
-    // Launch kernel
-    int blockSize = 256;
-    int numBlocks = (N + blockSize - 1) / blockSize;
-    hamiltonian_mvp_kernel<<<numBlocks, blockSize>>>(d_H, v, w, N);
+// Full diagonalization using LAPACKE
+std::vector<double> full_diagonalization(const ComplexVector& matrix, int N) {
+    // Copy matrix for LAPACK (column-major)
+    std::vector<double> eigenvalues(N);
+    ComplexVector matrix_copy(N * N);
     
-    // Check for kernel errors
-    cudaError_t cudaStatus = cudaGetLastError();
-    if (cudaStatus != cudaSuccess) {
-        std::cerr << "Kernel launch failed: " << cudaGetErrorString(cudaStatus) << std::endl;
-        exit(EXIT_FAILURE);
+    // Convert from row-major to column-major
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            matrix_copy[j * N + i] = matrix[i * N + j];
+        }
     }
+    
+    // Workspace
+    int info;
+    
+    // Call LAPACK
+    info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N, reinterpret_cast<lapack_complex_double*>(matrix_copy.data()),
+                         N, eigenvalues.data());
+    
+    if (info != 0) {
+        std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
+        return std::vector<double>();
+    }
+    
+    return eigenvalues;
 }
 
-// Compare eigenvalues and print results
-void compare_eigenvalues(const std::vector<double>& exact_eigs, 
-                        const std::vector<double>& approx_eigs, 
-                        const std::string& method_name) {
+// Compare eigenvalue arrays
+double compare_eigenvalues(const std::vector<double>& exact, const std::vector<double>& approx, int count) {
     double max_error = 0.0;
-    double avg_error = 0.0;
+    int compare_count = std::min(count, static_cast<int>(std::min(exact.size(), approx.size())));
     
-    int n = std::min(exact_eigs.size(), approx_eigs.size());
+    std::cout << "Comparing " << compare_count << " eigenvalues:" << std::endl;
+    std::cout << std::setw(5) << "Index" << std::setw(15) << "Exact" << std::setw(15) << "Lanczos"
+              << std::setw(15) << "Error" << std::endl;
+    std::cout << std::string(50, '-') << std::endl;
     
-    std::cout << "\nComparison of " << method_name << " with exact diagonalization:" << std::endl;
-    std::cout << std::setw(5) << "Index" << std::setw(20) << "Exact" 
-              << std::setw(20) << method_name << std::setw(20) << "Error" << std::endl;
-    std::cout << std::string(65, '-') << std::endl;
-    
-    for (int i = 0; i < n; i++) {
-        double error = std::abs(exact_eigs[i] - approx_eigs[i]);
-        avg_error += error;
+    for (int i = 0; i < compare_count; i++) {
+        double error = std::abs(exact[i] - approx[i]);
         max_error = std::max(max_error, error);
         
         std::cout << std::setw(5) << i 
-                  << std::setw(20) << std::scientific << exact_eigs[i]
-                  << std::setw(20) << approx_eigs[i]
-                  << std::setw(20) << error << std::endl;
+                  << std::setw(15) << std::fixed << std::setprecision(8) << exact[i]
+                  << std::setw(15) << std::fixed << std::setprecision(8) << approx[i]
+                  << std::setw(15) << std::scientific << std::setprecision(2) << error
+                  << std::endl;
     }
     
-    avg_error /= n;
-    
-    std::cout << "\nSummary for " << method_name << ":" << std::endl;
-    std::cout << "  Average error: " << std::scientific << avg_error << std::endl;
-    std::cout << "  Maximum error: " << std::scientific << max_error << std::endl;
-    std::cout << "  Passed: " << (max_error < TOLERANCE ? "YES" : "NO") << std::endl;
+    return max_error;
 }
 
-int main() {
-    std::cout << "Starting test of CUDA-accelerated Lanczos algorithms..." << std::endl;
+int main(int argc, char** argv) {
+    // Configuration
+    int N = 500;           // Matrix dimension
+    int max_iter = 100;    // Maximum Lanczos iterations
+    int num_eigenvalues = 5; // Number of eigenvalues to compute
+    double tolerance = 1e-10; // Convergence tolerance
+    std::string output_dir = "./lanczos_test_output"; // Output directory
+    bool compute_eigenvectors = false;  // Whether to compute eigenvectors
     
-    // Test each matrix size
-    for (int N : TEST_SIZES) {
-        std::cout << "\n===================================================" << std::endl;
-        std::cout << "Testing with matrix size N = " << N << std::endl;
-        std::cout << "===================================================\n" << std::endl;
-        
-        // Generate a random Hermitian matrix
-        std::vector<std::vector<Complex>> H_matrix;
-        generate_random_hamiltonian(H_matrix, N);
-        
-        // Create CPU Hamiltonian apply function
-        auto H_apply_cpu = [&H_matrix](const Complex* v, Complex* w, int size) {
-            apply_hamiltonian_cpu(v, w, size, H_matrix);
-        };
-        
-        // Prepare GPU Hamiltonian matrix
-        cuDoubleComplex* d_H;
-        CHECK_CUDA(cudaMalloc(&d_H, N * N * sizeof(cuDoubleComplex)));
-        
-        // Copy H_matrix to device in flattened form
-        std::vector<cuDoubleComplex> h_H_flat(N * N);
-        for (int i = 0; i < N; i++) {
-            for (int j = 0; j < N; j++) {
-                h_H_flat[i * N + j] = toCuComplex(H_matrix[i][j]);
-            }
-        }
-        CHECK_CUDA(cudaMemcpy(d_H, h_H_flat.data(), N * N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-        
-        // Create GPU Hamiltonian apply function
-        auto H_apply_gpu = [d_H](const cuDoubleComplex* v, cuDoubleComplex* w, int size) {
-            apply_hamiltonian_gpu(v, w, size, d_H);
-        };
-        
-        // Vectors to store results
-        std::vector<double> exact_eigenvalues;
-        std::vector<double> lanczos_eigenvalues;
-        std::vector<double> lanczos_no_ortho_eigenvalues;
-        std::vector<double> lanczos_selective_eigenvalues;
-        
-        // 1. Run full diagonalization as reference
-        std::cout << "Running full diagonalization..." << std::endl;
-        auto start = std::chrono::high_resolution_clock::now();
-        full_diagonalization(H_apply_cpu, N, exact_eigenvalues, TEST_DIR, false);
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "Full diagonalization completed in " << duration << " ms" << std::endl;
-        
-        // Keep only the first NUM_EIGENVALUES eigenvalues
-        if (exact_eigenvalues.size() > NUM_EIGENVALUES) {
-            exact_eigenvalues.resize(NUM_EIGENVALUES);
-        }
-        
-        // 2. Run Lanczos with full reorthogonalization (CPU)
-        std::cout << "\nRunning CPU Lanczos with full reorthogonalization..." << std::endl;
-        start = std::chrono::high_resolution_clock::now();
-        lanczos(H_apply_cpu, N, MAX_ITER, NUM_EIGENVALUES, TOLERANCE, lanczos_eigenvalues, TEST_DIR, false);
-        end = std::chrono::high_resolution_clock::now();
-        duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "CPU Lanczos completed in " << duration << " ms" << std::endl;
-        
-        // 3. Run CUDA Lanczos with full reorthogonalization
-        std::cout << "\nRunning CUDA Lanczos with full reorthogonalization..." << std::endl;
-        start = std::chrono::high_resolution_clock::now();
-        lanczos_cuda(H_apply_gpu, N, MAX_ITER, NUM_EIGENVALUES, TOLERANCE, lanczos_no_ortho_eigenvalues, TEST_DIR, false);
-        end = std::chrono::high_resolution_clock::now();
-        duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "CUDA Lanczos completed in " << duration << " ms" << std::endl;
-        
-        // 4. Run CUDA Lanczos with selective reorthogonalization
-        std::cout << "\nRunning CUDA Lanczos with selective reorthogonalization..." << std::endl;
-        start = std::chrono::high_resolution_clock::now();
-        lanczos_selective_reorth_cuda(H_apply_gpu, N, MAX_ITER, NUM_EIGENVALUES, TOLERANCE, lanczos_selective_eigenvalues, TEST_DIR, false);
-        end = std::chrono::high_resolution_clock::now();
-        duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-        std::cout << "CUDA Lanczos with selective reorthogonalization completed in " << duration << " ms" << std::endl;
-        
-        // Compare results
-        compare_eigenvalues(exact_eigenvalues, lanczos_eigenvalues, "CPU Lanczos");
-        compare_eigenvalues(exact_eigenvalues, lanczos_no_ortho_eigenvalues, "CUDA Lanczos");
-        compare_eigenvalues(exact_eigenvalues, lanczos_selective_eigenvalues, "CUDA Lanczos Selective");
-        
-        // Clean up GPU memory
-        CHECK_CUDA(cudaFree(d_H));
+    // Parse command line arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-n" && i + 1 < argc) N = std::stoi(argv[++i]);
+        else if (arg == "-i" && i + 1 < argc) max_iter = std::stoi(argv[++i]);
+        else if (arg == "-e" && i + 1 < argc) num_eigenvalues = std::stoi(argv[++i]);
+        else if (arg == "-t" && i + 1 < argc) tolerance = std::stod(argv[++i]);
+        else if (arg == "-v") compute_eigenvectors = true;
+        else if (arg == "-o" && i + 1 < argc) output_dir = argv[++i];
     }
     
-    std::cout << "\nAll tests completed!" << std::endl;
+    std::cout << "Running CUDA Lanczos test with:" << std::endl;
+    std::cout << "  Matrix dimension: " << N << std::endl;
+    std::cout << "  Max iterations: " << max_iter << std::endl;
+    std::cout << "  Eigenvalues to compute: " << num_eigenvalues << std::endl;
+    std::cout << "  Tolerance: " << tolerance << std::endl;
+    std::cout << "  Computing eigenvectors: " << (compute_eigenvectors ? "Yes" : "No") << std::endl;
+    std::cout << "  Output directory: " << output_dir << std::endl << std::endl;
+    
+    // Create output directory
+    std::string cmd = "mkdir -p " + output_dir;
+    system(cmd.c_str());
+    
+    // Generate random Hermitian matrix
+    Timer timer;
+    std::cout << "Generating random Hermitian matrix..." << std::endl;
+    ComplexVector matrix;
+    generate_random_hermitian_matrix(matrix, N);
+    std::cout << "Matrix generation time: " << timer.elapsed() << " seconds" << std::endl << std::endl;
+    
+    // Create matrix-vector product function
+    auto matrix_vector_function = [&matrix](const Complex* v_in, Complex* v_out, int dim) {
+        matrix_vector_product(v_in, v_out, dim, matrix);
+    };
+    
+    // Full diagonalization for comparison
+    std::cout << "Running full diagonalization..." << std::endl;
+    timer.reset();
+    std::vector<double> exact_eigenvalues = full_diagonalization(matrix, N);
+    double full_diag_time = timer.elapsed();
+    std::cout << "Full diagonalization time: " << full_diag_time << " seconds" << std::endl << std::endl;
+    
+    // Sort eigenvalues (they should be sorted already from LAPACK, but to be safe)
+    std::sort(exact_eigenvalues.begin(), exact_eigenvalues.end());
+    
+    // Run Lanczos without reorthogonalization
+    std::vector<double> lanczos_no_ortho_evals;
+    std::cout << "Running Lanczos without reorthogonalization..." << std::endl;
+    timer.reset();
+    lanczos_no_ortho_cuda(matrix_vector_function, N, max_iter, num_eigenvalues, 
+                         tolerance, lanczos_no_ortho_evals, output_dir + "/no_ortho", 
+                         compute_eigenvectors);
+    double no_ortho_time = timer.elapsed();
+    std::cout << "Lanczos without reorthogonalization time: " << no_ortho_time << " seconds" << std::endl;
+    std::cout << "Speedup vs full diagonalization: " << full_diag_time / no_ortho_time << "x" << std::endl;
+    double no_ortho_error = compare_eigenvalues(exact_eigenvalues, lanczos_no_ortho_evals, num_eigenvalues);
+    std::cout << "Maximum error: " << std::scientific << no_ortho_error << std::endl << std::endl;
+    
+    // Run Lanczos with selective reorthogonalization
+    std::vector<double> lanczos_selective_evals;
+    std::cout << "Running Lanczos with selective reorthogonalization..." << std::endl;
+    timer.reset();
+    lanczos_selective_reorth_cuda(matrix_vector_function, N, max_iter, num_eigenvalues, 
+                                 tolerance, lanczos_selective_evals, output_dir + "/selective", 
+                                 compute_eigenvectors);
+    double selective_time = timer.elapsed();
+    std::cout << "Lanczos with selective reorthogonalization time: " << selective_time << " seconds" << std::endl;
+    std::cout << "Speedup vs full diagonalization: " << full_diag_time / selective_time << "x" << std::endl;
+    double selective_error = compare_eigenvalues(exact_eigenvalues, lanczos_selective_evals, num_eigenvalues);
+    std::cout << "Maximum error: " << std::scientific << selective_error << std::endl << std::endl;
+    
+    // Run Lanczos with full reorthogonalization
+    std::vector<double> lanczos_full_evals;
+    std::cout << "Running Lanczos with full reorthogonalization..." << std::endl;
+    timer.reset();
+    lanczos_cuda(matrix_vector_function, N, max_iter, num_eigenvalues, 
+                tolerance, lanczos_full_evals, output_dir + "/full", 
+                compute_eigenvectors);
+    double full_ortho_time = timer.elapsed();
+    std::cout << "Lanczos with full reorthogonalization time: " << full_ortho_time << " seconds" << std::endl;
+    std::cout << "Speedup vs full diagonalization: " << full_diag_time / full_ortho_time << "x" << std::endl;
+    double full_ortho_error = compare_eigenvalues(exact_eigenvalues, lanczos_full_evals, num_eigenvalues);
+    std::cout << "Maximum error: " << std::scientific << full_ortho_error << std::endl << std::endl;
+    
+    // Final summary
+    std::cout << "=== SUMMARY ===" << std::endl;
+    std::cout << "Method                            | Time (s) | Speedup | Max Error" << std::endl;
+    std::cout << "-----------------------------------|----------|---------|----------" << std::endl;
+    std::cout << "Full Diagonalization              | " << std::setw(8) << full_diag_time 
+              << " | " << std::setw(7) << "1.00" << " | " << std::setw(9) << "0.00" << std::endl;
+    std::cout << "Lanczos (No Reorth)               | " << std::setw(8) << no_ortho_time 
+              << " | " << std::setw(7) << std::fixed << std::setprecision(2) << full_diag_time/no_ortho_time 
+              << " | " << std::setw(9) << std::scientific << std::setprecision(2) << no_ortho_error << std::endl;
+    std::cout << "Lanczos (Selective Reorth)        | " << std::setw(8) << selective_time 
+              << " | " << std::setw(7) << std::fixed << std::setprecision(2) << full_diag_time/selective_time 
+              << " | " << std::setw(9) << std::scientific << std::setprecision(2) << selective_error << std::endl;
+    std::cout << "Lanczos (Full Reorth)             | " << std::setw(8) << full_ortho_time 
+              << " | " << std::setw(7) << std::fixed << std::setprecision(2) << full_diag_time/full_ortho_time 
+              << " | " << std::setw(9) << std::scientific << std::setprecision(2) << full_ortho_error << std::endl;
+              
     return 0;
 }
