@@ -1,10 +1,9 @@
 cmake_minimum_required(VERSION 3.18)
 project(ExactDiagonalization LANGUAGES CXX CUDA)
-set(CMAKE_CUDA_ARCHITECTURES "native")
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD_REQUIRED OFF)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build type
@@ -16,7 +15,9 @@ endif()
 option(WITH_CUDA "Build with CUDA support" ON)
 option(WITH_MPI "Build with MPI support" ON)
 
-
+if (WITH_CUDA)
+    set(CMAKE_CUDA_ARCHITECTURES "native")
+endif()
 
 # Source directories
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
