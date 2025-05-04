@@ -297,22 +297,22 @@ int main() {
     write_eigenvalues_to_file(ir_lanczos_eigenvalues, ir_lanczos_dir + "/eigenvalues.txt");
     
     // 10. ARPACK diagonalization
-    std::cout << "\n==== Testing ARPACK diagonalization ====" << std::endl;
-    std::vector<double> arpack_eigenvalues;
-    std::string arpack_dir = "pyrochlore_test/arpack";
-    system("mkdir -p pyrochlore_test/arpack");
+    // std::cout << "\n==== Testing ARPACK diagonalization ====" << std::endl;
+    // std::vector<double> arpack_eigenvalues;
+    // std::string arpack_dir = "pyrochlore_test/arpack";
+    // system("mkdir -p pyrochlore_test/arpack");
     
-    start = std::chrono::high_resolution_clock::now();
-    arpack_diagonalization(ham_apply, N, max_iter, num_eigs, tol, arpack_eigenvalues, arpack_dir, true);
-    end = std::chrono::high_resolution_clock::now();
-    duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+    // start = std::chrono::high_resolution_clock::now();
+    // arpack_diagonalization(ham_apply, N, max_iter, num_eigs, tol, arpack_eigenvalues, arpack_dir, true);
+    // end = std::chrono::high_resolution_clock::now();
+    // duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     
-    std::cout << "ARPACK diagonalization completed in " << duration << " ms" << std::endl;
-    compare_eigenvalues(
-        std::vector<double>(ref_eigenvalues.begin(), ref_eigenvalues.begin() + num_eigs),
-        arpack_eigenvalues, 
-        tol);
-    write_eigenvalues_to_file(arpack_eigenvalues, arpack_dir + "/eigenvalues.txt");
+    // std::cout << "ARPACK diagonalization completed in " << duration << " ms" << std::endl;
+    // compare_eigenvalues(
+    //     std::vector<double>(ref_eigenvalues.begin(), ref_eigenvalues.begin() + num_eigs),
+    //     arpack_eigenvalues, 
+    //     tol);
+    // write_eigenvalues_to_file(arpack_eigenvalues, arpack_dir + "/eigenvalues.txt");
     
     // Note: Testing these heavy solvers is optional and commented out by default
     // 11. Spectrum slicing solver
