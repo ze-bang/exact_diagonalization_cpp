@@ -177,7 +177,7 @@ def main():
     
     # Optimization parameters
     parser.add_argument('--method', type=str, default='L-BFGS-B', help='Optimization method')
-    parser.add_argument('--max_iter', type=int, default=200 , help='Maximum number of iterations')
+    parser.add_argument('--max_iter', type=int, default=5000 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')
     
     # Temperature range for NLCE

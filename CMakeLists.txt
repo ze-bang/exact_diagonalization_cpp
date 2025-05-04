@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Options
-option(WITH_CUDA "Build with CUDA support" ON)
+option(WITH_CUDA "Build with CUDA support" OFF)
 option(WITH_MPI "Build with MPI support" ON)
 
 if (WITH_CUDA)
