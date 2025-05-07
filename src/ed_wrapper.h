@@ -560,17 +560,26 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& single_site_filename = "Trans.dat"
 ) {
 
-    // Run the automorphism finder Python script to generate symmetry data
-    std::string automorphism_finder_path = std::string(__FILE__);
-    automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
-    automorphism_finder_path += "/automorphism_finder.py";
+    // Check if automorphism results already exist
+    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
+    struct stat automorphism_buffer;
+    bool automorphisms_exist = (stat((automorphism_file).c_str(), &automorphism_buffer) == 0);
 
-    std::string automorphism_cmd = "python " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
-    std::cout << "Running automorphism finder: " << automorphism_cmd << std::endl;
-    int result = system(automorphism_cmd.c_str());
-    if (result != 0) {
-        std::cerr << "Warning: Automorphism finder script returned non-zero code: " << result << std::endl;
-        std::cerr << "Continuing without symmetry analysis." << std::endl;
+    if (!automorphisms_exist) {
+        // Run the automorphism finder Python script to generate symmetry data
+        std::string automorphism_finder_path = std::string(__FILE__);
+        automorphism_finder_path = automorphism_finder_path.substr(0, automorphism_finder_path.find_last_of("/\\"));
+        automorphism_finder_path += "/automorphism_finder.py";
+
+        std::string automorphism_cmd = "python " + automorphism_finder_path + " --data_dir=\"" + directory + "\"";
+        std::cout << "Running automorphism finder: " << automorphism_cmd << std::endl;
+        int result = system(automorphism_cmd.c_str());
+        if (result != 0) {
+            std::cerr << "Warning: Automorphism finder script returned non-zero code: " << result << std::endl;
+            std::cerr << "Continuing without symmetry analysis." << std::endl;
+        }
+    } else {
+        std::cout << "Using existing automorphism results from: " << automorphism_file << std::endl;
     }
 
     // Check for automorphism results
