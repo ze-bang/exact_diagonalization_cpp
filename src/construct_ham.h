@@ -1158,83 +1158,162 @@ public:
         
         // For each symmetry sector (combination of quantum numbers)
         for (const auto& e_i : all_quantum_numbers) {
-            std::vector<std::vector<Complex>> current_sector_basis;
             std::vector<size_t> representative_states;
             std::set<size_t> processed_states;
             size_t total_basis_states = 1 << n_bits_;
+            size_t sector_basis_count = 0;
             
-            // Process basis states in order of their binary representation
-            for (size_t basis = 0; basis < total_basis_states; basis++) {
-            // Skip states that have already been processed as part of another orbit
-            if (processed_states.find(basis) != processed_states.end()) {
-                continue;
-            }
+            // Create a temporary directory for this symmetry sector
+            std::string sector_dir = sym_basis_dir + "/temp_sector_" + std::to_string(count);
+            std::string mkdir_sector = "mkdir -p " + sector_dir;
+            system(mkdir_sector.c_str());
             
-            // Get orbit of the current state under symmetry operations
-            std::set<size_t> orbit;
-            for (const auto& perm : max_clique_here) {
-                orbit.insert(applyPermutation(basis, perm));
-            }
+            // Use a file-based hash map to reduce memory usage
+            std::string hash_file = sector_dir + "/vector_hashes.txt";
+            std::ofstream hash_map(hash_file);
             
-            // Mark all states in the orbit as processed
-            processed_states.insert(orbit.begin(), orbit.end());
+            // Setup progress tracking
+            size_t progress_interval = total_basis_states / 100;
+            if (progress_interval < 1) progress_interval = 1;
             
-            // Generate symmetrized basis vector for this representative state
-            std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+            // Process in batches to reduce memory pressure
+            const size_t BATCH_SIZE = 1000;
+            std::set<size_t> batch_processed;
             
-            // Check norm of the vector (non-zero indicates valid basis vector in this sector)
-            double norm_squared = 0.0;
-            for (const auto& val : sym_basis_vec) {
-                norm_squared += std::norm(val);
-            }
+            for (size_t batch_start = 0; batch_start < total_basis_states; batch_start += BATCH_SIZE) {
+            batch_processed.clear();
+            size_t batch_end = std::min(batch_start + BATCH_SIZE, total_basis_states);
             
-            if (norm_squared > 1e-10) {
-                // Check uniqueness using a more efficient method
-                bool is_unique = true;
+            for (size_t basis = batch_start; basis < batch_end; basis++) {
+                // Display progress bar
+                if (basis % progress_interval == 0 || basis == total_basis_states - 1) {
+                double percentage = static_cast<double>(basis) / total_basis_states * 100.0;
+                int barWidth = 40;
+                int pos = barWidth * percentage / 100.0;
                 
-                // Find the first non-zero component to use for normalization comparison
+                std::cout << "\rProcessing sector " << count + 1 << "/" << all_quantum_numbers.size()
+                      << " [";
+                for (int i = 0; i < barWidth; ++i) {
+                    if (i < pos) std::cout << "=";
+                    else if (i == pos) std::cout << ">";
+                    else std::cout << " ";
+                }
+                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                }
+                
+                // Skip states already processed
+                if (processed_states.find(basis) != processed_states.end() || 
+                batch_processed.find(basis) != batch_processed.end()) {
+                continue;
+                }
+                
+                // Get orbit of the current state under symmetry operations
+                std::set<size_t> orbit;
+                for (const auto& perm : max_clique_here) {
+                orbit.insert(applyPermutation(basis, perm));
+                }
+                
+                // Mark states in orbit as processed for this batch
+                batch_processed.insert(orbit.begin(), orbit.end());
+                
+                // Generate symmetrized basis vector
+                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+                
+                // Check norm
+                double norm_squared = 0.0;
+                for (const auto& val : sym_basis_vec) {
+                norm_squared += std::norm(val);
+                }
+                
+                if (norm_squared > 1e-10) {
+                // Find first non-zero component for phase normalization
                 size_t first_nonzero = 0;
                 while (first_nonzero < total_basis_states && std::abs(sym_basis_vec[first_nonzero]) < 1e-10) {
-                first_nonzero++;
+                    first_nonzero++;
                 }
                 
                 if (first_nonzero < total_basis_states) {
-                // Normalize the phase using the first non-zero component
-                Complex phase_factor = sym_basis_vec[first_nonzero] / std::abs(sym_basis_vec[first_nonzero]);
-                for (auto& val : sym_basis_vec) {
-                    val /= phase_factor; // Normalize phase
-                }
-                
-                // Check uniqueness against existing basis vectors
-                for (const auto& existing_vec : current_sector_basis) {
-                    // Compute squared distance instead of overlap
-                    double distance_squared = 0.0;
-                    for (size_t i = 0; i < total_basis_states; i++) {
-                    distance_squared += std::norm(existing_vec[i] - sym_basis_vec[i]);
+                    // Normalize phase
+                    Complex phase_factor = sym_basis_vec[first_nonzero] / std::abs(sym_basis_vec[first_nonzero]);
+                    for (auto& val : sym_basis_vec) {
+                    val /= phase_factor;
                     }
                     
-                    if (distance_squared < 1e-10) {
-                    is_unique = false;
-                    break;
+                    // Create sparse representation and hash
+                    std::stringstream hash_stream;
+                    for (size_t i = 0; i < total_basis_states; i++) {
+                    if (std::abs(sym_basis_vec[i]) > 1e-10) {
+                        hash_stream << i << ":"
+                           << std::fixed << std::setprecision(12) 
+                           << sym_basis_vec[i].real() << ":"
+                           << sym_basis_vec[i].imag() << ";";
+                    }
+                    }
+                    std::string vector_hash = hash_stream.str();
+                    
+                    // Check if this hash already exists
+                    hash_map.seekp(0, std::ios::beg);
+                    std::string line;
+                    bool is_duplicate = false;
+                    std::ifstream hash_check(hash_file);
+                    while (std::getline(hash_check, line)) {
+                    if (line == vector_hash) {
+                        is_duplicate = true;
+                        break;
+                    }
+                    }
+                    hash_check.close();
+                    
+                    if (!is_duplicate) {
+                    // Write vector hash
+                    hash_map << vector_hash << std::endl;
+                    hash_map.flush(); // Ensure it's written immediately
+                    
+                    // Write the vector to disk directly
+                    std::string vec_filename = sector_dir + "/vector_" + std::to_string(sector_basis_count) + ".dat";
+                    std::ofstream vec_file(vec_filename);
+                    for (size_t i = 0; i < total_basis_states; i++) {
+                        if (std::abs(sym_basis_vec[i]) > 1e-10) {
+                        vec_file << i << " " << sym_basis_vec[i].real() << " " << sym_basis_vec[i].imag() << std::endl;
+                        }
+                    }
+                    vec_file.close();
+                    
+                    representative_states.push_back(basis);
+                    sector_basis_count++;
                     }
                 }
-                
-                if (is_unique) {
-                    current_sector_basis.push_back(sym_basis_vec);
-                    representative_states.push_back(basis);
                 }
-                }
-            }
             }
             
-            // Add all unique basis vectors for this sector to the global list
-            unique_sym_basis.insert(unique_sym_basis.end(), current_sector_basis.begin(), current_sector_basis.end());
-            symmetrized_block_ham_sizes[count] = current_sector_basis.size();
+            // Add batch_processed to processed_states for the next batch
+            processed_states.insert(batch_processed.begin(), batch_processed.end());
+            }
+            
+            hash_map.close();
+            std::cout << std::endl;
+            
+            // Copy vectors to final location and cleanup temp files
+            for (size_t i = 0; i < sector_basis_count; i++) {
+            std::string src_file = sector_dir + "/vector_" + std::to_string(i) + ".dat";
+            std::string dst_file = sym_basis_dir + "/sym_basis" + std::to_string(unique_sym_basis.size() + i) + ".dat";
+            
+            // Copy file content
+            std::ifstream src(src_file, std::ios::binary);
+            std::ofstream dst(dst_file, std::ios::binary);
+            dst << src.rdbuf();
+            }
+            
+            // Update counts
+            symmetrized_block_ham_sizes[count] = sector_basis_count;
+            unique_sym_basis.resize(unique_sym_basis.size() + sector_basis_count); // Just resize to track count, not storing actual data
+            
+            // Remove temporary directory
+            std::string cleanup_command = "rm -rf " + sector_dir;
+            system(cleanup_command.c_str());
+            
+            std::cout << "Sector " << count + 1 << ": Found " << sector_basis_count << " basis vectors" << std::endl;
             count++;
-            
-            // Progress indicator
-            std::cout << "\rProcessed symmetry sector " << count << "/" << all_quantum_numbers.size() 
-                  << " (found " << current_sector_basis.size() << " basis vectors)" << std::flush;
         }
         std::cout << std::endl;
         // Write the number of unique basis vectors
@@ -1244,17 +1323,16 @@ public:
             std::cout << symmetrized_block_ham_sizes[i] << " ";
         }
         std::cout << std::endl;
-
-        // Write each symmetrized basis vector
-        for (size_t i = 0; i < unique_sym_basis.size(); i++) {    
-            std::ofstream output_file(filename+std::to_string(i) + ".dat");        
-            for (size_t j = 0; j < (1<<num_site); j++) {
-                if (std::abs(unique_sym_basis[i][j]) > 1e-8) {
-                    output_file << j << " " << unique_sym_basis[i][j].real() << " " << unique_sym_basis[i][j].imag() << std::endl;
-                }
-            }
-            output_file.close();
+        // Write the symmetrized block size to a file
+        std::ofstream block_size_file(dir + "/sym_basis/sym_block_sizes.txt");
+        if (!block_size_file.is_open()) {
+            throw std::runtime_error("Could not open file: " + dir + "/sym_basis/sym_block_sizes.txt");
         }
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
+            block_size_file << symmetrized_block_ham_sizes[i] << std::endl;
+        }
+        block_size_file.close();
+        std::cout << "Symmetrized basis generation complete." << std::endl;
     }
 
     std::vector<Complex> read_sym_basis(int index, const std::string& dir){
@@ -1277,14 +1355,22 @@ public:
 
     std::vector<Complex> sym_basis_e_(int basis, std::vector<std::vector<int>> max_clique, std::vector<std::vector<int>> power_representation, std::vector<int> minimal_generators, std::vector<int> e_i){
         
-        std::vector<Complex> sym_basis = std::vector<Complex>(1 << n_bits_, 0.0);
-        for(size_t i=0; i<max_clique.size(); i++){
-            int rest = applyPermutation(basis, max_clique[i]);
-            Complex factor = Complex(1.0, 0.0);
-            for(size_t j=0; j<power_representation[i].size(); j++){
-                factor *= std::exp(Complex(0.0, 2*M_PI*double(power_representation[i][j])*double(e_i[j])/double(minimal_generators[j])));    // Multiply by the phase factor e^(i*θ)
+        std::vector<Complex> sym_basis(1 << n_bits_, 0.0);
+
+        // Pre-compute phase factors for all permutations
+        std::vector<Complex> phase_factors(max_clique.size(), Complex(1.0, 0.0));
+        for(size_t i=0; i<max_clique.size(); i++) {
+            double phase = 0.0;
+            for(size_t j=0; j<power_representation[i].size(); j++) {
+                phase += 2.0*M_PI*power_representation[i][j]*e_i[j]/minimal_generators[j];
             }
-            sym_basis[rest] += factor;
+            phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
+        }
+
+        // Apply permutations and add with phase factors
+        for(size_t i=0; i<max_clique.size(); i++) {
+            int permuted_state = applyPermutation(basis, max_clique[i]);
+            sym_basis[permuted_state] += phase_factors[i];
         }
 
         // Normalize the sym_basis
@@ -1505,7 +1591,21 @@ public:
     // Build symmetrized sparse matrices for each block and save them to files
     void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
         if (symmetrized_block_ham_sizes.empty()) {
-            throw std::runtime_error("Symmetrized basis must be generated first with generateSymmetrizedBasis()");
+            // Load symmetrized block sizes from file
+            std::ifstream file(dir + "/sym_basis/sym_block_sizes.txt");
+            if (!file.is_open()) {
+                throw std::runtime_error("Symmetrized basis must be generated first with generateSymmetrizedBasis()");
+            }
+            std::string line;
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                int block_size;
+                if (iss >> block_size) {
+                    symmetrized_block_ham_sizes.push_back(block_size);
+                }
+            }
+            file.close();
+            std::cout << "Loaded symmetrized block sizes from file." << std::endl;
         }
         
         std::cout << "Building and saving symmetrized Hamiltonian blocks..." << std::endl;
@@ -1518,6 +1618,9 @@ public:
         int dim = 1 << n_bits_;
         int block_start = 0;
         
+        // Use a sparse vector representation to reduce memory usage
+        using SparseVector = std::map<int, Complex>;
+        
         // Process each symmetry block
         for (size_t block = 0; block < symmetrized_block_ham_sizes.size(); block++) {
             int block_size = symmetrized_block_ham_sizes[block];
@@ -1525,36 +1628,105 @@ public:
             
             std::cout << "Processing block " << block << " of size " << block_size << std::endl;
             
-            // Create a sparse matrix for this block
-            Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
-            std::vector<Eigen::Triplet<Complex>> triplets;
+            // Pre-build the sparse matrix representation
+            buildSparseMatrix();
             
-            // Build the block matrix
+            // Create a sparse matrix for this block
+            std::vector<Eigen::Triplet<Complex>> triplets;
+            triplets.reserve(block_size * 10); // Estimate average 10 non-zeros per row
+            
+            // Cache for basis vectors to reduce disk I/O
+            std::vector<SparseVector> basis_cache(block_size);
+            
+            // Load all basis vectors into sparse representation
+            #pragma omp parallel for schedule(dynamic)
             for (int i = 0; i < block_size; i++) {
-                std::vector<Complex> basis_i = read_sym_basis(block_start + i, dir);
-                std::vector<Complex> transformed_i = apply(basis_i);
-                
-                for (int j = 0; j < block_size; j++) {
-                    std::vector<Complex> basis_j = read_sym_basis(block_start + j, dir);
-                    
-                    // Calculate matrix element <j|H|i>
-                    Complex element(0.0, 0.0);
-                    for (int k = 0; k < dim; k++) {
-                        element += std::conj(basis_j[k]) * transformed_i[k];
+                std::string filename = dir + "/sym_basis/sym_basis" + std::to_string(block_start + i) + ".dat";
+                std::ifstream file(filename);
+                if (!file.is_open()) {
+                    #pragma omp critical
+                    {
+                        std::cerr << "Failed to open: " << filename << std::endl;
                     }
-                    
-                    // Add non-zero elements to the sparse matrix
-                    if (std::abs(element) > 1e-10) {
-                        triplets.emplace_back(j, i, element);
+                    continue;
+                }
+                
+                std::string line;
+                while (std::getline(file, line)) {
+                    std::istringstream iss(line);
+                    int idx;
+                    double real, imag;
+                    if (iss >> idx >> real >> imag) {
+                        Complex val(real, imag);
+                        if (std::abs(val) > 1e-10) {
+                            basis_cache[i][idx] = val;
+                        }
                     }
                 }
             }
             
+            // Process basis vectors in batches to improve cache locality
+            const int BATCH_SIZE = std::min(50, block_size);
+            
+            for (int batch_start = 0; batch_start < block_size; batch_start += BATCH_SIZE) {
+                int batch_end = std::min(batch_start + BATCH_SIZE, block_size);
+                
+                #pragma omp parallel for schedule(dynamic)
+                for (int i = batch_start; i < batch_end; i++) {
+                    // Skip if basis vector was not loaded successfully
+                    if (basis_cache[i].empty()) continue;
+                    
+                    // Apply operator to basis vector i
+                    SparseVector transformed_i;
+                    for (const auto& [idx, val] : basis_cache[i]) {
+                        for (const auto& transform : transforms_) {
+                            auto [new_idx, scalar] = transform(idx);
+                            if (new_idx >= 0 && new_idx < dim && std::abs(scalar) > 1e-10) {
+                                transformed_i[new_idx] += val * scalar;
+                            }
+                        }
+                    }
+                    
+                    // Calculate matrix elements with each basis vector j
+                    std::vector<std::pair<int, Complex>> row_elements;
+                    
+                    for (int j = 0; j < block_size; j++) {
+                        // Skip if basis vector was not loaded successfully
+                        if (basis_cache[j].empty()) continue;
+                        
+                        // Calculate <j|H|i> = sum_k conj(basis_j[k]) * transformed_i[k]
+                        Complex element(0.0, 0.0);
+                        
+                        // Only iterate over non-zero elements of transformed_i
+                        for (const auto& [idx, val] : transformed_i) {
+                            auto it = basis_cache[j].find(idx);
+                            if (it != basis_cache[j].end()) {
+                                element += std::conj(it->second) * val;
+                            }
+                        }
+                        
+                        if (std::abs(element) > 1e-10) {
+                            row_elements.emplace_back(j, element);
+                        }
+                    }
+                    
+                    // Add non-zero elements to triplets list
+                    #pragma omp critical
+                    {
+                        for (const auto& [j, element] : row_elements) {
+                            triplets.emplace_back(j, i, element);
+                        }
+                    }
+                }
+            }
+            
+            // Create and save the sparse matrix
+            Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
             blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
             
-            // Save the block matrix to a file
+            // Save in binary format for efficiency
             std::string filename = block_dir + "/block_" + std::to_string(block) + ".dat";
-            std::ofstream file(filename);
+            std::ofstream file(filename, std::ios::binary);
             if (!file.is_open()) {
                 throw std::runtime_error("Could not open file for writing: " + filename);
             }
@@ -1562,22 +1734,30 @@ public:
             // Write matrix dimensions
             file << block_size << " " << block_size << std::endl;
             
-            // Write non-zero elements (row, col, real, imag)
+            // Write number of non-zeros for pre-allocation
+            // int nnz = blockMatrix.nonZeros();
+            // file << nnz << std::endl;
+            
+            // Write non-zero elements (row, col, real, imag) in binary format
             for (int k = 0; k < blockMatrix.outerSize(); ++k) {
                 for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
-                    file << it.row() << " " << it.col() << " " 
-                         << it.value().real() << " " << it.value().imag() << std::endl;
+                    int row = it.row();
+                    int col = it.col();
+                    double real = it.value().real();
+                    double imag = it.value().imag();
+                    file << row << " " << col << " " << real << " " << imag << std::endl;
                 }
             }
             
             file.close();
-            std::cout << "Saved block " << block << " to " << filename << std::endl;
+            // std::cout << "Saved block " << block << " with " << nnz << " non-zeros to " << filename << std::endl;
             
             block_start += block_size;
         }
         
         std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
     }
+
 
 private:
     std::vector<TransformFunction> transforms_;

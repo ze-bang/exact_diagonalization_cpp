@@ -645,7 +645,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
 
     // Build and save symmetrized blocks if needed
     if (!sym_blocks_exists) {
-        std::cout << "Symmetrized blocks not found. Building..." << std::endl;
         hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
         block_sizes = hamiltonian.symmetrized_block_ham_sizes;
     } else {
