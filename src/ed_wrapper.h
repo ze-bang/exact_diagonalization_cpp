@@ -583,10 +583,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     }
 
     // Check for automorphism results
-    std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
-    struct stat automorphism_buffer;
-    bool automorphisms_exist = (stat((automorphism_file).c_str(), &automorphism_buffer) == 0);
-
     if (automorphisms_exist) {
         std::cout << "Found automorphisms for symmetry analysis: " << automorphism_file << std::endl;
     }
