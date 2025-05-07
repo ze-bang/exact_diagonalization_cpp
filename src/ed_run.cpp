@@ -110,7 +110,10 @@ int main(int argc, char* argv[]) {
         if (arg.find("--method=") == 0) {
             std::string method_str = arg.substr(9);
             if (method_str == "LANCZOS") method = DiagonalizationMethod::LANCZOS;
-            else if (method_str == "FULL") method = DiagonalizationMethod::FULL;
+            else if (method_str == "FULL") {
+                method = DiagonalizationMethod::FULL; 
+                full_spectrum = true; 
+            }
             else if (method_str == "mTPQ") method = DiagonalizationMethod::mTPQ;
             else if (method_str == "cTPQ") method = DiagonalizationMethod::cTPQ;
             else if (method_str == "KRYLOV_SCHUR") method = DiagonalizationMethod::KRYLOV_SCHUR;
@@ -126,6 +129,10 @@ int main(int argc, char* argv[]) {
             else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else if (method_str == "BLOCK_LANCZOS") method = DiagonalizationMethod::BLOCK_LANCZOS;
             else if (method_str == "OSS") method = DiagonalizationMethod::OSS;
+            else if (method_str == "LANCZOS_CUDA") method = DiagonalizationMethod::LANCZOS_CUDA;
+            else if (method_str == "LANCZOS_CUDA_SELECTIVE") method = DiagonalizationMethod::LANCZOS_CUDA_SELECTIVE;
+            else if (method_str == "LANCZOS_CUDA_NO_ORTHO") method = DiagonalizationMethod::LANCZOS_CUDA_NO_ORTHO;
+            else if (method_str == "FULL_CUDA") method = DiagonalizationMethod::FULL_CUDA;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {

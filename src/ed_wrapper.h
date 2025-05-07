@@ -8,6 +8,8 @@
 #include "construct_ham.h"
 #include "observables.h"
 #include <sys/stat.h>
+#include "lanczos_cuda.h"
+
 // Enum for available diagonalization methods
 enum class DiagonalizationMethod {
     LANCZOS,               // Standard Lanczos algorithm
@@ -26,7 +28,11 @@ enum class DiagonalizationMethod {
     mTPQ,                  // Thermal Pure Quantum states
     cTPQ,
     OSS,                   
-    ARPACK                   // ARPACK
+    ARPACK,                   // ARPACK
+    LANCZOS_CUDA,
+    LANCZOS_CUDA_SELECTIVE,
+    LANCZOS_CUDA_NO_ORTHO,
+    FULL_CUDA
 };
 
 // Structure to hold exact diagonalization results
@@ -261,6 +267,35 @@ EDResults exact_diagonalization_core(
                         params.tolerance, results.eigenvalues, 
                         params.output_dir, params.compute_eigenvectors, params.block_size);
             break;
+        
+        // case DiagonalizationMethod::LANCZOS_CUDA:
+        //     std::cout << "Using CUDA Lanczos method" << std::endl;
+        //     lanczos_cuda(H, hilbert_space_dim, 
+        //                 params.max_iterations, params.num_eigenvalues, 
+        //                 params.tolerance, results.eigenvalues, 
+        //                 params.output_dir, params.compute_eigenvectors);
+        //     break;
+        // case DiagonalizationMethod::LANCZOS_CUDA_SELECTIVE:
+        //     std::cout << "Using CUDA Lanczos with selective reorthogonalization" << std::endl;
+        //     lanczos_selective_reorth_cuda(H, hilbert_space_dim, 
+        //                         params.max_iterations, params.num_eigenvalues, 
+        //                         params.tolerance, results.eigenvalues, 
+        //                         params.output_dir, params.compute_eigenvectors);
+        //     break;
+        // case DiagonalizationMethod::LANCZOS_CUDA_NO_ORTHO:
+        //     std::cout << "Using CUDA Lanczos without reorthogonalization" << std::endl;
+        //     lanczos_no_ortho_cuda(H, hilbert_space_dim, 
+        //                         params.max_iterations, params.num_eigenvalues, 
+        //                         params.tolerance, results.eigenvalues, 
+        //                         params.output_dir, params.compute_eigenvectors);
+        //     break;
+
+        // case DiagonalizationMethod::FULL_CUDA:
+        //     std::cout << "Using CUDA full diagonalization" << std::endl;
+        //     full_diagonalization_cuda(H, hilbert_space_dim, params.num_eigenvalues, 
+        //                             results.eigenvalues, params.output_dir, 
+        //                             params.compute_eigenvectors);
+        //     break;
 
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;
@@ -644,34 +679,34 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     std::vector<int> block_sizes;
 
     // Build and save symmetrized blocks if needed
-    if (!sym_blocks_exists) {
-        hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
-        block_sizes = hamiltonian.symmetrized_block_ham_sizes;
-    } else {
-        std::cout << "Using existing symmetrized blocks from " << sym_blocks_dir << std::endl;
+    // if (!sym_blocks_exists) {
+    hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+    block_sizes = hamiltonian.symmetrized_block_ham_sizes;
+    // } else {
+    //     std::cout << "Using existing symmetrized blocks from " << sym_blocks_dir << std::endl;
         
-        // We need to scan the sym_blocks directory to get block sizes
-        for (int block_idx = 0; ; block_idx++) {
-            std::string block_file = sym_blocks_dir + "/block_" + std::to_string(block_idx) + ".dat";
-            if (stat((block_file).c_str(), &buffer) != 0) {
-                break; // File doesn't exist, no more blocks
-            }
+    //     // We need to scan the sym_blocks directory to get block sizes
+    //     for (int block_idx = 0; ; block_idx++) {
+    //         std::string block_file = sym_blocks_dir + "/block_" + std::to_string(block_idx) + ".dat";
+    //         if (stat((block_file).c_str(), &buffer) != 0) {
+    //             break; // File doesn't exist, no more blocks
+    //         }
             
-            // Open the block file to determine its dimension
-            std::ifstream file(block_file);
-            if (!file.is_open()) {
-                std::cerr << "Warning: Could not open block file: " << block_file << std::endl;
-                continue;
-            }
+    //         // Open the block file to determine its dimension
+    //         std::ifstream file(block_file);
+    //         if (!file.is_open()) {
+    //             std::cerr << "Warning: Could not open block file: " << block_file << std::endl;
+    //             continue;
+    //         }
             
-            // Read the first line which contains the block size
-            int block_size;
-            file >> block_size;
-            block_sizes.push_back(block_size);
+    //         // Read the first line which contains the block size
+    //         int block_size;
+    //         file >> block_size;
+    //         block_sizes.push_back(block_size);
             
-            file.close();
-        }
-    }
+    //         file.close();
+    //     }
+    // }
     // Get the sizes of the symmetrized blocks    
     if (block_sizes.empty()) {
         throw std::runtime_error("No symmetrized blocks found. Failed to generate symmetrized basis.");

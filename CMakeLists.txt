@@ -188,29 +188,29 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(test_lanczos OpenMP::OpenMP_CXX)
 endif()
 
-# Add test_lanczos_cuda executable (only if CUDA is enabled)
-if(WITH_CUDA)
-    cuda_add_executable(test_lanczos_cuda ${SRC_DIR}/test_lanczos_cuda.cu)
+# # Add test_lanczos_cuda executable (only if CUDA is enabled)
+# if(WITH_CUDA)
+#     cuda_add_executable(test_lanczos_cuda ${SRC_DIR}/test_lanczos_cuda.cu)
 
-    # Link with libraries
-    target_link_libraries(test_lanczos_cuda
-        lanczos_cuda
-        ${CUDA_LIBRARIES}
-        ${CUBLAS_LIBRARY}
-        ${CUSOLVER_LIBRARY}
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${ARPACK_LIBRARY}
-    )
+#     # Link with libraries
+#     target_link_libraries(test_lanczos_cuda
+#         lanczos_cuda
+#         ${CUDA_LIBRARIES}
+#         ${CUBLAS_LIBRARY}
+#         ${CUSOLVER_LIBRARY}
+#         ${BLAS_LIBRARIES}
+#         ${LAPACK_LIBRARIES}
+#         ${LAPACKE_LIBRARIES}
+#         ${ARPACK_LIBRARY}
+#     )
     
-    # Add MPI if enabled
-    if(WITH_MPI)
-        target_link_libraries(test_lanczos_cuda ${MPI_CXX_LIBRARIES})
-    endif()
+#     # Add MPI if enabled
+#     if(WITH_MPI)
+#         target_link_libraries(test_lanczos_cuda ${MPI_CXX_LIBRARIES})
+#     endif()
     
-    # Add OpenMP to test_lanczos_cuda if available
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(test_lanczos_cuda OpenMP::OpenMP_CXX)
-    endif()
-endif()
+#     # Add OpenMP to test_lanczos_cuda if available
+#     if(OpenMP_CXX_FOUND)
+#         target_link_libraries(test_lanczos_cuda OpenMP::OpenMP_CXX)
+#     endif()
+# endif()
