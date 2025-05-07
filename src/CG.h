@@ -1145,8 +1145,8 @@ void cg_diagonalization(
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
-            std::string evec_file = evec_dir + "/eigenvector_0.bin";
-            std::ofstream outfile(evec_file, std::ios::binary);
+            std::string evec_file = evec_dir + "/eigenvector_0.dat";
+            std::ofstream outfile(evec_file);
             if (outfile) {
                 outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                 outfile.close();
@@ -1156,8 +1156,8 @@ void cg_diagonalization(
             }
             
             // Save eigenvalues to a file
-            std::string eval_file = evec_dir + "/eigenvalues.bin";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::string eval_file = evec_dir + "/eigenvalues.dat";
+            std::ofstream eval_outfile(eval_file);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -1180,8 +1180,8 @@ void cg_diagonalization(
             system(cmd.c_str());
             
             for (size_t i = 0; i < eigenvectors.size(); i++) {
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                std::ofstream outfile(evec_file, std::ios::binary);
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                std::ofstream outfile(evec_file);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
                     outfile.close();
@@ -1189,8 +1189,8 @@ void cg_diagonalization(
             }
             
             // Save eigenvalues to a file
-            std::string eval_file = evec_dir + "/eigenvalues.bin";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::string eval_file = evec_dir + "/eigenvalues.dat";
+            std::ofstream eval_outfile(eval_file);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -1220,8 +1220,8 @@ void cg_diagonalization(
             
             int num_evecs = std::min(exct, (int)eigenvectors.size());
             for (int i = 0; i < num_evecs; i++) {
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                std::ofstream outfile(evec_file, std::ios::binary);
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                std::ofstream outfile(evec_file);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
                     outfile.close();
@@ -1229,8 +1229,8 @@ void cg_diagonalization(
             }
             
             // Save eigenvalues to a file
-            std::string eval_file = evec_dir + "/eigenvalues.bin";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::string eval_file = evec_dir + "/eigenvalues.dat";
+            std::ofstream eval_outfile(eval_file);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -1255,8 +1255,8 @@ void cg_diagonalization(
             
             int num_evecs = std::min(exct, (int)eigenvectors.size());
             for (int i = 0; i < num_evecs; i++) {
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                std::ofstream outfile(evec_file, std::ios::binary);
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                std::ofstream outfile(evec_file);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
                     outfile.close();
@@ -1264,8 +1264,8 @@ void cg_diagonalization(
             }
             
             // Save eigenvalues to a file
-            std::string eval_file = evec_dir + "/eigenvalues.bin";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::string eval_file = evec_dir + "/eigenvalues.dat";
+            std::ofstream eval_outfile(eval_file);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -1646,8 +1646,8 @@ void lobpcg_eigenvalues(
         system(cmd.c_str());
         
         for (size_t i = 0; i < eigenvectors.size(); i++) {
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-            std::ofstream outfile(evec_file, std::ios::binary);
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+            std::ofstream outfile(evec_file);
             if (outfile) {
                 outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
                 outfile.close();
@@ -1655,8 +1655,8 @@ void lobpcg_eigenvalues(
         }
         
         // Save eigenvalues to a file
-        std::string eval_file = evec_dir + "/eigenvalues.bin";
-        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        std::string eval_file = evec_dir + "/eigenvalues.dat";
+        std::ofstream eval_outfile(eval_file);
         if (eval_outfile) {
             size_t n_evals = eigenvalues.size();
             eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));

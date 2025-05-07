@@ -329,7 +329,7 @@ TPQThermodynamicData microcanonical_tpq(
         // Save initial state if requested
         if (save_states && !dir.empty()) {
             std::string state_file = dir + "/mc_tpq_state_sample" + 
-                                     std::to_string(sample) + "_step0.bin";
+                                     std::to_string(sample) + "_step0.dat";
             std::ofstream outfile(state_file, std::ios::binary);
             if (outfile) {
                 outfile.write(reinterpret_cast<char*>(state.data()), N * sizeof(Complex));
@@ -357,7 +357,7 @@ TPQThermodynamicData microcanonical_tpq(
             if (save_states && !dir.empty()) {
                 std::string state_file = dir + "/mc_tpq_state_sample" + 
                                          std::to_string(sample) + "_step" + 
-                                         std::to_string(step) + ".bin";
+                                         std::to_string(step) + ".dat";
                 std::ofstream outfile(state_file, std::ios::binary);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(state.data()), N * sizeof(Complex));
@@ -550,7 +550,7 @@ TPQThermodynamicData canonical_tpq(
             if (save_states && !dir.empty()) {
                 std::string state_file = dir + "/canonical_tpq_state_sample" + 
                                         std::to_string(sample) + "_beta" + 
-                                        std::to_string(beta) + ".bin";
+                                        std::to_string(beta) + ".dat";
                 std::ofstream outfile(state_file, std::ios::binary);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(state.data()), N * sizeof(Complex));

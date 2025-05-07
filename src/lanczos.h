@@ -256,7 +256,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 // Helper function to read a basis vector from file
 ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
     ComplexVector vec(N);
-    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ifstream infile(filename, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
@@ -268,7 +268,7 @@ ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
 
 // Helper function to write a basis vector to file
 bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
-    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+    std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile) {
         std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
@@ -390,7 +390,7 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
                 }
                 
                 // Save to file
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".bin";
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".dat";
                 std::ofstream evec_outfile(evec_file, std::ios::binary);
                 if (!evec_outfile) {
                     std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
@@ -420,7 +420,7 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
 
     // Save eigenvalues to a single file
-    std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+    std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
     std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
     if (!eval_outfile) {
         std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
@@ -985,7 +985,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     
     // Write initial block to disk
     for (int j = 0; j < block_size; j++) {
-        std::string vector_file = temp_dir + "/block_0_vector_" + std::to_string(j) + ".bin";
+        std::string vector_file = temp_dir + "/block_0_vector_" + std::to_string(j) + ".dat";
         std::ofstream outfile(vector_file, std::ios::binary);
         if (!outfile) {
             std::cerr << "Error: Cannot open file " << vector_file << " for writing" << std::endl;
@@ -1010,7 +1010,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         
         for (int j = 0; j < block_size; j++) {
             std::string vector_file = temp_dir + "/block_" + std::to_string(block_idx) + 
-                                    "_vector_" + std::to_string(j) + ".bin";
+                                    "_vector_" + std::to_string(j) + ".dat";
             std::ifstream infile(vector_file, std::ios::binary);
             if (!infile) {
                 std::cerr << "Error: Cannot open file " << vector_file << " for reading" << std::endl;
@@ -1187,7 +1187,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         // Write the next block to disk
         for (int b = 0; b < block_size; b++) {
             std::string vector_file = temp_dir + "/block_" + std::to_string(j+1) + 
-                                    "_vector_" + std::to_string(b) + ".bin";
+                                    "_vector_" + std::to_string(b) + ".dat";
             std::ofstream outfile(vector_file, std::ios::binary);
             if (!outfile) {
                 std::cerr << "Error: Cannot open file " << vector_file << " for writing" << std::endl;
@@ -1366,7 +1366,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
                 Complex scale = Complex(1.0/norm, 0.0);
                 cblas_zscal(N, &scale, full_evecs[i].data(), 1);
                 
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(start_idx + i) + ".bin";
+                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(start_idx + i) + ".dat";
                 std::ofstream outfile(evec_file, std::ios::binary);
                 if (outfile) {
                     outfile.write(reinterpret_cast<char*>(full_evecs[i].data()), N * sizeof(Complex));
@@ -1376,7 +1376,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         }
         
         // Save eigenvalues to file
-        std::string eval_file = evec_dir + "/eigenvalues.bin";
+        std::string eval_file = evec_dir + "/eigenvalues.dat";
         std::ofstream eval_outfile(eval_file, std::ios::binary);
         if (eval_outfile) {
             size_t n_evals = eigenvalues.size();
@@ -1512,7 +1512,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     system(cmd.c_str());
 
     // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.bin";
+    std::string basis_file = temp_dir + "/basis_0.dat";
     std::ofstream outfile(basis_file, std::ios::binary);
     if (!outfile) {
         std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
@@ -1536,7 +1536,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     // Helper function to read basis vector from file
     auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
         ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".bin";
+        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
         std::ifstream infile(filename, std::ios::binary);
         if (!infile) {
             std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
@@ -1595,7 +1595,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         
         // Store basis vector to file
         if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".bin";
+            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".dat";
             std::ofstream outfile(next_basis_file, std::ios::binary);
             if (!outfile) {
                 std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
@@ -2454,7 +2454,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             }
             
             // Save to file
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ofstream evec_outfile(evec_file, std::ios::binary);
             if (!evec_outfile) {
                 std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
@@ -2470,7 +2470,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         }
         
         // Save eigenvalues to a single file
-        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
         std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
         if (!eval_outfile) {
             std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;
@@ -2618,7 +2618,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         for (int i = 0; i < m; i++) {
             int orig_idx = eig_pairs[i].second;
             // Read eigenvector from file
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(orig_idx) + ".bin";
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(orig_idx) + ".dat";
             std::ifstream infile(evec_file, std::ios::binary);
             if (infile) {
                 ComplexVector evec_complex(m);
@@ -2671,7 +2671,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     cblas_zscal(N, &scale, ritz_vector.data(), 1);
                     
                     // Save eigenvector to file
-                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                    std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
                     std::ofstream evec_outfile(evec_file, std::ios::binary);
                     if (evec_outfile) {
                         evec_outfile.write(reinterpret_cast<char*>(ritz_vector.data()), N * sizeof(Complex));
@@ -2680,7 +2680,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                 }
                 
                 // Save eigenvalues to a single file
-                std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+                std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
                 std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
                 if (eval_outfile) {
                     // Write the number of eigenvalues first
@@ -2889,7 +2889,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         for (int i = 0; i < k; i++) {
             // We need to read the eigenvector from file to calculate the residual
             ComplexVector evec(m);
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ifstream infile(evec_file, std::ios::binary);
             if (infile) {
                 infile.read(reinterpret_cast<char*>(evec.data()), m * sizeof(Complex));
@@ -2921,7 +2921,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                     ComplexVector eigenvector(N, Complex(0.0, 0.0));
                     
                     // Read eigenvector of tridiagonal matrix
-                    std::string tri_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                    std::string tri_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
                     ComplexVector tri_evec(m);
                     std::ifstream infile(tri_evec_file, std::ios::binary);
                     if (infile) {
@@ -2942,7 +2942,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                         }
                         
                         // Save to file
-                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
                         std::ofstream evec_outfile(evec_file, std::ios::binary);
                         evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                         evec_outfile.close();
@@ -2950,7 +2950,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 }
                 
                 // Save eigenvalues to file
-                std::string eval_file = evec_dir + "/eigenvalues.bin";
+                std::string eval_file = evec_dir + "/eigenvalues.dat";
                 std::ofstream eval_outfile(eval_file, std::ios::binary);
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -2981,7 +2981,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         // We also need the eigenvectors of the tridiagonal matrix
         std::vector<ComplexVector> tri_evecs(m, ComplexVector(m));
         for (int i = 0; i < m; i++) {
-            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ifstream infile(evec_file, std::ios::binary);
             if (infile) {
                 infile.read(reinterpret_cast<char*>(tri_evecs[i].data()), m * sizeof(Complex));
@@ -3323,7 +3323,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                 meta_in.close();
                 
                 // Read the eigenvalues from this slice for mapping
-                std::string eval_file = src_dir + "/eigenvalues.bin";
+                std::string eval_file = src_dir + "/eigenvalues.dat";
                 std::ifstream eval_in(eval_file, std::ios::binary);
                 if (!eval_in) {
                     continue;
@@ -3357,8 +3357,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     int target_idx = eigenvalue_indices[closest_match];
                     
                     // Copy the eigenvector
-                    std::string src_file = src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                    std::string dst_file = evec_dir + "/eigenvector_" + std::to_string(target_idx) + ".bin";
+                    std::string src_file = src_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                    std::string dst_file = evec_dir + "/eigenvector_" + std::to_string(target_idx) + ".dat";
                     
                     std::string copy_cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
                     system(copy_cmd.c_str());
@@ -3413,7 +3413,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     // Load group of degenerate eigenvectors
                     std::vector<ComplexVector> degenerate_vectors;
                     for (int i = 0; i < group.second; i++) {
-                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".dat";
                         std::ifstream infile(evec_file, std::ios::binary);
                         if (!infile) {
                             std::cerr << "Error: Cannot open file " << evec_file << " for reading" << std::endl;
@@ -3432,7 +3432,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     
                     // Save refined vectors
                     for (int i = 0; i < group.second; i++) {
-                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".bin";
+                        std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(index_offset + i) + ".dat";
                         std::ofstream outfile(evec_file, std::ios::binary);
                         if (!outfile) {
                             std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
@@ -3449,7 +3449,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         }
         
         // Save eigenvalues to a file
-        std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+        std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
         std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
         if (eval_outfile) {
             // Write the number of eigenvalues first
@@ -3666,9 +3666,9 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
             // Read the eigenvalues from this slice for mapping
             std::string eval_file;
             if (slice_idx == 0 || slice_idx == num_slices - 1) {
-                eval_file = current_slice_dir + "/lanczos_eigenvectors/eigenvalues.bin";
+                eval_file = current_slice_dir + "/lanczos_eigenvectors/eigenvalues.dat";
             } else {
-                eval_file = current_slice_dir + "/shift_invert_lanczos_results/eigenvalues.bin";
+                eval_file = current_slice_dir + "/shift_invert_lanczos_results/eigenvalues.dat";
             }
             
             std::ifstream eval_in(eval_file, std::ios::binary);
@@ -3709,8 +3709,8 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
                 
                 if (target_idx >= 0) {
                     // Copy the eigenvector file
-                    std::string src_file = evec_src_dir + "/eigenvector_" + std::to_string(i) + ".bin";
-                    std::string dst_file = result_dir + "/eigenvector_" + std::to_string(target_idx) + ".bin";
+                    std::string src_file = evec_src_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+                    std::string dst_file = result_dir + "/eigenvector_" + std::to_string(target_idx) + ".dat";
                     
                     std::string cmd = "cp \"" + src_file + "\" \"" + dst_file + "\"";
                     system(cmd.c_str());
@@ -3719,7 +3719,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
         }
         
         // Save the final eigenvalues
-        std::string eigenvalue_file = result_dir + "/eigenvalues.bin";
+        std::string eigenvalue_file = result_dir + "/eigenvalues.dat";
         std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
         if (eval_outfile) {
             // Write the number of eigenvalues first
@@ -3813,7 +3813,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
 //             }
             
 //             // Save to file
-//             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+//             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
 //             std::ofstream evec_outfile(evec_file, std::ios::binary);
 //             if (!evec_outfile) {
 //                 std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
@@ -3829,7 +3829,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
 //         }
         
 //         // Save eigenvalues to a single file
-//         std::string eigenvalue_file = evec_dir + "/eigenvalues.bin";
+//         std::string eigenvalue_file = evec_dir + "/eigenvalues.dat";
 //         std::ofstream eval_outfile(eigenvalue_file, std::ios::binary);
 //         if (!eval_outfile) {
 //             std::cerr << "Error: Cannot open file " << eigenvalue_file << " for writing" << std::endl;

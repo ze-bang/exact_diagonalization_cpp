@@ -1340,7 +1340,7 @@ public:
         if (!file.is_open()) {
             throw std::runtime_error("Could not open file: " + dir +"/sym_basis/sym_basis"+std::to_string(index)+".dat");
         }
-        std::vector<Complex> sym_basis((1<<n_bits_), 0.0);
+        std::vector<Complex> sym_basis((1ULL<<n_bits_), 0.0);
         std::string line;
         while (std::getline(file, line)) {
             std::istringstream iss(line);

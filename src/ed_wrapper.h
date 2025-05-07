@@ -13,6 +13,55 @@
 #include "lanczos_cuda.h"
 #endif
 
+std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for addition.");
+    }
+    std::vector<Complex> result(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        result[i] = a[i] + b[i];
+    }
+    return result;
+}
+std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
+    }
+    std::vector<Complex> result(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        result[i] = a[i] - b[i];
+    }
+    return result;
+}
+
+std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for addition.");
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        a[i] += b[i];
+    }
+    return a;
+}
+
+std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        a[i] -= b[i];
+    }
+    return a;
+}
+
+std::vector<Complex> operator* (const std::vector<Complex>& a, const Complex& b) {
+    std::vector<Complex> result(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        result[i] = a[i] * b;
+    }
+    return result;
+}
+
 // Enum for available diagonalization methods
 enum class DiagonalizationMethod {
     LANCZOS,               // Standard Lanczos algorithm
@@ -582,9 +631,74 @@ EDResults exact_diagonalization_from_directory(
     std::string single_site_file = directory + "/" + single_site_filename;
     
     // Call the file-based wrapper
-    return exact_diagonalization_from_files(
+    EDResults results = exact_diagonalization_from_files(
         interaction_file, single_site_file, method, params, format
     );
+
+    // Check if we need to convert binary eigenvectors to sparse text format
+    if (params.compute_eigenvectors && !params.output_dir.empty()) {
+        std::string eigenvectors_dir = params.output_dir + "/eigenvectors";
+        std::string sparse_dir = params.output_dir + "/eigenvectors";
+        
+        // Create directory for sparse format eigenvectors
+        std::string cmd = "mkdir -p " + sparse_dir;
+        system(cmd.c_str());
+        
+        std::cout << "Converting binary eigenvectors to sparse text format..." << std::endl;
+        
+        // Find all eigenvector binary files
+        for (size_t i = 0; i < results.eigenvalues.size(); i++) {
+            std::string binary_file = eigenvectors_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+            std::string sparse_file = sparse_dir + "/eigenvector_" + std::to_string(i) + ".txt";
+            
+            // Check if binary file exists
+            std::ifstream bin_file(binary_file, std::ios::binary);
+            if (!bin_file.is_open()) {
+                std::cerr << "Warning: Could not open binary eigenvector file: " << binary_file << std::endl;
+                continue;
+            }
+            
+            // Get file size to determine vector dimension
+            bin_file.seekg(0, std::ios::end);
+            std::streamsize file_size = bin_file.tellg();
+            int vector_dim = file_size / sizeof(Complex);
+            bin_file.seekg(0, std::ios::beg);
+            
+            // Read binary data
+            std::vector<Complex> eigenvector(vector_dim);
+            bin_file.read(reinterpret_cast<char*>(&eigenvector[0]), file_size);
+            bin_file.close();
+            
+            // Write sparse text format
+            std::ofstream sparse_out(sparse_file);
+            if (!sparse_out.is_open()) {
+                std::cerr << "Error: Could not create sparse eigenvector file: " << sparse_file << std::endl;
+                continue;
+            }
+            
+            sparse_out << vector_dim << std::endl;
+            
+            // Write only non-zero entries
+            for (int j = 0; j < vector_dim; j++) {
+                if (std::abs(eigenvector[j]) > 1e-10) {
+                    sparse_out << j << " " << std::scientific << std::setprecision(15) 
+                              << eigenvector[j].real() << " " << eigenvector[j].imag() << std::endl;
+                }
+            }
+            sparse_out.close();
+            std::cout << "Converted eigenvector " << i << " to sparse format" << std::endl;
+            // Delete binary file after successful conversion to save space
+            if (std::remove(binary_file.c_str()) == 0) {
+                std::cout << "Deleted binary file: " << binary_file << std::endl;
+            } else {
+                std::cerr << "Warning: Failed to delete binary file: " << binary_file << std::endl;
+            }
+        }
+        std::cout << "Conversion complete. Sparse format eigenvectors saved in: " << sparse_dir << std::endl;
+    }
+
+
+    return results;
 }
 
 
@@ -685,31 +799,13 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // if (!sym_blocks_exists) {
     hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
     block_sizes = hamiltonian.symmetrized_block_ham_sizes;
-    // } else {
-    //     std::cout << "Using existing symmetrized blocks from " << sym_blocks_dir << std::endl;
-        
-    //     // We need to scan the sym_blocks directory to get block sizes
-    //     for (int block_idx = 0; ; block_idx++) {
-    //         std::string block_file = sym_blocks_dir + "/block_" + std::to_string(block_idx) + ".dat";
-    //         if (stat((block_file).c_str(), &buffer) != 0) {
-    //             break; // File doesn't exist, no more blocks
-    //         }
-            
-    //         // Open the block file to determine its dimension
-    //         std::ifstream file(block_file);
-    //         if (!file.is_open()) {
-    //             std::cerr << "Warning: Could not open block file: " << block_file << std::endl;
-    //             continue;
-    //         }
-            
-    //         // Read the first line which contains the block size
-    //         int block_size;
-    //         file >> block_size;
-    //         block_sizes.push_back(block_size);
-            
-    //         file.close();
-    //     }
-    // }
+    std::cout << "Found " << block_sizes.size() << " symmetrized blocks." << std::endl;
+    std::cout << "With sizes: ";
+    for (const auto& size : block_sizes) {
+        std::cout << size << " ";
+    }
+    std::cout << std::endl;
+
     // Get the sizes of the symmetrized blocks    
     if (block_sizes.empty()) {
         throw std::runtime_error("No symmetrized blocks found. Failed to generate symmetrized basis.");
@@ -733,9 +829,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     };
     std::vector<EigenInfo> all_eigen_info;
     
-    // 4. Diagonalize each block separately
-    std::cout << "Found " << block_sizes.size() << " symmetrized blocks." << std::endl;
-    
+    int block_start_dim = 0;
+    // 4. Diagonalize each block separately    
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         int block_dim = block_sizes[block_idx];
         
@@ -797,31 +892,35 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         
         // Transform and save eigenvectors if requested
         if (params.compute_eigenvectors) {
+
+            // Make directory for eigenvectors
+            std::string eigenvector_dir = params.output_dir + "/eigenvectors";
+            std::string cmd = "mkdir -p " + eigenvector_dir;
+            system(cmd.c_str());
+
+
             std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
             
             for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
                 // Path to the block eigenvector
                 std::string block_eigenvector_file = block_params.output_dir + 
                                                    "/eigenvectors/eigenvector_" + std::to_string(eigen_idx) + ".dat";
-                
+
+                std::cout << "Reading eigenvector from: " << block_eigenvector_file << std::endl;
+
                 // Read the block eigenvector
-                std::vector<Complex> block_eigenvector;
-                std::ifstream eigen_file(block_eigenvector_file);
+                std::vector<Complex> block_eigenvector(block_dim);
+                std::ifstream eigen_file(block_eigenvector_file, std::ios::binary);
                 if (!eigen_file.is_open()) {
                     std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
                     continue;
                 }
-                
-                block_eigenvector.resize(block_dim);
-                for (int i = 0; i < block_dim; ++i) {
-                    double real, imag;
-                    eigen_file >> real >> imag;
-                    block_eigenvector[i] = Complex(real, imag);
-                }
+
+                eigen_file.read(reinterpret_cast<char*>(&block_eigenvector[0]), block_dim * sizeof(Complex));
                 eigen_file.close();
                 
                 // Create a file for the transformed eigenvector
-                std::string transformed_file = params.output_dir + "/eigenvector_block" + 
+                std::string transformed_file = params.output_dir + "/eigenvectors/eigenvector_block" + 
                                             std::to_string(block_idx) + "_" + 
                                             std::to_string(eigen_idx) + ".dat";
                 std::ofstream out_file(transformed_file);
@@ -829,31 +928,27 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                     std::cerr << "Warning: Could not open file for transformed eigenvector: " << transformed_file << std::endl;
                     continue;
                 }
+
+                std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
                 
-                // Read the symmetry basis for this block
-                std::vector<Complex> sym_basis = hamiltonian.read_sym_basis(block_idx, directory);
-                
-                // Transform the eigenvector using the symmetry basis
-                int hilbert_space_dim = 1 << num_sites;
-                for (int orig_idx = 0; orig_idx < hilbert_space_dim; ++orig_idx) {
-                    Complex coeff(0.0, 0.0);
-                    
-                    // Compute the coefficient in the original basis
-                    for (int sym_idx = 0; sym_idx < block_dim; ++sym_idx) {
-                        // Get the coefficient of the original basis state in the symmetry basis
-                        // and multiply by the eigenvector coefficient
-                        coeff += sym_basis[orig_idx + sym_idx * hilbert_space_dim] * block_eigenvector[sym_idx];
-                    }
-                    
-                    // Only write non-zero coefficients to save space
-                    if (std::abs(coeff) > 1e-10) {
-                        out_file << orig_idx << " " << coeff.real() << " " << coeff.imag() << std::endl;
-                    }
+                for (size_t i = 0; i < block_dim; ++i) {
+                    std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);
+                    transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
                 }
-                
+                out_file << transformed_eigenvector.size() << std::endl;
+                // Write the transformed eigenvector to file
+                for (size_t i = 0; i < transformed_eigenvector.size(); ++i) {
+                    // Write only non-zero entries
+                    if (std::abs(transformed_eigenvector[i]) < 1e-10) continue;
+                    out_file << i << " " << transformed_eigenvector[i].real() << " " 
+                            << transformed_eigenvector[i].imag() << std::endl;
+                }
+                out_file << std::endl;
+
                 out_file.close();
             }
         }
+        block_start_dim += block_dim;  // Update the starting dimension for the next block
     }
     
     // 5. Sort eigenvalues
