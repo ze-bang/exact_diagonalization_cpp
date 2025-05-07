@@ -640,6 +640,7 @@ void compute_spin_expectations(
     const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
     const std::string output_dir, // Directory for output files
     int num_sites,              // Number of sites
+    float spin_l,              // Spin length (e.g., 0.5 for spin-1/2)
     double temperature,         // Temperature T (in energy units)
     bool print_output = true    // Whether to print the results to console
 ) {
@@ -686,9 +687,9 @@ void compute_spin_expectations(
     std::vector<SingleSiteOperator> Sz_ops;
     
     for (int site = 0; site < num_sites; site++) {
-        Sp_ops.emplace_back(num_sites, 0, site);
-        Sm_ops.emplace_back(num_sites, 1, site);
-        Sz_ops.emplace_back(num_sites, 2, site);
+        Sp_ops.emplace_back(num_sites, spin_l, 0, site);
+        Sm_ops.emplace_back(num_sites, spin_l, 1, site);
+        Sz_ops.emplace_back(num_sites, spin_l, 2, site);
     }
     
     // Process each eigenvector

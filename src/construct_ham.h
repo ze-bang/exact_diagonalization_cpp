@@ -931,7 +931,7 @@ public:
     std::vector<int> symmetrized_block_ham_sizes;
     // Constructor
     
-    Operator(int n_bits) : n_bits_(n_bits) {}
+    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {}
 
     // Copy assignment operator
     Operator& operator=(const Operator& other) {
@@ -1122,7 +1122,7 @@ public:
         AutomorphismPowerRepresentation automorphism_power_representation;
         std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
         std::cout << "Power representation generated.\n";
-        std::cout << "Symmetrized Hamiltonain generated.\n";
+        std::cout << "Symmetrized Hamiltonian generated.\n";
 
     
 
@@ -1153,56 +1153,90 @@ public:
 
         // Create a filename based on the quantum numbers
         std::string filename = sym_basis_dir + "/sym_basis";
-
         symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
         int count = 0;
+        
         // For each symmetry sector (combination of quantum numbers)
-        for (const auto& e_i : all_quantum_numbers) {            
-            
-
-            // Total number of basis states in the Hilbert space
+        for (const auto& e_i : all_quantum_numbers) {
+            std::vector<std::vector<Complex>> current_sector_basis;
+            std::vector<size_t> representative_states;
+            std::set<size_t> processed_states;
             size_t total_basis_states = 1 << n_bits_;
             
-            // For each standard basis state
+            // Process basis states in order of their binary representation
             for (size_t basis = 0; basis < total_basis_states; basis++) {
-                // Generate the symmetrized basis vector for this state
-                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
-                // Check if this symmetrized basis vector is zero (can happen in some symmetry sectors)
-                double norm_squared = 0.0;
-                for (const auto& val : sym_basis_vec) {
-                    norm_squared += std::norm(val);
-                }
-                
-                if (norm_squared < 1e-10) {
-                    continue; // Skip zero vectors
-                }
-                
-                // Check if this symmetrized basis vector is already in our collection
+            // Skip states that have already been processed as part of another orbit
+            if (processed_states.find(basis) != processed_states.end()) {
+                continue;
+            }
+            
+            // Get orbit of the current state under symmetry operations
+            std::set<size_t> orbit;
+            for (const auto& perm : max_clique_here) {
+                orbit.insert(applyPermutation(basis, perm));
+            }
+            
+            // Mark all states in the orbit as processed
+            processed_states.insert(orbit.begin(), orbit.end());
+            
+            // Generate symmetrized basis vector for this representative state
+            std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
+            
+            // Check norm of the vector (non-zero indicates valid basis vector in this sector)
+            double norm_squared = 0.0;
+            for (const auto& val : sym_basis_vec) {
+                norm_squared += std::norm(val);
+            }
+            
+            if (norm_squared > 1e-10) {
+                // Check uniqueness using a more efficient method
                 bool is_unique = true;
-                for (const auto& existing_vec : unique_sym_basis) {
-                    // Calculate overlap between the vectors
-                    Complex overlap(0.0, 0.0);
+                
+                // Find the first non-zero component to use for normalization comparison
+                size_t first_nonzero = 0;
+                while (first_nonzero < total_basis_states && std::abs(sym_basis_vec[first_nonzero]) < 1e-10) {
+                first_nonzero++;
+                }
+                
+                if (first_nonzero < total_basis_states) {
+                // Normalize the phase using the first non-zero component
+                Complex phase_factor = sym_basis_vec[first_nonzero] / std::abs(sym_basis_vec[first_nonzero]);
+                for (auto& val : sym_basis_vec) {
+                    val /= phase_factor; // Normalize phase
+                }
+                
+                // Check uniqueness against existing basis vectors
+                for (const auto& existing_vec : current_sector_basis) {
+                    // Compute squared distance instead of overlap
+                    double distance_squared = 0.0;
                     for (size_t i = 0; i < total_basis_states; i++) {
-                        overlap += std::conj(existing_vec[i]) * sym_basis_vec[i];
+                    distance_squared += std::norm(existing_vec[i] - sym_basis_vec[i]);
                     }
                     
-                    // If the absolute value of the overlap is close to 1, the vectors
-                    // are the same up to a global phase factor exp(i*θ)
-                    if (std::abs(std::abs(overlap) - 1.0) < 1e-10) {
-                        is_unique = false;
-                        break;
+                    if (distance_squared < 1e-10) {
+                    is_unique = false;
+                    break;
                     }
                 }
                 
-                // If the symmetrized basis vector is unique, add it to our collection
                 if (is_unique) {
-                    unique_sym_basis.push_back(sym_basis_vec);
-                    symmetrized_block_ham_sizes[count]++;
+                    current_sector_basis.push_back(sym_basis_vec);
+                    representative_states.push_back(basis);
+                }
                 }
             }
+            }
+            
+            // Add all unique basis vectors for this sector to the global list
+            unique_sym_basis.insert(unique_sym_basis.end(), current_sector_basis.begin(), current_sector_basis.end());
+            symmetrized_block_ham_sizes[count] = current_sector_basis.size();
             count++;
+            
+            // Progress indicator
+            std::cout << "\rProcessed symmetry sector " << count << "/" << all_quantum_numbers.size() 
+                  << " (found " << current_sector_basis.size() << " basis vectors)" << std::flush;
         }
-        
+        std::cout << std::endl;
         // Write the number of unique basis vectors
         std::cout << "Number of unique symmetrized basis vectors: " << unique_sym_basis.size() << std::endl;
         std::cout << "Block sizes: ";
@@ -1305,7 +1339,7 @@ public:
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 // Check if all bits match their expected values
                 if (Op == 2){
-                    return {basis, Complex(E,F)*0.5*pow(-1,(basis >> indx) & 1)};
+                    return {basis, Complex(E,F)*double(spin_l_)*pow(-1,(basis >> indx) & 1)};
                 }
                 else{
                     if (((basis >> indx) & 1) != Op) {
@@ -1362,7 +1396,7 @@ public:
                     // Both are identity operators with phase factors
                     int bit1 = (basis >> indx1) & 1;
                     int bit2 = (basis >> indx2) & 1;
-                    return {basis, Complex(E, F)* 0.25 * pow(-1, bit1) * pow(-1, bit2)};
+                    return {basis, Complex(E, F)* double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
                 } 
                 else if (Op1 == 2) {
                     // Op1 is identity with phase, Op2 is bit flip
@@ -1371,7 +1405,7 @@ public:
                     
                     if (bit2_matches) {
                         int flipped_basis = basis ^ (1 << indx2);
-                        return {flipped_basis, Complex(E, F) * 0.5 * pow(-1, bit1)};
+                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit1)};
                     }
                 } 
                 else if (Op2 == 2) {
@@ -1382,7 +1416,7 @@ public:
                     if (bit1_matches) {
                         // Flip the first bit
                         int flipped_basis = basis ^ (1 << indx1);
-                        return {flipped_basis, Complex(E, F)* 0.5 * pow(-1, bit2)};
+                        return {flipped_basis, Complex(E, F)* double(spin_l_) * pow(-1, bit2)};
                     }
                 } 
                 else {
@@ -1408,7 +1442,7 @@ public:
         addTransform([=](int basis) -> std::pair<int, Complex> {
             // Check if all bits match their expected values
             if (Op == 2){
-                return {basis, Complex(1.0,0.0)*0.5*pow(-1,(basis >> indx) & 1)};
+                return {basis, Complex(1.0,0.0)*double(spin_l_)*pow(-1,(basis >> indx) & 1)};
             }
             else{
                 if (((basis >> indx) & 1) != Op) {
@@ -1429,7 +1463,7 @@ public:
                 // Both are identity operators with phase factors
                 int bit1 = (basis >> indx1) & 1;
                 int bit2 = (basis >> indx2) & 1;
-                return {basis, Complex(1.0, 0.0)* 0.25 * pow(-1, bit1) * pow(-1, bit2)};
+                return {basis, Complex(1.0, 0.0)* double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
             } 
             else if (Op1 == 2) {
                 // Op1 is identity with phase, Op2 is bit flip
@@ -1438,7 +1472,7 @@ public:
                 
                 if (bit2_matches) {
                     int flipped_basis = basis ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * 0.5 * pow(-1, bit1)};
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * pow(-1, bit1)};
                 }
             } 
             else if (Op2 == 2) {
@@ -1449,7 +1483,7 @@ public:
                 if (bit1_matches) {
                     // Flip the first bit
                     int flipped_basis = basis ^ (1 << indx1);
-                    return {flipped_basis, Complex(1.0, 0.0) * 0.5 * pow(-1, bit2)};
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * pow(-1, bit2)};
                 }
             } 
             else {
@@ -1548,6 +1582,7 @@ public:
 private:
     std::vector<TransformFunction> transforms_;
     int n_bits_; // Number of bits in the basis representation
+    float spin_l_;
     const std::array<std::array<double, 4>, 3> operators = {
         {{0, 1, 0, 0}, {0, 0, 1, 0},{1, 0, 0, -1}}
     };
@@ -1595,7 +1630,7 @@ public:
      * @param op Operator type: 0 for X, 1 for Y, 2 for Z
      * @param site_j Site index to apply the operator to
      */
-    SingleSiteOperator(int num_site, int op, int site_j) : Operator(num_site) {
+    SingleSiteOperator(int num_site, float spin_l, int op, int site_j) : Operator(num_site, spin_l) {
         if (op < 0 || op > 2) {
             throw std::invalid_argument("Invalid operator type. Use 0 for X, 1 for Y, 2 for Z");
         }

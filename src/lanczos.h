@@ -1823,16 +1823,16 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H,
         cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
         
         // Full reorthogonalization
-        // for (int k = 0; k <= j; k++) {
-        //     // Read basis vector k from file
-        //     ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
+        for (int k = 0; k <= j; k++) {
+            // Read basis vector k from file
+            ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
             
-        //     Complex overlap;
-        //     cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+            Complex overlap;
+            cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
             
-        //     Complex neg_overlap = -overlap;
-        //     cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-        // }
+            Complex neg_overlap = -overlap;
+            cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+        }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
@@ -2487,6 +2487,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     
     std::cout << "Full diagonalization completed successfully" << std::endl;
 }
+
 
 void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, 
                  int num_eigs, double tol, std::vector<double>& eigenvalues, 
@@ -3200,7 +3201,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             else {
                 double sigma = (slice_start + slice_end) / 2.0;
                 std::cout << "Process " << mpi_rank << ": Using shift-invert Lanczos with shift σ = " << sigma << std::endl;
-                shift_invert_lanczos_robust(H, N, max_slice_size, max_slice_size, sigma, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
+                shift_invert_lanczos(H, N, max_slice_size, max_slice_size, sigma, tol, slice_eigenvalues, slice_dir, compute_eigenvectors);
             }
             
             // Filter eigenvalues to the current slice

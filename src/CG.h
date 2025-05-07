@@ -1141,7 +1141,7 @@ void cg_diagonalization(
         
         // Save eigenvector to file if requested
         if (compute_eigenvectors && !dir.empty()) {
-            std::string evec_dir = dir + "/cg_eigenvectors";
+            std::string evec_dir = dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
@@ -1175,7 +1175,7 @@ void cg_diagonalization(
         
         // Save eigenvectors to files if requested
         if (compute_eigenvectors && !dir.empty()) {
-            std::string evec_dir = dir + "/cg_eigenvectors";
+            std::string evec_dir = dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
@@ -1214,7 +1214,7 @@ void cg_diagonalization(
         
         // Save eigenvectors to files if requested
         if (compute_eigenvectors && !dir.empty()) {
-            std::string evec_dir = dir + "/cg_eigenvectors";
+            std::string evec_dir = dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
@@ -1249,7 +1249,7 @@ void cg_diagonalization(
         
         // Save eigenvectors to files if requested
         if (compute_eigenvectors && !dir.empty()) {
-            std::string evec_dir = dir + "/cg_eigenvectors";
+            std::string evec_dir = dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
@@ -1641,7 +1641,7 @@ void lobpcg_eigenvalues(
     
     // Save eigenvectors to files if requested
     if (compute_eigenvectors && !dir.empty()) {
-        std::string evec_dir = dir + "/lobpcg_eigenvectors";
+        std::string evec_dir = dir + "/eigenvectors";
         std::string cmd = "mkdir -p " + evec_dir;
         system(cmd.c_str());
         

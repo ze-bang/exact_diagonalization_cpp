@@ -30,6 +30,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --measure-spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+        std::cout << "  --spin_length=<value> : Spin length" << std::endl;
         std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
         return 1;
     }
@@ -52,7 +53,43 @@ int main(int argc, char* argv[]) {
     params.num_samples = 20;
 
     // Required parameters - must be specified by user
+    params.num_sites = 0;
+    params.spin_length = 0.0;
+    
+    // Logging configuration
+    bool enable_logging = true;
+    std::string log_file_path = directory + "/ed_log.txt";
+    std::ofstream log_file;
+    
+    if (enable_logging) {
+        log_file.open(log_file_path, std::ios::out | std::ios::app);
+        if (!log_file.is_open()) {
+            std::cerr << "Warning: Could not open log file at " << log_file_path << std::endl;
+            enable_logging = false;
+        } else {
+            // Log start of execution with timestamp
+            auto now = std::chrono::system_clock::now();
+            std::time_t time_now = std::chrono::system_clock::to_time_t(now);
+            log_file << "\n\n=== Execution started at " << std::ctime(&time_now);
+            log_file << "Command line: ";
+            for (int i = 0; i < argc; i++) {
+                log_file << argv[i] << " ";
+            }
+            log_file << std::endl;
+        }
+    }
+    
+    // Helper function to log command output
+    auto log_command = [&](const std::string& command, const std::string& output) {
+        if (enable_logging && log_file.is_open()) {
+            log_file << "\n--- Command: " << command << " ---\n";
+            log_file << output << std::endl;
+            log_file << "--- End output ---\n";
+            log_file.flush();
+        }
+    };
     bool num_sites_specified = false;
+    bool spin_length_specified = false;
     bool full_spectrum = false;
     
     // Default method
@@ -88,6 +125,7 @@ int main(int argc, char* argv[]) {
             else if (method_str == "SHIFT_INVERT_ROBUST") method = DiagonalizationMethod::SHIFT_INVERT_ROBUST;
             else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else if (method_str == "BLOCK_LANCZOS") method = DiagonalizationMethod::BLOCK_LANCZOS;
+            else if (method_str == "OSS") method = DiagonalizationMethod::OSS;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {
@@ -154,6 +192,10 @@ int main(int argc, char* argv[]) {
             params.num_sites = std::stoi(arg.substr(12));
             num_sites_specified = true;
         }
+        else if (arg.find("--spin_length=") == 0) {
+            params.spin_length = std::stod(arg.substr(14));
+            spin_length_specified = true;
+        }
         else if (arg == "--calc_observables") {
             params.compute_eigenvectors = true;
             params.calc_observables = true;
@@ -177,6 +219,15 @@ int main(int argc, char* argv[]) {
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
         return 1;
     }
+
+    if (!spin_length_specified) {
+        std::cerr << "Error: --spin_length parameter is required" << std::endl;
+        std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
+        std::cout << "Required options:" << std::endl;
+        std::cout << "  --spin_length=<value> : Spin length" << std::endl;
+        return 1;
+    }
+
     
     // Create output directories
     std::string standard_output = params.output_dir;
@@ -203,7 +254,7 @@ int main(int argc, char* argv[]) {
             case DiagonalizationMethod::FULL: std::cout << "Full Diagonalization"; break;
             case DiagonalizationMethod::mTPQ: std::cout << "microcanonical Thermal Pure Quantum (mTPQ)"; break;
             case DiagonalizationMethod::cTPQ: std::cout << "canonical Thermal Pure Quantum (cTPQ)"; break;
-            case DiagonalizationMethod::ARPACK: std::cout << "ARPACK"; break;
+            case DiagonalizationMethod::OSS: std::cout << "Optimal spectrum solver"; break;
             default: std::cout << "Other"; break;
         }
         std::cout << std::endl;

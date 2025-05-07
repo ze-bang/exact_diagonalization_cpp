@@ -23,9 +23,10 @@ enum class DiagonalizationMethod {
     LOBPCG,                // Locally optimal block preconditioned conjugate gradient
     KRYLOV_SCHUR,          // Krylov-Schur algorithm
     FULL,                  // Full diagonalization
-    mTPQ,                    // Thermal Pure Quantum states
+    mTPQ,                  // Thermal Pure Quantum states
     cTPQ,
-    ARPACK                  // ARPACK
+    OSS,                   
+    ARPACK                   // ARPACK
 };
 
 // Structure to hold exact diagonalization results
@@ -57,6 +58,7 @@ struct EDParameters {
     double temp_max = 20;
     int num_temp_bins = 100;
     int num_sites = 0; // Number of sites in the system
+    float spin_length = 0.5; // Spin length
 
     bool calc_observables = false; // Calculate custom observables
 };
@@ -185,13 +187,14 @@ EDResults exact_diagonalization_core(
                                params.output_dir, params.compute_eigenvectors);
             break;
         
-        // case DiagonalizationMethod::ARPACK:
-        //     std::cout << "Using ARPACK method" << std::endl;
-        //     arpack_diagonalization(H, hilbert_space_dim, params.max_iterations, 
-        //                      params.num_eigenvalues, params.tolerance, 
-        //                      results.eigenvalues, params.output_dir, 
-        //                      params.compute_eigenvectors);
-        //     break;
+        case DiagonalizationMethod::OSS:
+            std::cout << "Spectrum slicing for full diagonalization" << std::endl;
+            optimal_spectrum_solver(
+                H, hilbert_space_dim, 
+                results.eigenvalues, params.output_dir, 
+                params.compute_eigenvectors, params.tolerance
+            );
+            break;
             
         case DiagonalizationMethod::mTPQ:
             std::cout << "Using microcanonical TPQ (Thermal Pure Quantum states) method" << std::endl;
@@ -359,11 +362,27 @@ EDResults exact_diagonalization_core(
                     for (int i = 0; i < 3; ++i) {
                         std::getline(file, line);
                     }
-                    
+                                            
+                    if (prefix == "one_body_correlations") {
+                        results_file << std::setw(12) << "Temperatures" << " "
+                                    << std::setw(12) << "Beta" << " "
+                                    << std::setw(12) << "Op1" << " "
+                                    << std::setw(12) << "Index1" << " "
+                                    << std::setw(12) << "Expectation" << std::endl;
+                    } else if (prefix == "two_body_correlations") {
+                        results_file << std::setw(12) << "Temperatures" << " "
+                                    << std::setw(12) << "Beta" << " "
+                                    << std::setw(12) << "Op1" << " "
+                                    << std::setw(12) << "Op2" << " "
+                                    << std::setw(12) << "Index1" << " "
+                                    << std::setw(12) << "Index2" << " "
+                                    << std::setw(12) << "Expectation" << std::endl;
+                    }
+
                     // Process transform data
                     int lineCount = 0;
                     while (std::getline(file, line) && lineCount < numLines) {
-                        Operator correlation_op(params.num_sites);
+                        Operator correlation_op(params.num_sites, params.spin_length);
                         std::istringstream lineStream(line);
                         int Op1, indx1, Op2, indx2;
                         double E, F;
@@ -397,7 +416,7 @@ EDResults exact_diagonalization_core(
                         double log_temp_min = std::log(params.temp_min);
                         double log_temp_max = std::log(params.temp_max);
                         double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, num_temps - 1);
-                        
+
                         for (int i = 0; i < num_temps; i++) {
                             double T = std::exp(log_temp_min + i * log_temp_step);
                             double beta = 1.0 / T;
@@ -462,28 +481,13 @@ EDResults exact_diagonalization_from_files(
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD
 ) {
     // 1. Determine the number of sites and create the Hamiltonian
-    int num_sites = 0;
-    Operator hamiltonian(1);  // Initialize with dummy size, will update later
+    int num_sites = params.num_sites;
+    Operator hamiltonian(num_sites, params.spin_length);  // Initialize with dummy size, will update later
     
     switch (format) {
-        case HamiltonianFileFormat::STANDARD: {
-            // Read the number of sites from Trans.dat
-            std::ifstream trans_file(single_site_file);
-            if (!trans_file.is_open()) {
-                throw std::runtime_error("Error: Cannot open file " + single_site_file);
-            }
-
-            // Skip the first line
-            std::string dummy_line;
-            std::getline(trans_file, dummy_line);
-
-            // Read the second line to get num_sites
-            std::string dum;
-            trans_file >> dum >> num_sites;
-            trans_file.close();
-            
+        case HamiltonianFileFormat::STANDARD: {            
             // Create the Hamiltonian with the correct number of sites
-            hamiltonian = Operator(num_sites);
+            hamiltonian = Operator(num_sites, params.spin_length);
             
             // Load the terms from files
             if (!single_site_file.empty()) {
@@ -511,8 +515,7 @@ EDResults exact_diagonalization_from_files(
     }
     
     // 2. Calculate the Hilbert space dimension
-    int hilbert_space_dim = 1 << num_sites;  // 2^num_sites
-    
+    int hilbert_space_dim = pow(2, num_sites);  // 2^num_sites
     // 3. Create a lambda function to apply the Hamiltonian
     auto apply_hamiltonian = [&hamiltonian](const Complex* in, Complex* out, int n) {
         // Convert raw pointers to vectors for the Operator::apply method
@@ -612,7 +615,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     trans_file.close();
     
     // Create the Hamiltonian with the correct number of sites
-    Operator hamiltonian(num_sites);
+    Operator hamiltonian(num_sites, params.spin_length);
     
     // Load the terms from files
     hamiltonian.loadFromFile(single_site_file);
@@ -757,7 +760,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
                 // Path to the block eigenvector
                 std::string block_eigenvector_file = block_params.output_dir + 
-                                                   "/eigenvector_" + std::to_string(eigen_idx) + ".dat";
+                                                   "/eigenvectors/eigenvector_" + std::to_string(eigen_idx) + ".dat";
                 
                 // Read the block eigenvector
                 std::vector<Complex> block_eigenvector;
