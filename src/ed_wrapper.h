@@ -8,7 +8,10 @@
 #include "construct_ham.h"
 #include "observables.h"
 #include <sys/stat.h>
+
+#ifdef ENABLE_CUDA
 #include "lanczos_cuda.h"
+#endif
 
 // Enum for available diagonalization methods
 enum class DiagonalizationMethod {
