@@ -93,7 +93,7 @@ def run_ed_for_cluster(args):
         temp_num_sites = np.loadtxt(block_size_file, comments='#')
         max_block_dim = np.max(temp_num_sites)
         if max_block_dim > 12000:
-            logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization.")
+            logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization. Switching to LANCZOS.")
             ed_options["method"] = "LANCZOS"
     
 
