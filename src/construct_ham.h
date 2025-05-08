@@ -1534,7 +1534,7 @@ public:
                 if (((basis >> indx) & 1) != Op) {
                     // Flip the A bit
                     int flipped_basis = basis ^ (1 << indx);
-                    return {flipped_basis, Complex(1.0, 0.0)};                    
+                    return {flipped_basis, Complex(1.0 * double(spin_l_*2), 0.0)};                    
                 }
             }
             // Default case: no transformation applies
@@ -1558,7 +1558,7 @@ public:
                 
                 if (bit2_matches) {
                     int flipped_basis = basis ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * pow(-1, bit1)};
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * double(spin_l_*2) * pow(-1, bit1)};
                 }
             } 
             else if (Op2 == 2) {
@@ -1569,7 +1569,7 @@ public:
                 if (bit1_matches) {
                     // Flip the first bit
                     int flipped_basis = basis ^ (1 << indx1);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * pow(-1, bit2)};
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * double(spin_l_*2) * pow(-1, bit2)};
                 }
             } 
             else {
@@ -1580,7 +1580,7 @@ public:
                 if (bit1_matches && bit2_matches) {
                     // Flip both bits
                     int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0)};
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_*2) * double(spin_l_*2)};
                 }
             }
             // Default case: no transformation applies
@@ -1822,13 +1822,13 @@ public:
         addTransform([=](int basis) -> std::pair<int, Complex> {
         // Check if all bits match their expected values
             if (op == 2){
-                return {basis, 0.5*pow(-1,(basis >> site_j) & 1)};
+                return {basis, spin_l*pow(-1,(basis >> site_j) & 1)};
             }
             else{
                 if (((basis >> site_j) & 1) != op) {
                     // Flip the A bit
                     int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(1.0, 0)};                    
+                    return {flipped_basis, Complex(1.0, 0)*double(spin_l*2)};                    
                 }
             }
         // Default case: no transformation applies
