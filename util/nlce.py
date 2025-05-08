@@ -93,7 +93,8 @@ def run_ed_for_cluster(args):
         f'--method={ed_options["method"]}',
         f'--eigenvalues=FULL',
         f'--output={cluster_ed_dir}/output',
-        f'--num_sites={num_sites}'
+        f'--num_sites={num_sites}',
+        '--spin_length=0.5'
     ]
 
     if symmetrized:

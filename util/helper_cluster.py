@@ -180,8 +180,8 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
     
     # Prepare Hamiltonian parameters
-    Jpm = -(Jxx + Jyy) / 4
-    Jpmpm = (Jxx - Jyy) / 4
+    Jpm = Jxx
+    Jpmpm = Jyy
     
     # Define local z-axes for pyrochlore lattice
     z_local = np.array([

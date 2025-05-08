@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
     HamiltonianFileFormat format = HamiltonianFileFormat::STANDARD;
     
     // Control flags
-    bool run_standard = true;
+    bool run_standard = false;
     bool run_symmetrized = false;
     bool compute_thermo = false;
     bool measure_spin = false;
@@ -169,10 +169,8 @@ int main(int argc, char* argv[]) {
         }
         else if (arg == "--standard") {
             run_standard = true;
-            run_symmetrized = false;
         }
         else if (arg == "--symmetrized") {
-            run_standard = false;
             run_symmetrized = true;
         }
         else if (arg == "--thermo") {
@@ -210,6 +208,10 @@ int main(int argc, char* argv[]) {
         else {
             std::cerr << "Unknown option: " << arg << std::endl;
         }
+    }
+
+    if (!run_standard && !run_symmetrized) {
+        run_standard = true; // Default to running standard diagonalization
     }
     
     if (full_spectrum) {
