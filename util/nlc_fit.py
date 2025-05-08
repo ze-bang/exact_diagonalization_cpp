@@ -50,7 +50,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         '--temp_bins', str(fixed_params["temp_bins"]),
         '--thermo',
         '--SI_units',
-        '--euler_resum'
+        '--euler_resum',
+        '--symmetrized'
     ]
     
     cmd.append('--skip_cluster_gen')
