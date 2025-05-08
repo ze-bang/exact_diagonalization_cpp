@@ -58,6 +58,9 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
     if fixed_params.get("skip_ham_prep", False):
         cmd.append('--skip_ham_prep')
     
+    
+    
+    
     try:
         logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}")
         subprocess.run(cmd, check=True, capture_output=True)
@@ -80,6 +83,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         logging.error(f"Error running NLCE: {e}")
         logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
         logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
+        logging.info("NLCE calculation failed, trying with lanczos")
+
         return np.array([]), np.array([])
 
 def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):

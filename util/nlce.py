@@ -87,6 +87,16 @@ def run_ed_for_cluster(args):
             if not line.startswith('#') and line.strip():
                 num_sites += 1
     
+    # Read the number of elements in max_clique if symmetrized
+    if symmetrized:
+        block_size_file = os.path.join(ham_subdir, "sym_basis/sym_block_sizes.txt")
+        temp_num_sites = np.loadtxt(block_size_file, comments='#')
+        max_block_dim = np.max(temp_num_sites)
+        if max_block_dim > 12000:
+            logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization.")
+            ed_options["method"] = "LANCZOS"
+    
+
     cmd = [
         ed_executable,
         ham_subdir,
