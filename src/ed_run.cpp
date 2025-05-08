@@ -21,8 +21,8 @@ int main(int argc, char* argv[]) {
         std::cout << "  --block-size=<size>  : Block size for block methods" << std::endl;
         std::cout << "  --shift=<value>      : Shift value for shift-invert methods" << std::endl;
         std::cout << "  --format=<format>    : Hamiltonian file format (STANDARD, SPARSE_MATRIX)" << std::endl;
-        std::cout << "  --skip-standard      : Skip standard diagonalization" << std::endl;
-        std::cout << "  --skip-symmetrized   : Skip symmetrized diagonalization" << std::endl;
+        std::cout << "  --standard           : standard diagonalization" << std::endl;
+        std::cout << "  --symmetrized        : symmetrized diagonalization" << std::endl;
         std::cout << "  --thermo             : Compute thermodynamic data" << std::endl;
         std::cout << "  --temp-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
         std::cout << "  --temp-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
@@ -32,6 +32,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
         std::cout << "  --spin_length=<value> : Spin length" << std::endl;
         std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
+        std::cout << "  --skip_ED            : Skip ED calculation" << std::endl;
         return 1;
     }
 
@@ -103,7 +104,8 @@ int main(int argc, char* argv[]) {
     bool run_symmetrized = false;
     bool compute_thermo = false;
     bool measure_spin = false;
-    
+    bool skip_ED = false;
+
     // Parse command line options
     for (int i = 2; i < argc; i++) {
         std::string arg = argv[i];
@@ -142,6 +144,9 @@ int main(int argc, char* argv[]) {
             else{
                 params.num_eigenvalues = std::stoi(arg.substr(14));
             }
+        }
+        else if (arg == "--skip_ED") {
+            skip_ED = true;
         }
         else if (arg == "--eigenvectors") {
             params.compute_eigenvectors = true;
@@ -271,30 +276,32 @@ int main(int argc, char* argv[]) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
         try {
-            standard_results = exact_diagonalization_from_directory(
-                directory, method, params, format
-            );
+            if (!skip_ED) {
+                standard_results = exact_diagonalization_from_directory(
+                    directory, method, params, format
+                );
             
-            // Display eigenvalues
-            std::cout << "Eigenvalues (standard):" << std::endl;
-            for (size_t i = 0; i < standard_results.eigenvalues.size() && i < 10; i++) {
-                std::cout << i << ": " << standard_results.eigenvalues[i] << std::endl;
-            }
-            if (standard_results.eigenvalues.size() > 10) {
-                std::cout << "... (" << standard_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
-            }
-            
-            // Save eigenvalues to file
-            std::ofstream standard_file(standard_output + "/eigenvalues.txt");
-            if (standard_file.is_open()) {
-                for (const auto& val : standard_results.eigenvalues) {
-                    standard_file << val << std::endl;
+                // Display eigenvalues
+                std::cout << "Eigenvalues (standard):" << std::endl;
+                for (size_t i = 0; i < standard_results.eigenvalues.size() && i < 10; i++) {
+                    std::cout << i << ": " << standard_results.eigenvalues[i] << std::endl;
                 }
-                standard_file.close();
-                std::cout << "Saved " << standard_results.eigenvalues.size() << " eigenvalues to " 
-                          << standard_output + "/eigenvalues.txt" << std::endl;
+                if (standard_results.eigenvalues.size() > 10) {
+                    std::cout << "... (" << standard_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
+                }
+                
+                // Save eigenvalues to file
+                std::ofstream standard_file(standard_output + "/eigenvalues.txt");
+                if (standard_file.is_open()) {
+                    for (const auto& val : standard_results.eigenvalues) {
+                        standard_file << val << std::endl;
+                    }
+                    standard_file.close();
+                    std::cout << "Saved " << standard_results.eigenvalues.size() << " eigenvalues to " 
+                            << standard_output + "/eigenvalues.txt" << std::endl;
+                }
             }
-            
+
             // If thermodynamic data computed, save it
             if (compute_thermo) {
                 if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
@@ -370,29 +377,79 @@ int main(int argc, char* argv[]) {
         auto start_time = std::chrono::high_resolution_clock::now();
         
         try {
-            sym_results = exact_diagonalization_from_directory_symmetrized(
-                directory, method, sym_params, format
-            );
-            
-            // Display eigenvalues
-            std::cout << "Eigenvalues (symmetrized):" << std::endl;
-            for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {
-                std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
-            }
-            if (sym_results.eigenvalues.size() > 10) {
-                std::cout << "... (" << sym_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
-            }
-            
-            // Save eigenvalues to file
-            std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
-            if (sym_file.is_open()) {
-                for (const auto& val : sym_results.eigenvalues) {
-                    sym_file << val << std::endl;
+            if (!skip_ED) {
+                sym_results = exact_diagonalization_from_directory_symmetrized(
+                    directory, method, sym_params, format
+                );
+                
+                // Display eigenvalues
+                std::cout << "Eigenvalues (symmetrized):" << std::endl;
+                for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {
+                    std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
                 }
-                sym_file.close();
-                std::cout << "Saved " << sym_results.eigenvalues.size() << " eigenvalues to " 
-                          << symmetrized_output + "/eigenvalues.txt" << std::endl;
+                if (sym_results.eigenvalues.size() > 10) {
+                    std::cout << "... (" << sym_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
+                }
+                
+                // Save eigenvalues to file
+                std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
+                if (sym_file.is_open()) {
+                    for (const auto& val : sym_results.eigenvalues) {
+                        sym_file << val << std::endl;
+                    }
+                    sym_file.close();
+                    std::cout << "Saved " << sym_results.eigenvalues.size() << " eigenvalues to " 
+                            << symmetrized_output + "/eigenvalues.txt" << std::endl;
+                }
             }
+
+            
+            // If thermodynamic data computed, save it
+            if (compute_thermo) {
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                    if (thermo_file.is_open()) {
+                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                        for (size_t i = 0; i < standard_results.thermo_data.temperatures.size(); i++) {
+                            thermo_file << standard_results.thermo_data.temperatures[i] << " "
+                                       << standard_results.thermo_data.energy[i] << " "
+                                       << standard_results.thermo_data.specific_heat[i] << " "
+                                       << standard_results.thermo_data.entropy[i] << " "
+                                       << standard_results.thermo_data.free_energy[i] << std::endl;
+                        }
+                        thermo_file.close();
+                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                    }
+                }
+                // Check if full spectrum is calculated
+                else if (standard_results.eigenvalues.size() == (1ULL << params.num_sites)) {
+                    std::cout << "Full spectrum calculated. Computing thermodynamic properties..." << std::endl;
+                    
+                    // Call the function to calculate thermodynamics from spectrum
+                    ThermodynamicData thermo_data = calculate_thermodynamics_from_spectrum(
+                        standard_results.eigenvalues,
+                        params.temp_min,  // T_min
+                        params.temp_max,  // T_max
+                        params.num_temp_bins  // num_points
+                    );
+                    
+                    // Save the calculated thermodynamic data
+                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                    if (thermo_file.is_open()) {
+                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                        for (size_t i = 0; i < thermo_data.temperatures.size(); i++) {
+                            thermo_file << thermo_data.temperatures[i] << " "
+                                       << thermo_data.energy[i] << " "
+                                       << thermo_data.specific_heat[i] << " "
+                                       << thermo_data.entropy[i] << " "
+                                       << thermo_data.free_energy[i] << std::endl;
+                        }
+                        thermo_file.close();
+                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                    }
+                }
+            }
+            
         }
         catch (const std::exception& e) {
             std::cerr << "Error in symmetrized ED: " << e.what() << std::endl;

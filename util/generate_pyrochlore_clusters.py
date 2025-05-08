@@ -248,24 +248,46 @@ def generate_clusters(tet_graph, max_order):
         # Remove duplicates
         unique_subgraphs = set(all_subgraphs)
         
-        # Group by isomorphism class
-        isomorphism_classes = []
-        
+        # First, group by isomorphism class
+        isomorphism_groups = []
+
         for subgraph_nodes in unique_subgraphs:
             subgraph = tet_graph.subgraph(subgraph_nodes)
             
             found_match = False
-            for idx, (rep_nodes, embeddings) in enumerate(isomorphism_classes):
+            for idx, group in enumerate(isomorphism_groups):
+                rep_nodes = group[0]  # Use first graph as temporary representative
                 rep_subgraph = tet_graph.subgraph(rep_nodes)
                 
                 if nx.is_isomorphic(subgraph, rep_subgraph):
-                    isomorphism_classes[idx][1].append(subgraph_nodes)
+                    isomorphism_groups[idx].append(subgraph_nodes)
                     found_match = True
                     break
             
             if not found_match:
-                isomorphism_classes.append((subgraph_nodes, [subgraph_nodes]))
-        
+                isomorphism_groups.append([subgraph_nodes])
+
+        # Now select the most symmetric representative for each group
+        isomorphism_classes = []
+
+        for group in isomorphism_groups:
+            # Find the graph with the most automorphisms
+            max_automorphisms = 0
+            most_symmetric = None
+            
+            for nodes in group:
+                subgraph = tet_graph.subgraph(nodes)
+                max_clique_size = nx.algorithms.clique.node_clique_number(subgraph)
+                # Get the largest clique size across all nodes as a measure of symmetry
+                num_automorphisms = max(max_clique_size.values()) if max_clique_size else 0
+
+                if num_automorphisms > max_automorphisms:
+                    max_automorphisms = num_automorphisms
+                    most_symmetric = nodes
+            
+            # Use the most symmetric graph as the representative
+            isomorphism_classes.append((most_symmetric, group))
+
         # Add to results with corrected multiplicities
         for rep_nodes, embeddings in isomorphism_classes:
             cluster = list(rep_nodes)
