@@ -23,9 +23,6 @@
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 
-// Constants
-const double LargeValue = 1.0e+10;
-
 /**
  * Generate a random normalized vector for TPQ initial state
  * 
@@ -154,7 +151,37 @@ bool readTPQData(const std::string& filename, int step, double& energy,
     
     return false;
 }
-
+    
+// Estimate the largest eigenvalue (Emax) of the Hamiltonian using power iteration
+double estimateLargestEigenvalue(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter = 100) {
+    // Start with a random vector
+    ComplexVector v = generateTPQVector(N, 42); // Fixed seed for reproducibility
+    
+    // Power iteration
+    double eigenvalue_estimate = 0.0;
+    ComplexVector Hv(N);
+    
+    for (int i = 0; i < max_iter; i++) {
+        // Compute Hv = H|v⟩
+        H(v.data(), Hv.data(), N);
+        
+        // Calculate Rayleigh quotient: v†Hv / v†v
+        Complex rayleigh = Complex(0, 0);
+        for (int j = 0; j < N; j++) {
+            rayleigh += std::conj(v[j]) * Hv[j];
+        }
+        
+        eigenvalue_estimate = rayleigh.real(); // Hamiltonian should be Hermitian
+        
+        // Update v = Hv (normalized)
+        std::swap(v, Hv);
+        double norm = cblas_dznrm2(N, v.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, v.data(), 1);
+    }
+    
+    return eigenvalue_estimate;
+}
 /**
  * Standard TPQ (microcanonical) implementation
  * 
@@ -183,7 +210,13 @@ void microcanonical_tpq(
     }
     
     eigenvalues.clear();
-    
+
+
+
+    // Define LargeValue with a safety factor above the estimated Emax
+    // double estimateEmax = estimateLargestEigenvalue(H, N);
+    double LargeValue = 1e5; 
+    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
         std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
@@ -212,6 +245,12 @@ void microcanonical_tpq(
         // Apply hamiltonian to get v0 = H|v1⟩
         ComplexVector v0(N);
         H(v1.data(), v0.data(), N);
+
+        // For each element, compute v0 = LargeValue*v1 - v0
+        for (int i = 0; i < N; i++) {
+            v0[i] = (LargeValue * v1[i]) - v0[i];
+        }
+
         
         // Calculate initial energy and norm
         auto [energy, variance] = calculateEnergyAndVariance(H, v1, N);
@@ -234,7 +273,7 @@ void microcanonical_tpq(
         // Calculate energy and variance for step 1
         auto [energy1, variance1] = calculateEnergyAndVariance(H, v1, N);
         double nsite = N; // This should be the actual number of sites, approximating as N for now
-        inv_temp = (2.0 / nsite) / (LargeValue - energy1 / nsite);
+        inv_temp = (2.0) / (LargeValue - energy1);
         
         writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
         
@@ -262,6 +301,11 @@ void microcanonical_tpq(
             // Update v0 = H|v1⟩ - v0
             H(v1.data(), v0.data(), N);
             
+            // For each element, compute v0 = LargeValue*v1 - v0
+            for (int i = 0; i < N; i++) {
+                v0[i] = (LargeValue * v1[i]) - v0[i];
+            }
+
             // Update v1 = v1 / ||v1||
             std::swap(v1, temp);
             current_norm = cblas_dznrm2(N, v1.data(), 1);
@@ -272,7 +316,7 @@ void microcanonical_tpq(
             auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v1, N);
             
             // Update inverse temperature
-            inv_temp = (2.0*step / nsite) / (LargeValue - energy_step / nsite);
+            inv_temp = (2.0*step) / (LargeValue - energy_step);
             
             // Write data
             writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
@@ -319,7 +363,8 @@ void canonical_tpq(
     std::vector<double>& eigenvalues,
     std::string dir = "",
     double delta_tau = 0.0, // Default 0 means use 1/LargeValue
-    bool compute_spectrum = false
+    bool compute_spectrum = false,
+    int n_max = 10 // Order of Taylor expansion
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -328,7 +373,7 @@ void canonical_tpq(
     
     // Set default delta_tau if not specified
     if (delta_tau <= 0.0) {
-        delta_tau = 1.0/LargeValue;
+        delta_tau = 1.0/1e10;
     }
     
     eigenvalues.clear();
@@ -384,13 +429,40 @@ void canonical_tpq(
             }
             
             // Canonical TPQ: Apply exp(-delta_tau*H/2) to v1 using 4th order approximation
-            // We'll use a simple first-order approximation for simplicity: v0 = v1 - delta_tau*H*v1
+            // Apply exp(-delta_tau*H/2) to v1 using n_max order Taylor approximation
+            // Need to add n_max parameter to the function signature
             ComplexVector Hv(N);
+            // First calculate H*v1
             H(v1.data(), Hv.data(), N);
             
-            // v0 = v1 - delta_tau*H*v1/2
-            for (int i = 0; i < N; i++) {
-                v0[i] = v1[i] - Hv[i] * (delta_tau/2.0);
+            // Copy v1 to v0 for the first term in Taylor series
+            v0 = v1;
+            
+            // Initialize term for calculation
+            ComplexVector term = v1;
+            double factorial = 1.0;
+            
+            // Apply Taylor expansion up to n_max order
+            for (int order = 1; order <= n_max; order++) {
+                // Calculate coefficient: (-delta_tau/2)^order / order!
+                factorial *= order;
+                double coef = (order % 2 == 1) ? -1.0 : 1.0;  // Alternating sign
+                coef *= std::pow(delta_tau/2.0, order) / factorial;
+                
+                // Apply H to the previous term
+                if (order == 1) {
+                    // For first order, we already calculated H*v1
+                    term = Hv;
+                } else {
+                    ComplexVector next_term(N);
+                    H(term.data(), next_term.data(), N);
+                    term = next_term;
+                }
+                
+                // Add this term to the result: v0 += coef * H^order * v1
+                for (int i = 0; i < N; i++) {
+                    v0[i] += coef * term[i];
+                }
             }
             
             // Normalize v0
