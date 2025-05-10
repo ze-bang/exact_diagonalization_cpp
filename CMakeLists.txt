@@ -188,29 +188,43 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(test_lanczos OpenMP::OpenMP_CXX)
 endif()
 
-# # Add test_lanczos_cuda executable (only if CUDA is enabled)
-# if(WITH_CUDA)
-#     cuda_add_executable(test_lanczos_cuda ${SRC_DIR}/test_lanczos_cuda.cu)
+add_executable(test_TPQ ${SRC_DIR}/test_TPQ.cpp)
 
-#     # Link with libraries
-#     target_link_libraries(test_lanczos_cuda
-#         lanczos_cuda
-#         ${CUDA_LIBRARIES}
-#         ${CUBLAS_LIBRARY}
-#         ${CUSOLVER_LIBRARY}
-#         ${BLAS_LIBRARIES}
-#         ${LAPACK_LIBRARIES}
-#         ${LAPACKE_LIBRARIES}
-#         ${ARPACK_LIBRARY}
-#     )
-    
-#     # Add MPI if enabled
-#     if(WITH_MPI)
-#         target_link_libraries(test_lanczos_cuda ${MPI_CXX_LIBRARIES})
-#     endif()
-    
-#     # Add OpenMP to test_lanczos_cuda if available
-#     if(OpenMP_CXX_FOUND)
-#         target_link_libraries(test_lanczos_cuda OpenMP::OpenMP_CXX)
-#     endif()
-# endif()
+
+# Link test_lanczos with the same libraries as ED
+target_link_libraries(test_TPQ
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${ARPACK_LIBRARY}
+)
+
+# Add MPI if enabled
+if(WITH_MPI)
+    target_link_libraries(test_TPQ ${MPI_CXX_LIBRARIES})
+endif()
+
+# Add CUDA if enabled
+if(WITH_CUDA)
+    target_link_libraries(test_TPQ 
+        lanczos_cuda
+        ${CUDA_LIBRARIES}
+        ${CUBLAS_LIBRARY}
+        ${CUSOLVER_LIBRARY}
+    )
+endif()
+
+# Apply the same optimization flags as the main executable
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_TPQ PRIVATE -O3 -march=native)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(test_TPQ PRIVATE -g)
+    endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
+    target_compile_options(test_TPQ PRIVATE -O3 -xHost)
+endif()
+
+# Add OpenMP to test_lanczos if available
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(test_TPQ OpenMP::OpenMP_CXX)
+endif()

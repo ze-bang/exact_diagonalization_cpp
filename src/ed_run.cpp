@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include "ed_wrapper.h"
+#include <map>
 
 
 int main(int argc, char* argv[]) {
@@ -27,7 +28,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --temp-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
         std::cout << "  --temp-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
         std::cout << "  --temp-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
-        std::cout << "  --measure-spin       : Compute spin expectation values" << std::endl;
+        std::cout << "  --measure_spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
         std::cout << "  --spin_length=<value> : Spin length" << std::endl;
@@ -190,7 +191,7 @@ int main(int argc, char* argv[]) {
         else if (arg.find("--temp-bins=") == 0) {
             params.num_temp_bins = std::stoi(arg.substr(12));
         }
-        else if (arg == "--measure-spin") {
+        else if (arg == "--measure_spin") {
             measure_spin = true;
             // Spin measurements require eigenvectors
             params.compute_eigenvectors = true;
@@ -301,6 +302,16 @@ int main(int argc, char* argv[]) {
                             << standard_output + "/eigenvalues.txt" << std::endl;
                 }
             }
+            
+            // Generate logspace temperatures to compute thermodynamic data
+            std::vector<double> temperatures(params.num_temp_bins);
+            for (int i = 0; i < params.num_temp_bins; i++) {
+                temperatures[i] = std::exp(std::log(params.temp_min) + i * (std::log(params.temp_max) - std::log(params.temp_min)) / (params.num_temp_bins - 1));
+            }
+
+            std::cout << "Compute thermo " << compute_thermo << " full spectrum: " << full_spectrum << std::endl;
+            std::cout << "Compute observables " << params.calc_observables << std::endl;
+            std::cout << "Compute spin " << measure_spin << std::endl;
 
             // If thermodynamic data computed, save it
             if (compute_thermo) {
@@ -320,7 +331,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 // Check if full spectrum is calculated
-                else if (standard_results.eigenvalues.size() == (1ULL << params.num_sites)) {
+                else {
                     std::cout << "Full spectrum calculated. Computing thermodynamic properties..." << std::endl;
                     
                     // Call the function to calculate thermodynamics from spectrum
@@ -347,23 +358,215 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            
-            // Measure spin if requested
-            if (measure_spin && params.compute_eigenvectors) {
-                // This would call the appropriate function to measure spin
-                // For now, just print a message
-                std::cout << "Spin measurements not implemented yet" << std::endl;
+            //Compute observables if requested
+            if (params.calc_observables) {
+                std::cout << "Calculating observables..." << std::endl;
+                // Find all observable files
+                std::vector<std::string> observable_files;
+                std::string cmd = "find " + directory + " -name 'observables_*.dat' > " + directory + "/observable_files.txt";
+                system(cmd.c_str());
+
+                std::ifstream file_list(directory + "/observable_files.txt");
+                if (file_list) {
+                    std::string filename;
+                    while (std::getline(file_list, filename)) {
+                        if (!filename.empty()) {
+                            observable_files.push_back(filename);
+                        }
+                    }
+                }
+                std::cout << "Found " << observable_files.size() << " observable files." << std::endl;
+
+                // Create directory for observable results
+                std::string obs_output_dir = params.output_dir + "/observables";
+                system(("mkdir -p " + obs_output_dir).c_str());
+
+                
+
+                // Parse observable files and create operators
+                for (const auto& filename : observable_files) {
+                    // Extract observable name from filename (e.g., "Sz_X" from "observables_Sz_X.dat")
+                    std::string base_name = filename.substr(filename.find_last_of("/\\") + 1);
+                    std::string obs_name = base_name.substr(11, base_name.length() - 15); // Remove "observables_" and ".dat"
+                    
+                    std::cout << "Processing observable: " << obs_name << " from " << filename << std::endl;
+                    
+                    // Open and parse the file
+                    std::ifstream infile(filename);
+                    if (!infile) {
+                        std::cerr << "Error: Cannot open observable file " << filename << std::endl;
+                        continue;
+                    }
+                    
+                    // Read the file header and data
+                    std::string line;
+                    int loc = 0;
+                    
+                    // Find and extract the 'loc' parameter
+                    while (std::getline(infile, line)) {
+                        if (line.find("loc") != std::string::npos) {
+                            std::istringstream iss(line);
+                            std::string dummy;
+                            iss >> dummy >> loc;
+                            break;
+                        }
+                    }
+                    
+                    // Skip separator lines
+                    while (std::getline(infile, line) && line.find("=") != std::string::npos) {}
+                    
+                    // Read operator data
+                    std::vector<std::tuple<int, int, double, double>> operator_data;
+                    
+                    // Parse the data section
+                    while (std::getline(infile, line)) {
+                        if (line.empty()) continue;
+                        
+                        std::istringstream iss(line);
+                        int type, site;
+                        double real_coef, imag_coef;
+                        
+                        if (iss >> type >> site >> real_coef >> imag_coef) {
+                            operator_data.emplace_back(type, site, real_coef, imag_coef);
+                        }
+                    }
+                    
+                    // Create operator function
+                    auto observable_op = [operator_data, params](const Complex* in, Complex* out, int n) {
+                        // Initialize output to zero
+                        std::fill(out, out + n, Complex(0.0, 0.0));
+                        
+                        // Apply each term in the operator
+                        for (const auto& term : operator_data) {
+                            int type = std::get<0>(term);
+                            int site = std::get<1>(term);
+                            double real_coef = std::get<2>(term);
+                            double imag_coef = std::get<3>(term);
+                            Complex coef(real_coef, imag_coef);
+                            
+                            // Create single-site operator
+                            SingleSiteOperator op(params.num_sites, params.spin_length, type, site);
+                            
+                            // Apply operator to input
+                            std::vector<Complex> temp_in(in, in + n);
+                            std::vector<Complex> temp_out = op.apply(temp_in);
+                            
+                            // Add contribution to output
+                            for (int i = 0; i < n; i++) {
+                                out[i] += coef * temp_out[i];
+                            }
+                        }
+                    };
+                    
+                    // Calculate spectral function and dynamical susceptibility for all temperatures
+                    std::cout << "Calculating spectral function and dynamical susceptibility for " << obs_name << " at all temperatures" << std::endl;
+                    
+                    for (double T : temperatures) {
+                        std::cout << "Processing temperature T=" << T << std::endl;
+                        
+                        // Calculate spectral function
+                        SpectralFunctionData spectral_data = calculate_spectral_function(
+                            observable_op,
+                            1 << params.num_sites,
+                            standard_output,
+                            -10.0,  // omega_min
+                            10.0,   // omega_max
+                            1000,   // num_points
+                            0.1,    // eta (broadening)
+                            T,      // temperature
+                            false   // use Gaussian broadening
+                        );
+                        
+                        // Save spectral function data with temperature in filename
+                        std::string spectral_file = obs_output_dir + "/spectral_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                        std::ofstream spectral_out(spectral_file);
+                        if (spectral_out) {
+                            spectral_out << "# Frequency Spectral_Function T=" << T << std::endl;
+                            for (size_t i = 0; i < spectral_data.frequencies.size(); i++) {
+                                spectral_out << spectral_data.frequencies[i] << " " 
+                                             << spectral_data.spectral_function[i] << std::endl;
+                            }
+                            spectral_out.close();
+                            std::cout << "Saved spectral function to " << spectral_file << std::endl;
+                        }
+                        
+                        // Calculate dynamical susceptibility
+                        DynamicalSusceptibilityData chi_data = calculate_dynamical_susceptibility(
+                            observable_op,
+                            1 << params.num_sites,
+                            standard_output,
+                            -10.0,  // omega_min
+                            10.0,   // omega_max
+                            1000,   // num_points
+                            0.1,    // eta (broadening)
+                            T       // temperature
+                        );
+                        
+                        // Save dynamical susceptibility data with temperature in filename
+                        std::string chi_file = obs_output_dir + "/chi_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                        std::ofstream chi_out(chi_file);
+                        if (chi_out) {
+                            chi_out << "# Frequency Chi_Real Chi_Imag T=" << T << std::endl;
+                            for (size_t i = 0; i < chi_data.frequencies.size(); i++) {
+                                chi_out << chi_data.frequencies[i] << " " 
+                                       << chi_data.chi[i].real() << " "
+                                       << chi_data.chi[i].imag() << std::endl;
+                            }
+                            chi_out.close();
+                            std::cout << "Saved dynamical susceptibility to " << chi_file << std::endl;
+                        }
+                    }
+                    
+                    // Calculate quantum Fisher information for different temperatures
+                    std::string qfi_file = obs_output_dir + "/qfi_" + obs_name + ".dat";
+                    std::ofstream qfi_out(qfi_file);
+                    if (qfi_out) {
+                        qfi_out << "# Temperature QFI" << std::endl;
+                        for (double T : temperatures) {
+                            std::cout << "Calculating QFI for " << obs_name << " at T=" << T << std::endl;
+                            double qfi = calculate_quantum_fisher_information(
+                                observable_op,
+                                1 << params.num_sites,
+                                T,
+                                standard_output
+                            );
+                            qfi_out << T << " " << qfi << std::endl;
+                        }
+                        qfi_out.close();
+                        std::cout << "Saved quantum Fisher information to " << qfi_file << std::endl;
+                    }
+
+                }
+            }
+
+                // Calculate spin expectations if requested
+            if (measure_spin) {
+                std::cout << "Calculating spin expectations..." << std::endl;
+                std::string obs_output_dir = params.output_dir + "/spin_expectations";
+                system(("mkdir -p " + obs_output_dir).c_str());
+                
+                for (double T : temperatures) {
+                    std::cout << "Computing spin expectations at T=" << T << std::endl;
+                    compute_spin_expectations(
+                        standard_output,
+                        obs_output_dir,
+                        params.num_sites,
+                        params.spin_length,
+                        T,
+                        true  // print output
+                    );
+                }
             }
         }
         catch (const std::exception& e) {
             std::cerr << "Error in standard ED: " << e.what() << std::endl;
         }
-        
+
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;
+        std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;            
     }
-    
+
     // Run symmetrized diagonalization
     if (run_symmetrized) {
         std::cout << "\n==========================================" << std::endl;
@@ -376,88 +579,381 @@ int main(int argc, char* argv[]) {
         
         auto start_time = std::chrono::high_resolution_clock::now();
         
-        try {
-            if (!skip_ED) {
-                sym_results = exact_diagonalization_from_directory_symmetrized(
-                    directory, method, sym_params, format
-                );
-                
-                // Display eigenvalues
-                std::cout << "Eigenvalues (symmetrized):" << std::endl;
-                for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {
-                    std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
+        if (!skip_ED) {
+            sym_results = exact_diagonalization_from_directory_symmetrized(
+                directory, method, sym_params, format
+            );
+            
+            // Display eigenvalues
+            std::cout << "Eigenvalues (symmetrized):" << std::endl;
+            for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {
+                std::cout << i << ": " << sym_results.eigenvalues[i] << std::endl;
+            }
+            if (sym_results.eigenvalues.size() > 10) {
+                std::cout << "... (" << sym_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
+            }
+            
+            // Save eigenvalues to file
+            std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
+            if (sym_file.is_open()) {
+                for (const auto& val : sym_results.eigenvalues) {
+                    sym_file << val << std::endl;
                 }
-                if (sym_results.eigenvalues.size() > 10) {
-                    std::cout << "... (" << sym_results.eigenvalues.size() - 10 << " more eigenvalues)" << std::endl;
-                }
-                
-                // Save eigenvalues to file
-                std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
-                if (sym_file.is_open()) {
-                    for (const auto& val : sym_results.eigenvalues) {
-                        sym_file << val << std::endl;
-                    }
-                    sym_file.close();
-                    std::cout << "Saved " << sym_results.eigenvalues.size() << " eigenvalues to " 
-                            << symmetrized_output + "/eigenvalues.txt" << std::endl;
-                }
+                sym_file.close();
+                std::cout << "Saved " << sym_results.eigenvalues.size() << " eigenvalues to " 
+                        << symmetrized_output + "/eigenvalues.txt" << std::endl;
             }
 
-            
-            // If thermodynamic data computed, save it
-            if (compute_thermo) {
-                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
-                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
-                    if (thermo_file.is_open()) {
-                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-                        for (size_t i = 0; i < standard_results.thermo_data.temperatures.size(); i++) {
-                            thermo_file << standard_results.thermo_data.temperatures[i] << " "
-                                       << standard_results.thermo_data.energy[i] << " "
-                                       << standard_results.thermo_data.specific_heat[i] << " "
-                                       << standard_results.thermo_data.entropy[i] << " "
-                                       << standard_results.thermo_data.free_energy[i] << std::endl;
-                        }
-                        thermo_file.close();
-                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+            if (params.compute_eigenvectors) {
+                std::cout << "Computing eigenvectors..." << std::endl;
+                // Create directory for renamed eigenvectors
+                std::string eigenvectors_dir = symmetrized_output + "/eigenvectors";
+                system(("mkdir -p " + eigenvectors_dir).c_str());
+
+                // Read the eigenvector mapping file
+                std::string mapping_path = standard_output + "/eigenvector_mapping.txt";
+                std::ifstream mapping_file(mapping_path);
+                if (!mapping_file) {
+                    std::cerr << "Error: Cannot open eigenvector mapping file: " << mapping_path << std::endl;
+                }
+
+                // Skip header line
+                std::string header_line;
+                std::getline(mapping_file, header_line);
+
+                // Create a map from original filename to global index
+                std::map<std::string, int> filename_to_global_index;
+                int global_idx, block_idx, block_eigen_idx;
+                double eigenvalue;
+                std::string filename;
+
+                while (mapping_file >> global_idx >> eigenvalue >> block_idx >> block_eigen_idx >> filename) {
+                    filename_to_global_index[filename] = global_idx;
+                }
+                mapping_file.close();
+
+                std::cout << "Loaded mapping for " << filename_to_global_index.size() << " eigenvector files" << std::endl;
+
+                // Process each eigenvector file
+                int processed_count = 0;
+                for (const auto& entry : filename_to_global_index) {
+                    const std::string& src_filename = entry.first;
+                    int global_index = entry.second;
+                    
+                    std::string src_path = standard_output + "/eigenvectors/" + src_filename;
+                    std::string dst_path = eigenvectors_dir + "/eigenvector_" + std::to_string(global_index) + ".dat";
+                    
+                    // Read the source file
+                    std::ifstream src_file(src_path);
+                    if (!src_file) {
+                        std::cerr << "Warning: Cannot open eigenvector file " << src_path << std::endl;
+                        continue;
+                    }
+                    
+                    // Write to the destination file
+                    std::ofstream dst_file(dst_path);
+                    if (!dst_file) {
+                        std::cerr << "Error: Cannot create eigenvector file " << dst_path << std::endl;
+                        continue;
+                    }
+                    
+                    // Copy content
+                    dst_file << src_file.rdbuf();
+                    
+                    // Close files
+                    src_file.close();
+                    dst_file.close();
+                    
+                    // Delete the original file
+                    if (std::remove(src_path.c_str()) != 0) {
+                        std::cerr << "Warning: Could not delete file " << src_path << std::endl;
+                    }
+                    
+                    processed_count++;
+                    if (processed_count % 100 == 0) {
+                        std::cout << "Processed " << processed_count << " eigenvector files..." << std::endl;
                     }
                 }
-                // Check if full spectrum is calculated
-                else if (standard_results.eigenvalues.size() == (1ULL << params.num_sites)) {
-                    std::cout << "Full spectrum calculated. Computing thermodynamic properties..." << std::endl;
-                    
-                    // Call the function to calculate thermodynamics from spectrum
-                    ThermodynamicData thermo_data = calculate_thermodynamics_from_spectrum(
-                        standard_results.eigenvalues,
-                        params.temp_min,  // T_min
-                        params.temp_max,  // T_max
-                        params.num_temp_bins  // num_points
-                    );
-                    
-                    // Save the calculated thermodynamic data
-                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
-                    if (thermo_file.is_open()) {
-                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-                        for (size_t i = 0; i < thermo_data.temperatures.size(); i++) {
-                            thermo_file << thermo_data.temperatures[i] << " "
-                                       << thermo_data.energy[i] << " "
-                                       << thermo_data.specific_heat[i] << " "
-                                       << thermo_data.entropy[i] << " "
-                                       << thermo_data.free_energy[i] << std::endl;
-                        }
-                        thermo_file.close();
-                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+
+                std::cout << "Renamed " << processed_count << " eigenvector files according to global indices" << std::endl;
+            }
+        }
+        std::cout << "Compute thermo " << compute_thermo << " full spectrum: " << full_spectrum << std::endl;
+        std::cout << "Compute observables " << params.calc_observables << std::endl;
+        std::cout << "Compute spin " << measure_spin << std::endl;
+        // Generate logspace temperatures to compute thermodynamic data
+        std::vector<double> temperatures(params.num_temp_bins);
+        for (int i = 0; i < params.num_temp_bins; i++) {
+            temperatures[i] = std::exp(std::log(params.temp_min) + i * (std::log(params.temp_max) - std::log(params.temp_min)) / (params.num_temp_bins - 1));
+        }
+        // If thermodynamic data computed, save it
+        if (compute_thermo) {
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                if (thermo_file.is_open()) {
+                    thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                    for (size_t i = 0; i < sym_results.thermo_data.temperatures.size(); i++) {
+                        thermo_file << sym_results.thermo_data.temperatures[i] << " "
+                                    << sym_results.thermo_data.energy[i] << " "
+                                    << sym_results.thermo_data.specific_heat[i] << " "
+                                    << sym_results.thermo_data.entropy[i] << " "
+                                    << sym_results.thermo_data.free_energy[i] << std::endl;
+                    }
+                    thermo_file.close();
+                    std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                }
+            }
+            // Check if full spectrum is calculated
+            else {
+                std::cout << "Full spectrum calculated. Computing thermodynamic properties..." << std::endl;
+                
+                if (sym_results.eigenvalues.empty()) {
+                    std::cerr << "No eigenvalues found in symmetrized results. Trying to load " << std::endl;
+                }
+                // Load the eigenvalues from the symmetrized results
+                std::string eigenvalue_file = symmetrized_output + "/eigenvalues.txt";
+                std::ifstream eigenvalue_stream(eigenvalue_file);
+                if (!eigenvalue_stream) {
+                    std::cerr << "Error: Cannot open eigenvalue file " << eigenvalue_file << std::endl;
+                    return 1;
+                }
+                std::vector<double> eigenvalues;
+                double eigenvalue;
+                while (eigenvalue_stream >> eigenvalue) {
+                    eigenvalues.push_back(eigenvalue);
+                }
+                eigenvalue_stream.close();
+                std::cout << "Loaded " << eigenvalues.size() << " eigenvalues from " << eigenvalue_file << std::endl;
+
+                sym_results.eigenvalues = eigenvalues;
+
+                // Call the function to calculate thermodynamics from spectrum
+                ThermodynamicData thermo_data = calculate_thermodynamics_from_spectrum(
+                    sym_results.eigenvalues,
+                    params.temp_min,  // T_min
+                    params.temp_max,  // T_max
+                    params.num_temp_bins  // num_points
+                );
+                
+                // Save the calculated thermodynamic data
+                std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
+                if (thermo_file.is_open()) {
+                    thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
+                    for (size_t i = 0; i < thermo_data.temperatures.size(); i++) {
+                        thermo_file << thermo_data.temperatures[i] << " "
+                                    << thermo_data.energy[i] << " "
+                                    << thermo_data.specific_heat[i] << " "
+                                    << thermo_data.entropy[i] << " "
+                                    << thermo_data.free_energy[i] << std::endl;
+                    }
+                    thermo_file.close();
+                    std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
+                }
+            }
+        }
+        //Compute observables if requested
+        if (params.calc_observables) {
+            std::cout << "Calculating observables..." << std::endl;
+            // Find all observable files
+            std::vector<std::string> observable_files;
+            std::string cmd = "find " + directory + " -name 'observables_*.dat' > " + directory + "/observable_files.txt";
+            system(cmd.c_str());
+
+            std::ifstream file_list(directory + "/observable_files.txt");
+            if (file_list) {
+                std::string filename;
+                while (std::getline(file_list, filename)) {
+                    if (!filename.empty()) {
+                        observable_files.push_back(filename);
                     }
                 }
             }
+            std::cout << "Found " << observable_files.size() << " observable files." << std::endl;
+
+            // Create directory for observable results
+            std::string obs_output_dir = params.output_dir + "/observables";
+            system(("mkdir -p " + obs_output_dir).c_str());
+
             
+
+            // Parse observable files and create operators
+            for (const auto& filename : observable_files) {
+                // Extract observable name from filename (e.g., "Sz_X" from "observables_Sz_X.dat")
+                std::string base_name = filename.substr(filename.find_last_of("/\\") + 1);
+                std::string obs_name = base_name.substr(11, base_name.length() - 15); // Remove "observables_" and ".dat"
+                
+                std::cout << "Processing observable: " << obs_name << " from " << filename << std::endl;
+                
+                // Open and parse the file
+                std::ifstream infile(filename);
+                if (!infile) {
+                    std::cerr << "Error: Cannot open observable file " << filename << std::endl;
+                    continue;
+                }
+                
+                // Read the file header and data
+                std::string line;
+                int loc = 0;
+                
+                // Find and extract the 'loc' parameter
+                while (std::getline(infile, line)) {
+                    if (line.find("loc") != std::string::npos) {
+                        std::istringstream iss(line);
+                        std::string dummy;
+                        iss >> dummy >> loc;
+                        break;
+                    }
+                }
+                
+                // Skip separator lines
+                while (std::getline(infile, line) && line.find("=") != std::string::npos) {}
+                
+                // Read operator data
+                std::vector<std::tuple<int, int, double, double>> operator_data;
+                
+                // Parse the data section
+                while (std::getline(infile, line)) {
+                    if (line.empty()) continue;
+                    
+                    std::istringstream iss(line);
+                    int type, site;
+                    double real_coef, imag_coef;
+                    
+                    if (iss >> type >> site >> real_coef >> imag_coef) {
+                        operator_data.emplace_back(type, site, real_coef, imag_coef);
+                    }
+                }
+                
+                // Create operator function
+                auto observable_op = [operator_data, params](const Complex* in, Complex* out, int n) {
+                    // Initialize output to zero
+                    std::fill(out, out + n, Complex(0.0, 0.0));
+                    
+                    // Apply each term in the operator
+                    for (const auto& term : operator_data) {
+                        int type = std::get<0>(term);
+                        int site = std::get<1>(term);
+                        double real_coef = std::get<2>(term);
+                        double imag_coef = std::get<3>(term);
+                        Complex coef(real_coef, imag_coef);
+                        
+                        // Create single-site operator
+                        SingleSiteOperator op(params.num_sites, params.spin_length, type, site);
+                        
+                        // Apply operator to input
+                        std::vector<Complex> temp_in(in, in + n);
+                        std::vector<Complex> temp_out = op.apply(temp_in);
+                        
+                        // Add contribution to output
+                        for (int i = 0; i < n; i++) {
+                            out[i] += coef * temp_out[i];
+                        }
+                    }
+                };
+                
+                // Calculate spectral function and dynamical susceptibility for all temperatures
+                std::cout << "Calculating spectral function and dynamical susceptibility for " << obs_name << " at all temperatures" << std::endl;
+                
+                for (double T : temperatures) {
+                    std::cout << "Processing temperature T=" << T << std::endl;
+                    
+                    // Calculate spectral function
+                    SpectralFunctionData spectral_data = calculate_spectral_function(
+                        observable_op,
+                        1 << params.num_sites,
+                        standard_output,
+                        -10.0,  // omega_min
+                        10.0,   // omega_max
+                        1000,   // num_points
+                        0.1,    // eta (broadening)
+                        T,      // temperature
+                        false   // use Gaussian broadening
+                    );
+                    
+                    // Save spectral function data with temperature in filename
+                    std::string spectral_file = obs_output_dir + "/spectral_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                    std::ofstream spectral_out(spectral_file);
+                    if (spectral_out) {
+                        spectral_out << "# Frequency Spectral_Function T=" << T << std::endl;
+                        for (size_t i = 0; i < spectral_data.frequencies.size(); i++) {
+                            spectral_out << spectral_data.frequencies[i] << " " 
+                                            << spectral_data.spectral_function[i] << std::endl;
+                        }
+                        spectral_out.close();
+                        std::cout << "Saved spectral function to " << spectral_file << std::endl;
+                    }
+                    
+                    // Calculate dynamical susceptibility
+                    DynamicalSusceptibilityData chi_data = calculate_dynamical_susceptibility(
+                        observable_op,
+                        1 << params.num_sites,
+                        standard_output,
+                        -10.0,  // omega_min
+                        10.0,   // omega_max
+                        1000,   // num_points
+                        0.1,    // eta (broadening)
+                        T       // temperature
+                    );
+                    
+                    // Save dynamical susceptibility data with temperature in filename
+                    std::string chi_file = obs_output_dir + "/chi_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                    std::ofstream chi_out(chi_file);
+                    if (chi_out) {
+                        chi_out << "# Frequency Chi_Real Chi_Imag T=" << T << std::endl;
+                        for (size_t i = 0; i < chi_data.frequencies.size(); i++) {
+                            chi_out << chi_data.frequencies[i] << " " 
+                                    << chi_data.chi[i].real() << " "
+                                    << chi_data.chi[i].imag() << std::endl;
+                        }
+                        chi_out.close();
+                        std::cout << "Saved dynamical susceptibility to " << chi_file << std::endl;
+                    }
+                }
+                
+                // Calculate quantum Fisher information for different temperatures
+                std::string qfi_file = obs_output_dir + "/qfi_" + obs_name + ".dat";
+                std::ofstream qfi_out(qfi_file);
+                if (qfi_out) {
+                    qfi_out << "# Temperature QFI" << std::endl;
+                    for (double T : temperatures) {
+                        std::cout << "Calculating QFI for " << obs_name << " at T=" << T << std::endl;
+                        double qfi = calculate_quantum_fisher_information(
+                            observable_op,
+                            1 << params.num_sites,
+                            T,
+                            standard_output
+                        );
+                        qfi_out << T << " " << qfi << std::endl;
+                    }
+                    qfi_out.close();
+                    std::cout << "Saved quantum Fisher information to " << qfi_file << std::endl;
+                }
+
+            }
         }
-        catch (const std::exception& e) {
-            std::cerr << "Error in symmetrized ED: " << e.what() << std::endl;
+
+            // Calculate spin expectations if requested
+        if (measure_spin) {
+            std::cout << "Calculating spin expectations..." << std::endl;
+            std::string obs_output_dir = params.output_dir + "/spin_expectations";
+            system(("mkdir -p " + obs_output_dir).c_str());
+            
+            for (double T : temperatures) {
+                std::cout << "Computing spin expectations at T=" << T << std::endl;
+                compute_spin_expectations(
+                    directory + "/output",
+                    obs_output_dir,
+                    params.num_sites,
+                    params.spin_length,
+                    T,
+                    true  // print output
+                );
+            }
         }
-        
+
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
-        std::cout << "Symmetrized ED completed in " << duration / 1000.0 << " seconds" << std::endl;
+        std::cout << "Standard ED completed in " << duration / 1000.0 << " seconds" << std::endl;            
     }
     
     // Compare results if both calculations were run

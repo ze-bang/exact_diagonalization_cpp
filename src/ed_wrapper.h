@@ -254,63 +254,63 @@ EDResults exact_diagonalization_core(
             );
             break;
             
-        case DiagonalizationMethod::mTPQ:
-            std::cout << "Using microcanonical TPQ (Thermal Pure Quantum states) method" << std::endl;
-            {
-                // Set up TPQ parameters
-                TPQThermodynamicData tpq_results = microcanonical_tpq(
-                    H, 
-                    hilbert_space_dim,
-                    params.num_sites,
-                    params.num_samples,
-                    0.1,  // time_step
-                    params.num_temp_bins,
-                    params.output_dir,
-                    params.compute_eigenvectors  // save_states
-                );
+        // case DiagonalizationMethod::mTPQ:
+        //     std::cout << "Using microcanonical TPQ (Thermal Pure Quantum states) method" << std::endl;
+        //     {
+        //         // Set up TPQ parameters
+        //         TPQThermodynamicData tpq_results = microcanonical_tpq(
+        //             H, 
+        //             hilbert_space_dim,
+        //             params.num_sites,
+        //             params.num_samples,
+        //             0.1,  // time_step
+        //             params.num_temp_bins,
+        //             params.output_dir,
+        //             params.compute_eigenvectors  // save_states
+        //         );
                 
-                // Convert TPQThermodynamicData to ThermodynamicData
-                results.thermo_data.temperatures = tpq_results.beta_values;
-                for (auto& beta : results.thermo_data.temperatures) {
-                    beta = 1.0 / beta;  // Convert beta to temperature
-                }
-                results.thermo_data.energy = tpq_results.energy;
-                results.thermo_data.specific_heat = tpq_results.specific_heat;
-                results.thermo_data.entropy = tpq_results.entropy;
-                results.thermo_data.free_energy = tpq_results.free_energy;
-            }
-            break;
+        //         // Convert TPQThermodynamicData to ThermodynamicData
+        //         results.thermo_data.temperatures = tpq_results.beta_values;
+        //         for (auto& beta : results.thermo_data.temperatures) {
+        //             beta = 1.0 / beta;  // Convert beta to temperature
+        //         }
+        //         results.thermo_data.energy = tpq_results.energy;
+        //         results.thermo_data.specific_heat = tpq_results.specific_heat;
+        //         results.thermo_data.entropy = tpq_results.entropy;
+        //         results.thermo_data.free_energy = tpq_results.free_energy;
+        //     }
+        //     break;
             
-        case DiagonalizationMethod::cTPQ:
-            std::cout << "Using canonical TPQ (Thermal Pure Quantum states) method" << std::endl;
-            {
-                // Set up TPQ parameters
-                double beta_min = 1.0 / params.temp_max;  // Convert max temperature to min beta
-                double beta_max = 1.0 / params.temp_min;  // Convert min temperature to max beta
+        // case DiagonalizationMethod::cTPQ:
+        //     std::cout << "Using canonical TPQ (Thermal Pure Quantum states) method" << std::endl;
+        //     {
+        //         // Set up TPQ parameters
+        //         double beta_min = 1.0 / params.temp_max;  // Convert max temperature to min beta
+        //         double beta_max = 1.0 / params.temp_min;  // Convert min temperature to max beta
                 
-                TPQThermodynamicData tpq_results = canonical_tpq(
-                    H, 
-                    hilbert_space_dim,
-                    params.num_sites,
-                    params.num_samples,
-                    beta_min,
-                    beta_max,
-                    params.num_temp_bins,
-                    params.output_dir,
-                    params.compute_eigenvectors  // save_states
-                );
+        //         TPQThermodynamicData tpq_results = canonical_tpq(
+        //             H, 
+        //             hilbert_space_dim,
+        //             params.num_sites,
+        //             params.num_samples,
+        //             beta_min,
+        //             beta_max,
+        //             params.num_temp_bins,
+        //             params.output_dir,
+        //             params.compute_eigenvectors  // save_states
+        //         );
                 
-                // Convert TPQThermodynamicData to ThermodynamicData
-                results.thermo_data.temperatures = tpq_results.beta_values;
-                for (auto& beta : results.thermo_data.temperatures) {
-                    beta = 1.0 / beta;  // Convert beta to temperature
-                }
-                results.thermo_data.energy = tpq_results.energy;
-                results.thermo_data.specific_heat = tpq_results.specific_heat;
-                results.thermo_data.entropy = tpq_results.entropy;
-                results.thermo_data.free_energy = tpq_results.free_energy;
-            }
-            break;
+        //         // Convert TPQThermodynamicData to ThermodynamicData
+        //         results.thermo_data.temperatures = tpq_results.beta_values;
+        //         for (auto& beta : results.thermo_data.temperatures) {
+        //             beta = 1.0 / beta;  // Convert beta to temperature
+        //         }
+        //         results.thermo_data.energy = tpq_results.energy;
+        //         results.thermo_data.specific_heat = tpq_results.specific_heat;
+        //         results.thermo_data.entropy = tpq_results.entropy;
+        //         results.thermo_data.free_energy = tpq_results.free_energy;
+        //     }
+        //     break;
         
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;

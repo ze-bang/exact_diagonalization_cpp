@@ -59,7 +59,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
         cmd.append('--skip_ham_prep')
     
     
-    
+
     
     try:
         logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}")
@@ -278,6 +278,8 @@ def main():
         logging.info(f"Best parameters: Jxx={best_params[0]:.4f}, Jyy={best_params[1]:.4f}, Jzz={best_params[2]:.4f}")
         logging.info(f"Final chi-squared: {result.fun:.4f}")
         
+        # best_params = initial_params  # Placeholder for the best parameters
+
         # Run NLCE with best parameters to get final fit
         calc_temp, calc_spec_heat = run_nlce(best_params, fixed_params, exp_temp, work_dir)
         

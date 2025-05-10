@@ -86,16 +86,7 @@ def run_ed_for_cluster(args):
         for line in f:
             if not line.startswith('#') and line.strip():
                 num_sites += 1
-    
-    # Read the number of elements in max_clique if symmetrized
-    if symmetrized:
-        block_size_file = os.path.join(ham_subdir, "sym_basis/sym_block_sizes.txt")
-        temp_num_sites = np.loadtxt(block_size_file, comments='#')
-        max_block_dim = np.max(temp_num_sites)
-        if max_block_dim > 12000:
-            logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization. Switching to LANCZOS.")
-            ed_options["method"] = "LANCZOS"
-    
+
 
     cmd = [
         ed_executable,
@@ -106,6 +97,16 @@ def run_ed_for_cluster(args):
         f'--num_sites={num_sites}',
         '--spin_length=0.5'
     ]
+
+    # Read the number of elements in max_clique if symmetrized
+    # if symmetrized:
+    #     block_size_file = os.path.join(ham_subdir, "sym_basis/sym_block_sizes.txt")
+    #     temp_num_sites = np.loadtxt(block_size_file, comments='#')
+    #     max_block_dim = np.max(temp_num_sites)
+    #     if max_block_dim > 12000:
+    #         logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization. Switching to LANCZOS.")
+    #         ed_options["method"] = "LANCZOS"
+    
 
     if symmetrized:
         cmd.append('--symmetrized')
