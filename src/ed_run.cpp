@@ -211,6 +211,18 @@ int main(int argc, char* argv[]) {
             params.compute_eigenvectors = true;
             params.calc_observables = true;
         }
+        else if (arg.find("--max-subspace=") == 0) {
+            params.max_subspace = std::stoi(arg.substr(14));
+        }
+        else if (arg.find("--num-order=") == 0) {
+            params.num_order = std::stoi(arg.substr(12));
+        }
+        else if (arg.find("--measure-freq=") == 0) {
+            params.num_measure_freq = std::stoi(arg.substr(15));
+        }
+        else if (arg.find("--delta-tau=") == 0) {
+            params.delta_tau = std::stod(arg.substr(12));
+        }
         else {
             std::cerr << "Unknown option: " << arg << std::endl;
         }

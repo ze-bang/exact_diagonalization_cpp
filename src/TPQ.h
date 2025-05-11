@@ -436,7 +436,7 @@ void canonical_tpq(
             H(v1.data(), Hv.data(), N);
             
             // Copy v1 to v0 for the first term in Taylor series
-            v0 = v1;
+            v0.resize(N, Complex(0.0, 0.0));
             
             // Initialize term for calculation
             ComplexVector term = v1;
