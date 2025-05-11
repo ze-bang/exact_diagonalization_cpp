@@ -103,6 +103,51 @@ std::pair<double, double> calculateEnergyAndVariance(
     return {energy, variance};
 }
 
+std::pair<Complex, Complex> calculateSzandSz2(
+    const ComplexVector& tpq_state,
+    int num_sites,
+    float spin_length
+){
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+    
+    Complex Sz_exps = Complex(0.0, 0.0);
+    Complex Sz2_exps = Complex(0.0, 0.0);
+
+    // Create S operators for each site
+    std::vector<SingleSiteOperator> Sz_ops;
+    
+    for (int site = 0; site < num_sites; site++) {
+        Sz_ops.emplace_back(num_sites, spin_length, 2, site);
+    }
+    
+    // For each site, compute the expectation values
+    for (int site = 0; site < num_sites; site++) {
+        // Apply operators
+        std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(tpq_state.begin(), tpq_state.end()));
+        
+        // Calculate expectation values
+        Complex Sz_exp = Complex(0.0, 0.0);
+        
+        for (int i = 0; i < N; i++) {
+            Sz_exp += std::conj(tpq_state[i]) * Sz_psi[i];
+        }
+        
+        // Store expectation values
+        Sz_exps += Sz_exp;
+
+        std::vector<Complex> Sz2_psi = Sz_ops[site].apply(std::vector<Complex>(Sz_psi.begin(), Sz_psi.end()));
+
+        Complex Sz2_exp = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            Sz2_exp += std::conj(tpq_state[i]) * Sz2_psi[i];
+        }
+        Sz2_exps += Sz2_exp;
+    }
+    
+    return {Sz_exps/double(num_sites), Sz2_exps/double(num_sites)};
+}
+
 /**
  * Write TPQ data to file
  */
@@ -616,7 +661,8 @@ void microcanonical_tpq(
     double omega_max = 10.0,
     int num_points = 1000,
     double t_end = 100.0,
-    double dt = 0.1
+    double dt = 0.1,
+    float spin_length = 0.5
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -648,7 +694,7 @@ void microcanonical_tpq(
             norm_out << "# inv_temp norm first_norm step" << std::endl;
             
             std::ofstream flct_out(flct_file);
-            flct_out << "# inv_temp num num2 doublon doublon2 sz sz2 step" << std::endl;
+            flct_out << "# inv_temp sz(real) sz(imag) sz2(real) sz2(imag) step" << std::endl;
         }
         
         // Generate initial random state
@@ -743,9 +789,9 @@ void microcanonical_tpq(
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 std::ofstream flct_out(flct_file, std::ios::app);
-                flct_out << std::setprecision(16) << inv_temp << " " 
-                         << 0.0 << " " << 0.0 << " " << 0.0 << " " 
-                         << 0.0 << " " << 0.0 << " " << 0.0 << " " << step << std::endl;
+                auto [Sz, Sz2] = calculateSzandSz2(v1, N, spin_length);
+
+                flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
 
                 // Optionally compute dynamical susceptibiltity
                 if (compute_observables) {
@@ -823,7 +869,8 @@ void canonical_tpq(
     double omega_max = 10.0,
     int num_points = 1000,
     double t_end = 100.0,
-    double dt = 0.1
+    double dt = 0.1,
+    float spin_length = 0.5
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -889,7 +936,7 @@ void canonical_tpq(
             norm_out << "# inv_temp norm first_norm step" << std::endl;
             
             std::ofstream flct_out(flct_file);
-            flct_out << "# inv_temp num num2 doublon doublon2 sz sz2 step" << std::endl;
+            flct_out << "# inv_temp sz(real) sz(imag) sz2(real) sz2(imag) step" << std::endl;
         }
         
         // Generate initial random state
@@ -950,9 +997,9 @@ void canonical_tpq(
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 std::ofstream flct_out(flct_file, std::ios::app);
-                flct_out << std::setprecision(16) << inv_temp << " " 
-                         << 0.0 << " " << 0.0 << " " << 0.0 << " " 
-                         << 0.0 << " " << 0.0 << " " << 0.0 << " " << step << std::endl;
+                auto [Sz, Sz2] = calculateSzandSz2(v1, N, spin_length);
+
+                flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
 
                                 // Optionally compute dynamical susceptibiltity
                 if (compute_observables) {

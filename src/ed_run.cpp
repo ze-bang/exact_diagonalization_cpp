@@ -25,9 +25,9 @@ int main(int argc, char* argv[]) {
         std::cout << "  --standard           : standard diagonalization" << std::endl;
         std::cout << "  --symmetrized        : symmetrized diagonalization" << std::endl;
         std::cout << "  --thermo             : Compute thermodynamic data" << std::endl;
-        std::cout << "  --temp-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
-        std::cout << "  --temp-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
-        std::cout << "  --temp-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
+        std::cout << "  --temp_min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
+        std::cout << "  --temp_max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
+        std::cout << "  --temp_bins=<n>      : Number of temperature points (for thermo)" << std::endl;
         std::cout << "  --measure_spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
         std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
@@ -39,6 +39,12 @@ int main(int argc, char* argv[]) {
         std::cout << "  --num_order=<value>    : Order for Taylor expansion" << std::endl;
         std::cout << "  --num_measure_freq=<value> : Frequency of measurements" << std::endl;
         std::cout << "  --delta_tau=<value>    : Time step for imaginary time evolution" << std::endl;
+        std::cout << "  --omega_min=<value>    : Minimum frequency for spectral function" << std::endl;
+        std::cout << "  --omega_max=<value>    : Maximum frequency for spectral function" << std::endl;
+        std::cout << "  --num_points=<value>   : Number of points for spectral function" << std::endl;
+        std::cout << "  --t_end=<value>        : End time for time evolution" << std::endl;
+        std::cout << "  --dt=<value>           : Time step for time evolution" << std::endl;
+        std::cout << "  --help                : Show this help message" << std::endl;
         return 1;
     }
 
@@ -166,7 +172,7 @@ int main(int argc, char* argv[]) {
         else if (arg.find("--iterations=") == 0) {
             params.max_iterations = std::stoi(arg.substr(13));
         }
-        else if (arg.find("--block-size=") == 0) {
+        else if (arg.find("--block_size=") == 0) {
             params.block_size = std::stoi(arg.substr(13));
         }
         else if (arg.find("--shift=") == 0) {
@@ -187,13 +193,13 @@ int main(int argc, char* argv[]) {
         else if (arg == "--thermo") {
             compute_thermo = true;
         }
-        else if (arg.find("--temp-min=") == 0) {
+        else if (arg.find("--temp_min=") == 0) {
             params.temp_min = std::stod(arg.substr(11));
         }
-        else if (arg.find("--temp-max=") == 0) {
+        else if (arg.find("--temp_max=") == 0) {
             params.temp_max = std::stod(arg.substr(11));
         }
-        else if (arg.find("--temp-bins=") == 0) {
+        else if (arg.find("--temp_bins=") == 0) {
             params.num_temp_bins = std::stoi(arg.substr(12));
         }
         else if (arg == "--measure_spin") {
@@ -216,20 +222,30 @@ int main(int argc, char* argv[]) {
             params.compute_eigenvectors = true;
             params.calc_observables = true;
         }
-        else if (arg.find("--max-subspace=") == 0) {
+        else if (arg.find("--max_subspace=") == 0) {
             params.max_subspace = std::stoi(arg.substr(14));
         }
-        else if (arg.find("--num-order=") == 0) {
+        else if (arg.find("--num_order=") == 0) {
             params.num_order = std::stoi(arg.substr(12));
         }
-        else if (arg.find("--measure-freq=") == 0) {
+        else if (arg.find("--measure_freq=") == 0) {
             params.num_measure_freq = std::stoi(arg.substr(15));
         }
-        else if (arg.find("--delta-tau=") == 0) {
+        else if (arg.find("--delta_tau=") == 0) {
             params.delta_tau = std::stod(arg.substr(12));
         }
-        else if (arg.find("--large-value=") == 0) {
+        else if (arg.find("--large_value=") == 0) {
             params.large_value = std::stod(arg.substr(14));
+        }else if (arg.find("--omega_min=") == 0) {
+            params.omega_min = std::stod(arg.substr(12));
+        }else if (arg.find("--omega_max=") == 0) {
+            params.omega_max = std::stod(arg.substr(12));
+        }else if (arg.find("--num_points=") == 0) {
+            params.num_points = std::stoi(arg.substr(13));
+        }else if (arg.find("--t_end=") == 0) {
+            params.t_end = std::stod(arg.substr(8));
+        }else if (arg.find("--dt=") == 0) {
+            params.dt = std::stod(arg.substr(5));
         }
         else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
@@ -520,9 +536,9 @@ int main(int argc, char* argv[]) {
                             observable_op,
                             1 << params.num_sites,
                             standard_output,
-                            -10.0,  // omega_min
-                            10.0,   // omega_max
-                            1000,   // num_points
+                            params.omega_min,  // omega_min
+                            params.omega_max,   // omega_max
+                            params.num_points,   // num_points
                             0.1,    // eta (broadening)
                             T,      // temperature
                             false   // use Gaussian broadening
@@ -546,9 +562,9 @@ int main(int argc, char* argv[]) {
                             observable_op,
                             1 << params.num_sites,
                             standard_output,
-                            -10.0,  // omega_min
-                            10.0,   // omega_max
-                            1000,   // num_points
+                            params.omega_min,  // omega_min
+                            params.omega_max,   // omega_max
+                            params.num_points,   // num_points
                             0.1,    // eta (broadening)
                             T       // temperature
                         );
@@ -913,9 +929,9 @@ int main(int argc, char* argv[]) {
                         observable_op,
                         1 << params.num_sites,
                         standard_output,
-                        -10.0,  // omega_min
-                        10.0,   // omega_max
-                        1000,   // num_points
+                        params.omega_min,  // omega_min
+                        params.omega_max,   // omega_max
+                        params.num_points,   // num_points
                         0.1,    // eta (broadening)
                         T,      // temperature
                         false   // use Gaussian broadening
@@ -939,9 +955,9 @@ int main(int argc, char* argv[]) {
                         observable_op,
                         1 << params.num_sites,
                         standard_output,
-                        -10.0,  // omega_min
-                        10.0,   // omega_max
-                        1000,   // num_points
+                        params.omega_min,  // omega_min
+                        params.omega_max,   // omega_max
+                        params.num_points,   // num_points
                         0.1,    // eta (broadening)
                         T       // temperature
                     );
