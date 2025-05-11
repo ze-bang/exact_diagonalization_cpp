@@ -17,7 +17,7 @@
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
 using Matrix = std::vector<std::vector<Complex>>;
-
+using ComplexVector = std::vector<Complex>;
 
 int factorial(int n) {
     if (n <= 1) return 1;

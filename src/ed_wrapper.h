@@ -118,6 +118,13 @@ struct EDParameters {
     int num_order = 100; // order in which canonical ensemble is calculated
     int num_measure_freq = 100; // frequency of measurements
     int delta_tau = 1e-4; // time step for imaginary time evolution for cTPQ
+    double large_value = 1e5; // Large value for TPQ
+    mutable std::vector<Operator> observables = {}; // Observables to calculate for TPQ
+    double omega_min = -10.0; // Minimum frequency for spectral function
+    double omega_max = 10.0; // Maximum frequency for spectral function
+    int num_points = 1000; // Number of points for spectral function
+    double t_end = 100.0; // End time for time evolution
+    double dt = 0.1; // Time step for time evolution
 
     // Required lattice parameters
     int num_sites = 0; // Number of sites in the system
@@ -261,16 +268,129 @@ EDResults exact_diagonalization_core(
             
         case DiagonalizationMethod::mTPQ:
             std::cout << "Using microcanonical TPQ method" << std::endl;
+            
+            // Search for observable files and load them as operators
+            if (params.calc_observables) {
+                std::string base_dir;
+                if (!params.output_dir.empty()) {
+                    size_t pos = params.output_dir.find_last_of("/\\");
+                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+                } else {
+                    base_dir = ".";
+                }
+                
+                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+                
+                // Create a temporary file to store the list of observable files
+                std::string temp_list_file = params.output_dir + "/observable_files.txt";
+                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
+                
+                // Read the list of observable files
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string observable_file;
+                    int loaded_count = 0;
+                    
+                    while (std::getline(file_list, observable_file)) {
+                        if (observable_file.empty()) continue;
+                        
+                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+                        
+                        try {
+                            Operator obs_op(params.num_sites, params.spin_length);
+                            
+                            // Determine file type and load accordingly
+                            if (observable_file.find("InterAll") != std::string::npos) {
+                                obs_op.loadFromInterAllFile(observable_file);
+                            } else {
+                                obs_op.loadFromFile(observable_file);
+                            }
+                            
+                            params.observables.push_back(obs_op);
+                            loaded_count++;
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+                        }
+                    }
+                    
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
+                    
+                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+                }
+            }
+
+
             microcanonical_tpq(H, hilbert_space_dim,
                              params.max_iterations, params.num_samples,
                              params.num_measure_freq,
                              results.eigenvalues,
                              params.output_dir,
-                             params.compute_eigenvectors);
+                             params.compute_eigenvectors,
+                             params.large_value,
+                             params.calc_observables,params.observables,
+                            params.omega_min, params.omega_max,
+                            params.num_points, params.t_end, params.dt);
             break;
 
         case DiagonalizationMethod::cTPQ:
             std::cout << "Using canonical TPQ method" << std::endl;
+
+            // Search for observable files and load them as operators
+            if (params.calc_observables) {
+                std::string base_dir;
+                if (!params.output_dir.empty()) {
+                    size_t pos = params.output_dir.find_last_of("/\\");
+                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+                } else {
+                    base_dir = ".";
+                }
+                
+                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+                
+                // Create a temporary file to store the list of observable files
+                std::string temp_list_file = params.output_dir + "/observable_files.txt";
+                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
+                
+                // Read the list of observable files
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string observable_file;
+                    int loaded_count = 0;
+                    
+                    while (std::getline(file_list, observable_file)) {
+                        if (observable_file.empty()) continue;
+                        
+                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+                        
+                        try {
+                            Operator obs_op(params.num_sites, params.spin_length);
+                            
+                            // Determine file type and load accordingly
+                            if (observable_file.find("InterAll") != std::string::npos) {
+                                obs_op.loadFromInterAllFile(observable_file);
+                            } else {
+                                obs_op.loadFromFile(observable_file);
+                            }
+                            
+                            params.observables.push_back(obs_op);
+                            loaded_count++;
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+                        }
+                    }
+                    
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
+                    
+                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+                }
+            }
+
             canonical_tpq(H, hilbert_space_dim,
                         params.max_iterations, params.num_samples,
                         params.num_measure_freq, 
@@ -278,7 +398,10 @@ EDResults exact_diagonalization_core(
                         params.output_dir,
                         params.delta_tau, 
                         params.compute_eigenvectors,
-                        params.num_order); // n_max order for Taylor expansion
+                        params.num_order,
+                        params.calc_observables,params.observables,
+                        params.omega_min, params.omega_max,
+                        params.num_points, params.t_end, params.dt); // n_max order for Taylor expansion
             break;
         
         case DiagonalizationMethod::BLOCK_LANCZOS:

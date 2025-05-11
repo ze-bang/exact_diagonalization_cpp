@@ -34,6 +34,11 @@ int main(int argc, char* argv[]) {
         std::cout << "  --spin_length=<value> : Spin length" << std::endl;
         std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
         std::cout << "  --skip_ED            : Skip ED calculation" << std::endl;
+        std::cout << "  --large_value=<value> : Large value for TPQ" << std::endl;
+        std::cout << "  --max_subspace=<value> : Maximum subspace for Davidson" << std::endl;
+        std::cout << "  --num_order=<value>    : Order for Taylor expansion" << std::endl;
+        std::cout << "  --num_measure_freq=<value> : Frequency of measurements" << std::endl;
+        std::cout << "  --delta_tau=<value>    : Time step for imaginary time evolution" << std::endl;
         return 1;
     }
 
@@ -222,6 +227,40 @@ int main(int argc, char* argv[]) {
         }
         else if (arg.find("--delta-tau=") == 0) {
             params.delta_tau = std::stod(arg.substr(12));
+        }
+        else if (arg.find("--large-value=") == 0) {
+            params.large_value = std::stod(arg.substr(14));
+        }
+        else if (arg == "--help") {
+            std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
+            std::cout << "Options:" << std::endl;
+            std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, etc.)" << std::endl;
+            std::cout << "  --eigenvalues=<n>    : Number of eigenvalues to compute" << std::endl;
+            std::cout << "  --eigenvectors       : Compute eigenvectors" << std::endl;
+            std::cout << "  --output=<dir>       : Output directory" << std::endl;
+            std::cout << "  --tolerance=<tol>    : Convergence tolerance" << std::endl;
+            std::cout << "  --iterations=<iter>  : Maximum iterations" << std::endl;
+            std::cout << "  --block-size=<size>  : Block size for block methods" << std::endl;
+            std::cout << "  --shift=<value>      : Shift value for shift-invert methods" << std::endl;
+            std::cout << "  --format=<format>    : Hamiltonian file format (STANDARD, SPARSE_MATRIX)" << std::endl;
+            std::cout << "  --standard           : standard diagonalization" << std::endl;
+            std::cout << "  --symmetrized        : symmetrized diagonalization" << std::endl;
+            std::cout << "  --thermo             : Compute thermodynamic data" << std::endl;
+            std::cout << "  --temp-min=<value>   : Minimum inverse temperature (for thermo)" << std::endl; 
+            std::cout << "  --temp-max=<value>   : Maximum inverse temperature (for thermo)" << std::endl;
+            std::cout << "  --temp-bins=<n>      : Number of temperature points (for thermo)" << std::endl;
+            std::cout << "  --measure_spin       : Compute spin expectation values" << std::endl;
+            std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
+            std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+            std::cout << "  --spin_length=<value> : Spin length" << std::endl;
+            std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
+            std::cout << "  --skip_ED            : Skip ED calculation" << std::endl;
+            std::cout << "  --large_value=<value> : Large value for TPQ" << std::endl;
+            std::cout << "  --max_subspace=<value> : Maximum subspace for Davidson" << std::endl;
+            std::cout << "  --num_order=<value>    : Order for Taylor expansion" << std::endl;
+            std::cout << "  --num_measure_freq=<value> : Frequency of measurements" << std::endl;
+            std::cout << "  --delta_tau=<value>    : Time step for imaginary time evolution" << std::endl;
+            return 0;
         }
         else {
             std::cerr << "Unknown option: " << arg << std::endl;

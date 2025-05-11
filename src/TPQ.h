@@ -18,10 +18,8 @@
 #include <ctime>
 #include <chrono>
 #include <sys/stat.h>
-
-// Type definition for complex vector and matrix operations
-using Complex = std::complex<double>;
-using ComplexVector = std::vector<Complex>;
+#include "observables.h"
+#include "construct_ham.h"
 
 /**
  * Generate a random normalized vector for TPQ initial state
@@ -151,7 +149,415 @@ bool readTPQData(const std::string& filename, int step, double& energy,
     
     return false;
 }
+
+
+/**
+ * Time evolve TPQ state using Taylor expansion of exp(-iH*delta_t)
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector (will be modified)
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param n_max Maximum order of Taylor expansion
+ * @param normalize Whether to normalize the state after evolution
+ */
+void time_evolve_tpq_state(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int n_max = 10,
+    bool normalize = true
+) {
+    // Temporary vectors for calculation
+    ComplexVector result(N);
+    ComplexVector term(N);
+    ComplexVector Hterm(N);
     
+    // Copy initial state to term
+    std::copy(tpq_state.begin(), tpq_state.end(), term.begin());
+    
+    // Copy initial state to result for the first term in Taylor series
+    std::copy(tpq_state.begin(), tpq_state.end(), result.begin());
+    
+    // Precompute coefficients for each term in the Taylor series
+    std::vector<Complex> coefficients(n_max + 1);
+    coefficients[0] = Complex(1.0, 0.0);  // 0th order term
+    double factorial = 1.0;
+    
+    for (int order = 1; order <= n_max; order++) {
+        factorial *= order;
+        // For exp(-iH*t), each term has (-i)^order
+        Complex coef = std::pow(Complex(0.0, -1.0), order);  
+        coefficients[order] = coef * std::pow(delta_t, order) / factorial;
+    }
+    
+    // Apply Taylor expansion terms
+    for (int order = 1; order <= n_max; order++) {
+        // Apply H to the previous term
+        H(term.data(), Hterm.data(), N);
+        std::swap(term, Hterm);
+        
+        // Add this term to the result
+        for (int i = 0; i < N; i++) {
+            result[i] += coefficients[order] * term[i];
+        }
+    }
+    
+    // Replace tpq_state with the evolved state
+    std::swap(tpq_state, result);
+    
+    // Normalize if requested
+    if (normalize) {
+        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
+    }
+}
+
+/**
+ * Save the current TPQ state to a file
+ * 
+ * @param tpq_state TPQ state vector to save
+ * @param filename Name of the file to save to
+ * @return True if successful
+ */
+bool save_tpq_state(const ComplexVector& tpq_state, const std::string& filename) {
+    std::ofstream out(filename, std::ios::binary);
+    if (!out.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for writing" << std::endl;
+        return false;
+    }
+    
+    size_t size = tpq_state.size();
+    out.write(reinterpret_cast<const char*>(&size), sizeof(size_t));
+    out.write(reinterpret_cast<const char*>(tpq_state.data()), size * sizeof(Complex));
+    
+    out.close();
+    return true;
+}
+
+/**
+ * Load a TPQ state from a file
+ * 
+ * @param tpq_state TPQ state vector to load into
+ * @param filename Name of the file to load from
+ * @return True if successful
+ */
+bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for reading" << std::endl;
+        return false;
+    }
+    
+    size_t size;
+    in.read(reinterpret_cast<char*>(&size), sizeof(size_t));
+    
+    tpq_state.resize(size);
+    in.read(reinterpret_cast<char*>(tpq_state.data()), size * sizeof(Complex));
+    
+    in.close();
+    return true;
+}
+
+/**
+ * Calculate spectral function from a TPQ state using real-time evolution
+ * 
+ * @param H Hamiltonian operator function
+ * @param O Observable operator function
+ * @param tpq_state Current TPQ state
+ * @param N Dimension of the Hilbert space
+ * @param omega_min Minimum frequency
+ * @param omega_max Maximum frequency
+ * @param num_points Number of frequency points
+ * @param tmax Maximum evolution time
+ * @param dt Time step
+ * @param eta Broadening parameter
+ * @param use_lorentzian Use Lorentzian (true) or Gaussian (false) broadening
+ * @return Structure containing frequencies and spectral function values
+ */
+SpectralFunctionData calculate_spectral_function_from_tpq(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& tpq_state,
+    int N,
+    double omega_min = -10.0,
+    double omega_max = 10.0,
+    int num_points = 1000,
+    double tmax = 100.0,
+    double dt = 0.1,
+    double eta = 0.1,
+    bool use_lorentzian = false,
+    int n_max = 10 // Order of Taylor expansion
+) {
+    SpectralFunctionData result;
+    
+    // Generate frequency points
+    result.frequencies.resize(num_points);
+    double omega_step = (omega_max - omega_min) / (num_points - 1);
+    for (int i = 0; i < num_points; i++) {
+        result.frequencies[i] = omega_min + i * omega_step;
+    }
+    result.spectral_function.resize(num_points, 0.0);
+    
+    // Goal is to calculate C(t) = <ψ|e^{iHt}O†e^{-iHt}O|ψ>
+    // where |ψ> is the TPQ state and O is the operator
+    // As such we need to calculate  <ψ(t)|O†|Oψ(t)> 
+
+
+    // Calculate O|ψ>
+    ComplexVector O_psi(N);
+    O(tpq_state.data(), O_psi.data(), N);
+    
+    // Prepare for time evolution
+    int num_steps = static_cast<int>(tmax / dt) + 1;
+    std::vector<Complex> time_correlation(num_steps);
+    
+    // Create a copy of the state for time evolution
+    ComplexVector evolved_state = tpq_state;
+    ComplexVector temp_state(N);
+    
+    // <ψ|O†
+    O(evolved_state.data(), temp_state.data(), N);
+    
+    // Calculate initial correlation C(0) = <ψ|O†O|ψ>
+    Complex initial_corr = Complex(0.0, 0.0);
+    for (int i = 0; i < N; i++) {
+        initial_corr += std::conj(temp_state[i]) * O_psi[i];
+    }
+    time_correlation[0] = initial_corr;
+    
+    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
+    
+    // Time evolve and calculate correlation function C(t) = <ψ|O†e^{iHt}Oe^{-iHt}|ψ>
+    for (int step = 1; step < num_steps; step++) {
+        double t = step * dt;
+        
+        // Evolve temp_state = <ψ|e^{iHt}
+        time_evolve_tpq_state(H, evolved_state, N, t, n_max, true);
+        // <ψ|e^{iHt} O†
+        O(evolved_state.data(), temp_state.data(), N);
+        // Evolve temp_state =  e^{-iHt}O|ψ> 
+        time_evolve_tpq_state(H, O_psi, N, t, n_max, true);
+
+        
+        // Calculate correlation C(t)
+        Complex corr_t = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            initial_corr += std::conj(temp_state[i]) * O_psi[i];
+        }
+        time_correlation[step] = corr_t;
+        
+        if (step % 100 == 0) {
+            std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
+        }
+    }
+    
+    std::cout << "Calculating spectral function via Fourier transform..." << std::endl;
+    
+    // Perform Fourier transform to get spectral function
+    for (int i = 0; i < num_points; i++) {
+        double omega = result.frequencies[i];
+        Complex spectral_value = Complex(0.0, 0.0);
+        
+        for (int step = 0; step < num_steps; step++) {
+            double t = step * dt;
+            Complex phase = std::exp(Complex(0.0, -omega * t));
+            
+            // Add damping factor
+            double damping;
+            if (use_lorentzian) {
+                damping = std::exp(-eta * t);
+            } else {
+                damping = std::exp(-eta * t * t / 2.0);
+            }
+            
+            spectral_value += time_correlation[step] * phase * damping * dt;
+        }
+        
+        // The spectral function is the real part of the Fourier transform
+        result.spectral_function[i] = spectral_value.real();
+    }
+    
+    return result;
+}
+
+
+/**
+ * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
+ * 
+ * @param tpq_state The TPQ state vector
+ * @param num_sites Number of lattice sites
+ * @param spin_l Spin value (e.g., 0.5 for spin-1/2)
+ * @param output_file Output file path
+ * @param print_output Whether to print results to console
+ * @return Vector of spin expectation values organized as [site][S+,S-,Sz]
+ */
+std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
+    const ComplexVector& tpq_state,
+    int num_sites,
+    float spin_l,
+    const std::string& output_file = "",
+    bool print_output = true
+) {
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+    
+    // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
+    std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
+    
+    // Create S operators for each site
+    std::vector<SingleSiteOperator> Sp_ops;
+    std::vector<SingleSiteOperator> Sm_ops;
+    std::vector<SingleSiteOperator> Sz_ops;
+    
+    for (int site = 0; site < num_sites; site++) {
+        Sp_ops.emplace_back(num_sites, spin_l, 0, site);
+        Sm_ops.emplace_back(num_sites, spin_l, 1, site);
+        Sz_ops.emplace_back(num_sites, spin_l, 2, site);
+    }
+    
+    // For each site, compute the expectation values
+    for (int site = 0; site < num_sites; site++) {
+        // Apply operators
+        std::vector<Complex> Sp_psi = Sp_ops[site].apply(std::vector<Complex>(tpq_state.begin(), tpq_state.end()));
+        std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(tpq_state.begin(), tpq_state.end()));
+        std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(tpq_state.begin(), tpq_state.end()));
+        
+        // Calculate expectation values
+        Complex Sp_exp = Complex(0.0, 0.0);
+        Complex Sm_exp = Complex(0.0, 0.0);
+        Complex Sz_exp = Complex(0.0, 0.0);
+        
+        for (int i = 0; i < N; i++) {
+            Sp_exp += std::conj(tpq_state[i]) * Sp_psi[i];
+            Sm_exp += std::conj(tpq_state[i]) * Sm_psi[i];
+            Sz_exp += std::conj(tpq_state[i]) * Sz_psi[i];
+        }
+        
+        // Store expectation values
+        expectations[0][site] = Sp_exp;
+        expectations[1][site] = Sm_exp;
+        expectations[2][site] = Sz_exp;
+    }
+    
+    // Print results if requested
+    if (print_output) {
+        std::cout << "\nSpin Expectation Values from TPQ state:" << std::endl;
+        std::cout << std::setw(5) << "Site" 
+                << std::setw(20) << "S^+ (real)" 
+                << std::setw(20) << "S^+ (imag)" 
+                << std::setw(20) << "S^- (real)"
+                << std::setw(20) << "S^- (imag)"
+                << std::setw(20) << "S^z (real)"
+                << std::setw(20) << "S^z (imag)" << std::endl;
+        
+        for (int site = 0; site < num_sites; site++) {
+            std::cout << std::setw(5) << site 
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+        }
+    }
+    
+    // Save to file if output_file is specified
+    if (!output_file.empty()) {
+        std::ofstream out(output_file);
+        if (out.is_open()) {
+            out << "# Site S+_real S+_imag S-_real S-_imag Sz_real Sz_imag" << std::endl;
+            for (int site = 0; site < num_sites; site++) {
+                out << site << " "
+                    << std::setprecision(10) << expectations[0][site].real() << " "
+                    << std::setprecision(10) << expectations[0][site].imag() << " "
+                    << std::setprecision(10) << expectations[1][site].real() << " "
+                    << std::setprecision(10) << expectations[1][site].imag() << " "
+                    << std::setprecision(10) << expectations[2][site].real() << " "
+                    << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+            }
+            out.close();
+            std::cout << "Spin expectations saved to " << output_file << std::endl;
+        }
+    }
+    
+    return expectations;
+}
+
+/**
+ * Get a TPQ state at a specific inverse temperature by loading the closest available state
+ * 
+ * @param tpq_dir Directory containing TPQ data
+ * @param sample TPQ sample index
+ * @param target_beta Target inverse temperature
+ * @param N Dimension of Hilbert space
+ * @return TPQ state vector at the specified temperature
+ */
+ComplexVector get_tpq_state_at_temperature(
+    const std::string& tpq_dir,
+    int sample,
+    double target_beta,
+    int N
+) {
+    std::string ss_file = tpq_dir + "/SS_rand" + std::to_string(sample) + ".dat";
+    std::ifstream file(ss_file);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open TPQ data file " << ss_file << std::endl;
+        return ComplexVector(N);
+    }
+    
+    // Skip header
+    std::string line;
+    std::getline(file, line);
+    
+    double best_beta = 0.0;
+    int best_step = 0;
+    double min_diff = std::numeric_limits<double>::max();
+    
+    // Find the step with the closest inverse temperature
+    while (std::getline(file, line)) {
+        std::istringstream iss(line);
+        double beta, energy, variance, norm, doublon;
+        int step;
+        
+        if (!(iss >> beta >> energy >> variance >> norm >> doublon >> step)) {
+            continue;
+        }
+        
+        double diff = std::abs(beta - target_beta);
+        if (diff < min_diff) {
+            min_diff = diff;
+            best_beta = beta;
+            best_step = step;
+        }
+    }
+    file.close();
+    
+    if (best_step == 0) {
+        std::cerr << "Error: Could not find appropriate TPQ state" << std::endl;
+        return ComplexVector(N);
+    }
+    
+    std::cout << "Loading TPQ state at step " << best_step 
+              << ", beta = " << best_beta 
+              << " (target beta = " << target_beta << ")" << std::endl;
+    
+    // Load the state from file
+    std::string state_file = tpq_dir + "/tpq_state_" + std::to_string(sample) 
+                             + "_step" + std::to_string(best_step) + ".dat";
+    
+    ComplexVector tpq_state(N);
+    if (!load_tpq_state(tpq_state, state_file)) {
+        std::cerr << "Error: Could not load TPQ state from " << state_file << std::endl;
+        return ComplexVector(N);
+    }
+    
+    return tpq_state;
+}
+
+
 // Estimate the largest eigenvalue (Emax) of the Hamiltonian using power iteration
 double estimateLargestEigenvalue(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter = 100) {
     // Start with a random vector
@@ -202,7 +608,15 @@ void microcanonical_tpq(
     int temp_interval,
     std::vector<double>& eigenvalues,
     std::string dir = "",
-    bool compute_spectrum = false
+    bool compute_spectrum = false,
+    double LargeValue = 1e5,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    double omega_min = -10.0,
+    double omega_max = 10.0,
+    int num_points = 1000,
+    double t_end = 100.0,
+    double dt = 0.1
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -215,7 +629,6 @@ void microcanonical_tpq(
 
     // Define LargeValue with a safety factor above the estimated Emax
     // double estimateEmax = estimateLargestEigenvalue(H, N);
-    double LargeValue = 1e5; 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
@@ -333,6 +746,45 @@ void microcanonical_tpq(
                 flct_out << std::setprecision(16) << inv_temp << " " 
                          << 0.0 << " " << 0.0 << " " << 0.0 << " " 
                          << 0.0 << " " << 0.0 << " " << 0.0 << " " << step << std::endl;
+
+                // Optionally compute dynamical susceptibiltity
+                if (compute_observables) {
+                    // Compute dynamical susceptibilities
+                    std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+                                        
+                    // Save the current TPQ state for later analysis
+                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+                    save_tpq_state(v1, state_file);
+                    for (auto observable : observables) {
+                        // Create a lambda to adapt Operator to the required function signature
+                        auto operatorFunc = [&observable](const Complex* in, Complex* out, int N) {
+                            // Convert input to vector
+                            std::vector<Complex> input(in, in + N);
+                            // Apply operator
+                            std::vector<Complex> result = observable.apply(input);
+                            // Copy result to output
+                            std::copy(result.begin(), result.end(), out);
+                        };
+                        
+                        // Calculate spectral function with current parameters
+                        SpectralFunctionData spectrum = calculate_spectral_function_from_tpq(
+                            H, operatorFunc, v1, N, omega_min, omega_max, num_points, t_end, dt, 0.1, false);
+                                            
+                        // Write spectral function to file
+                        std::ofstream dyn_out(dyn_file);
+                        if (dyn_out.is_open()) {
+                            dyn_out << "# omega spectral_function" << std::endl;
+                            for (size_t i = 0; i < spectrum.frequencies.size(); i++) {
+                                dyn_out << std::setprecision(16) 
+                                        << spectrum.frequencies[i] << " " 
+                                        << spectrum.spectral_function[i] << std::endl;
+                            }
+                            dyn_out.close();
+                            std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
+                        }
+                    }
+
+                }
             }
         }
         
@@ -364,7 +816,14 @@ void canonical_tpq(
     std::string dir = "",
     double delta_tau = 0.0, // Default 0 means use 1/LargeValue
     bool compute_spectrum = false,
-    int n_max = 10 // Order of Taylor expansion
+    int n_max = 10, // Order of Taylor expansion
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    double omega_min = -10.0,
+    double omega_max = 10.0,
+    int num_points = 1000,
+    double t_end = 100.0,
+    double dt = 0.1
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -377,6 +836,40 @@ void canonical_tpq(
     }
     
     eigenvalues.clear();
+
+    // Define the exponential imaginary time evolution operator function outside the loops
+    auto expMinusHalfDeltaTauH = [&H, delta_tau, n_max, N](const Complex* v_in, Complex* v_out) {
+        // Copy v_in to v_out for the first term in Taylor series
+        std::copy(v_in, v_in + N, v_out);
+        
+        // Allocate memory for temporary vectors
+        ComplexVector term(N);
+        ComplexVector Hterm(N);
+        std::copy(v_in, v_in + N, term.data());
+        
+        // Precompute coefficients for each term in the Taylor series
+        std::vector<double> coefficients(n_max + 1);
+        coefficients[0] = 1.0;  // 0th order term
+        double factorial = 1.0;
+        
+        for (int order = 1; order <= n_max; order++) {
+            factorial *= order;
+            double coef = (order % 2 == 1) ? -1.0 : 1.0;  // Alternating sign
+            coefficients[order] = coef * std::pow(delta_tau/2.0, order) / factorial;
+        }
+        
+        // Apply Taylor expansion terms
+        for (int order = 1; order <= n_max; order++) {
+            // Apply H to the previous term
+            H(term.data(), Hterm.data(), N);
+            std::swap(term, Hterm);
+            
+            // Add this term to the result
+            for (int i = 0; i < N; i++) {
+                v_out[i] += coefficients[order] * term[i];
+            }
+        }
+    };
     
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
@@ -429,42 +922,8 @@ void canonical_tpq(
             }
             
             // Canonical TPQ: Apply exp(-delta_tau*H/2) to v1 using 4th order approximation
-            // Apply exp(-delta_tau*H/2) to v1 using n_max order Taylor approximation
-            // Need to add n_max parameter to the function signature
-            ComplexVector Hv(N);
-            // First calculate H*v1
-            H(v1.data(), Hv.data(), N);
-            
-            // Copy v1 to v0 for the first term in Taylor series
-            v0.resize(N, Complex(0.0, 0.0));
-            
-            // Initialize term for calculation
-            ComplexVector term = v1;
-            double factorial = 1.0;
-            
-            // Apply Taylor expansion up to n_max order
-            for (int order = 1; order <= n_max; order++) {
-                // Calculate coefficient: (-delta_tau/2)^order / order!
-                factorial *= order;
-                double coef = (order % 2 == 1) ? -1.0 : 1.0;  // Alternating sign
-                coef *= std::pow(delta_tau/2.0, order) / factorial;
-                
-                // Apply H to the previous term
-                if (order == 1) {
-                    // For first order, we already calculated H*v1
-                    term = Hv;
-                } else {
-                    ComplexVector next_term(N);
-                    H(term.data(), next_term.data(), N);
-                    term = next_term;
-                }
-                
-                // Add this term to the result: v0 += coef * H^order * v1
-                for (int i = 0; i < N; i++) {
-                    v0[i] += coef * term[i];
-                }
-            }
-            
+            expMinusHalfDeltaTauH(v1.data(), v0.data());
+
             // Normalize v0
             current_norm = cblas_dznrm2(N, v0.data(), 1);
             Complex scale_factor = Complex(1.0/current_norm, 0.0);
@@ -494,6 +953,45 @@ void canonical_tpq(
                 flct_out << std::setprecision(16) << inv_temp << " " 
                          << 0.0 << " " << 0.0 << " " << 0.0 << " " 
                          << 0.0 << " " << 0.0 << " " << 0.0 << " " << step << std::endl;
+
+                                // Optionally compute dynamical susceptibiltity
+                if (compute_observables) {
+                    // Compute dynamical susceptibilities
+                    std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+                                        
+                    // Save the current TPQ state for later analysis
+                    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+                    save_tpq_state(v1, state_file);
+                    for (auto observable : observables) {
+                        // Create a lambda to adapt Operator to the required function signature
+                        auto operatorFunc = [&observable](const Complex* in, Complex* out, int N) {
+                            // Convert input to vector
+                            std::vector<Complex> input(in, in + N);
+                            // Apply operator
+                            std::vector<Complex> result = observable.apply(input);
+                            // Copy result to output
+                            std::copy(result.begin(), result.end(), out);
+                        };
+                        
+                        // Calculate spectral function with current parameters
+                        SpectralFunctionData spectrum = calculate_spectral_function_from_tpq(
+                            H, operatorFunc, v1, N, omega_min, omega_max, num_points, t_end, dt, 0.1, false);
+                                                   
+                        // Write spectral function to file
+                        std::ofstream dyn_out(dyn_file);
+                        if (dyn_out.is_open()) {
+                            dyn_out << "# omega spectral_function" << std::endl;
+                            for (size_t i = 0; i < spectrum.frequencies.size(); i++) {
+                                dyn_out << std::setprecision(16) 
+                                        << spectrum.frequencies[i] << " " 
+                                        << spectrum.spectral_function[i] << std::endl;
+                            }
+                            dyn_out.close();
+                            std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
+                        }
+                    }
+
+                }
             }
         }
         
@@ -578,5 +1076,7 @@ void calculate_spectrum_from_tpq(
     spectrum_file.close();
     std::cout << "Spectrum calculation complete. Written to " << out_file << std::endl;
 }
+
+
 
 #endif // TPQ_H
