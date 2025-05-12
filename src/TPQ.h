@@ -603,36 +603,7 @@ ComplexVector get_tpq_state_at_temperature(
 }
 
 
-// Estimate the largest eigenvalue (Emax) of the Hamiltonian using power iteration
-double estimateLargestEigenvalue(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter = 100) {
-    // Start with a random vector
-    ComplexVector v = generateTPQVector(N, 42); // Fixed seed for reproducibility
-    
-    // Power iteration
-    double eigenvalue_estimate = 0.0;
-    ComplexVector Hv(N);
-    
-    for (int i = 0; i < max_iter; i++) {
-        // Compute Hv = H|v⟩
-        H(v.data(), Hv.data(), N);
-        
-        // Calculate Rayleigh quotient: v†Hv / v†v
-        Complex rayleigh = Complex(0, 0);
-        for (int j = 0; j < N; j++) {
-            rayleigh += std::conj(v[j]) * Hv[j];
-        }
-        
-        eigenvalue_estimate = rayleigh.real(); // Hamiltonian should be Hermitian
-        
-        // Update v = Hv (normalized)
-        std::swap(v, Hv);
-        double norm = cblas_dznrm2(N, v.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, v.data(), 1);
-    }
-    
-    return eigenvalue_estimate;
-}
+
 /**
  * Standard TPQ (microcanonical) implementation
  * 
@@ -662,19 +633,18 @@ void microcanonical_tpq(
     int num_points = 1000,
     double t_end = 100.0,
     double dt = 0.1,
-    float spin_length = 0.5
+    float spin_length = 0.5,
+    bool measure_sz = false
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
         ensureDirectoryExists(dir);
     }
     
+    int num_sites = static_cast<int>(std::log2(N));
+
     eigenvalues.clear();
 
-
-
-    // Define LargeValue with a safety factor above the estimated Emax
-    // double estimateEmax = estimateLargestEigenvalue(H, N);
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
@@ -788,11 +758,11 @@ void microcanonical_tpq(
             
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
-                std::ofstream flct_out(flct_file, std::ios::app);
-                auto [Sz, Sz2] = calculateSzandSz2(v1, N, spin_length);
-
-                flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
-
+                if (measure_sz){
+                    std::ofstream flct_out(flct_file, std::ios::app);
+                    auto [Sz, Sz2] = calculateSzandSz2(v1, num_sites, spin_length);
+                    flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
+                }
                 // Optionally compute dynamical susceptibiltity
                 if (compute_observables) {
                     // Compute dynamical susceptibilities
@@ -870,7 +840,8 @@ void canonical_tpq(
     int num_points = 1000,
     double t_end = 100.0,
     double dt = 0.1,
-    float spin_length = 0.5
+    float spin_length = 0.5,
+    bool measure_sz = false
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
@@ -881,6 +852,8 @@ void canonical_tpq(
     if (delta_tau <= 0.0) {
         delta_tau = 1.0/1e10;
     }
+
+    int num_sites = static_cast<int>(std::log2(N));
     
     eigenvalues.clear();
 
@@ -996,12 +969,12 @@ void canonical_tpq(
             
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
-                std::ofstream flct_out(flct_file, std::ios::app);
-                auto [Sz, Sz2] = calculateSzandSz2(v1, N, spin_length);
-
-                flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
-
-                                // Optionally compute dynamical susceptibiltity
+                if (measure_sz){
+                    std::ofstream flct_out(flct_file, std::ios::app);
+                    auto [Sz, Sz2] = calculateSzandSz2(v1, num_sites, spin_length);
+                    flct_out << std::setprecision(16) << inv_temp << " " << Sz.real() << " " << Sz.imag() << " " << Sz2.real() << " " << Sz2.imag() << " " << step << std::endl;
+                }
+                // Optionally compute dynamical susceptibiltity
                 if (compute_observables) {
                     // Compute dynamical susceptibilities
                     std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";

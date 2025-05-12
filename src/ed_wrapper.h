@@ -131,6 +131,7 @@ struct EDParameters {
     float spin_length = 0.5; // Spin length
 
     bool calc_observables = false; // Calculate custom observables
+    bool measure_spin = false; // Measure spins
 };
 
 // Main wrapper function for exact diagonalization
@@ -332,7 +333,7 @@ EDResults exact_diagonalization_core(
                              params.large_value,
                              params.calc_observables,params.observables,
                             params.omega_min, params.omega_max,
-                            params.num_points, params.t_end, params.dt);
+                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin);
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -401,7 +402,7 @@ EDResults exact_diagonalization_core(
                         params.num_order,
                         params.calc_observables,params.observables,
                         params.omega_min, params.omega_max,
-                        params.num_points, params.t_end, params.dt); // n_max order for Taylor expansion
+                        params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin); // n_max order for Taylor expansion
             break;
         
         case DiagonalizationMethod::BLOCK_LANCZOS:

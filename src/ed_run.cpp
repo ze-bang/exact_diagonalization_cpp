@@ -205,6 +205,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--measure_spin") {
             measure_spin = true;
             // Spin measurements require eigenvectors
+            params.measure_spin = true;
             params.compute_eigenvectors = true;
         }
         else if (arg.find("--samples=") == 0) {
@@ -348,7 +349,10 @@ int main(int argc, char* argv[]) {
                 standard_results = exact_diagonalization_from_directory(
                     directory, method, params, format
                 );
-            
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                    std::cout << "Thermal Pure Quantum (TPQ) method completed." << std::endl;
+                    return 1;
+                }
                 // Display eigenvalues
                 std::cout << "Eigenvalues (standard):" << std::endl;
                 for (size_t i = 0; i < standard_results.eigenvalues.size() && i < 10; i++) {
@@ -651,6 +655,10 @@ int main(int argc, char* argv[]) {
                 directory, method, sym_params, format
             );
             
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                std::cout << "Thermal Pure Quantum (TPQ) method completed" << std::endl;
+                return 1;
+            }
             // Display eigenvalues
             std::cout << "Eigenvalues (symmetrized):" << std::endl;
             for (size_t i = 0; i < sym_results.eigenvalues.size() && i < 10; i++) {

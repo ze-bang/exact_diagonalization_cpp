@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-directory = './Pr2Zr2O7_16_sites/output/'
+directory = './ED_test_16_sites/output/'
 
 # Load data from file
 data_file = directory + '/eigenvalues.txt'
