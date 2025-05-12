@@ -8,7 +8,7 @@ data_file = directory + '/eigenvalues.txt'
 data = np.loadtxt(data_file, comments='#')
 
 
-def calculate_thermodynamic_quantities(temperatures, eigenvalues, SI=True):
+def calculate_thermodynamic_quantities(temperatures, eigenvalues, SI=False):
     results = {
         'energy': np.zeros_like(temperatures),
         'specific_heat': np.zeros_like(temperatures),
@@ -78,7 +78,8 @@ plt.plot(temperature, results['specific_heat'], '-', color='blue', linewidth=2, 
 
 exp_data = np.loadtxt('./specific_heat_Pr2Zr2O7.txt', comments='#')
 # Plot experimental data
-plt.plot(exp_data[:, 0], exp_data[:, 1], 'o', color='red', markersize=5, label='Experimental Data')
+# plt.plot(exp_data[:, 0], exp_data[:, 1], 'o', color='red', markersize=5, label='Experimental Data')
+plt.plot(temperature, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')
 
 
 # Set x-axis to log scale since temperature values span several orders of magnitude

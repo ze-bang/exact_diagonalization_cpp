@@ -95,7 +95,8 @@ def run_ed_for_cluster(args):
         f'--eigenvalues=FULL',
         f'--output={cluster_ed_dir}/output',
         f'--num_sites={num_sites}',
-        '--spin_length=0.5'
+        '--spin_length=0.5',
+        '--measure_spin' if ed_options["measure_spin"] else ''
     ]
 
     # Read the number of elements in max_clique if symmetrized
@@ -171,6 +172,7 @@ def main():
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
 
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
+    parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
     
     args = parser.parse_args()
     
@@ -278,6 +280,7 @@ def main():
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
             "temp_bins": args.temp_bins,
+            "measure_spin": args.measure_spin
         }
         
         # Prepare arguments for each cluster
@@ -433,6 +436,8 @@ def main():
         if args.order_cutoff:
             nlc_params.append(f'--order_cutoff={args.order_cutoff}')
         
+        if args.measure_spin:
+            nlc_params.append('--measure_spin')
         
         logging.info(f"Running command: {' '.join(nlc_params)}")
         try:

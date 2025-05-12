@@ -58,6 +58,9 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
     if fixed_params.get("skip_ham_prep", False):
         cmd.append('--skip_ham_prep')
     
+    if fixed_params.get("measure_spin", False):
+        cmd.append('--measure_spin')
+    
     
 
     
@@ -191,6 +194,8 @@ def main():
     parser.add_argument('--temp_max', type=float, default=20.0, help='Maximum temperature for NLCE')
 
 
+    parser.add_argument('--measure_spin', action='store_true', help='Measure spin instead of specific heat')
+
     args = parser.parse_args()
     
     # Create output directory
@@ -240,7 +245,8 @@ def main():
             "temp_bins": args.temp_bins,
             "skip_ham_prep": args.skip_ham_prep,
             "temp_min": args.temp_min,
-            "temp_max": args.temp_max
+            "temp_max": args.temp_max,
+            "measure_spin": args.measure_spin,
         }
         
         # Filter experimental data based on temperature range
