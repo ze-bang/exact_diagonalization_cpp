@@ -415,18 +415,33 @@ def main():
         logging.info("Step 4: Performing NLCE summation")
         logging.info("="*80)
         
-        nlc_params = [
-            'python3',
-            'util/NLC_sum.py',
-            f'--cluster_dir={cluster_info_dir}',
-            f'--eigenvalue_dir={ed_dir}',
-            f'--output_dir={nlc_dir}',
-            '--plot',
-            f'--temp_min={args.temp_min}',
-            f'--temp_max={args.temp_max}',
-            f'--temp_bins={args.temp_bins}',
-        ]
-        
+        if args.method == 'TPQ':
+            logging.info("Using TPQ method for NLCE summation")
+            # Add TPQ specific parameters here if needed
+            nlc_params = [
+                'python3',
+                'util/NLC_sum_TPQ.py',
+                f'--cluster_dir={cluster_info_dir}',
+                f'--eigenvalue_dir={ed_dir}',
+                f'--output_dir={nlc_dir}',
+                '--plot',
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ]
+        else:
+            nlc_params = [
+                'python3',
+                'util/NLC_sum.py',
+                f'--cluster_dir={cluster_info_dir}',
+                f'--eigenvalue_dir={ed_dir}',
+                f'--output_dir={nlc_dir}',
+                '--plot',
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ]
+            
         if args.SI_units:
             nlc_params.append('--SI_units')
         

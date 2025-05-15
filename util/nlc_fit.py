@@ -35,24 +35,44 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
     Jxx, Jyy, Jzz = params
     
     # Create command for nlce.py
-    cmd = [
-        'python3', 
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
-        '--max_order', str(fixed_params["max_order"]),
-        '--Jxx', str(Jxx),
-        '--Jyy', str(Jyy),
-        '--Jzz', str(Jzz),
-        '--h', str(fixed_params["h"]),
-        '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
-        '--base_dir', work_dir,
-        '--temp_min', str(fixed_params["temp_min"]),
-        '--temp_max', str(fixed_params["temp_max"]),
-        '--temp_bins', str(fixed_params["temp_bins"]),
-        '--thermo',
-        '--SI_units',
-        '--euler_resum',
-        '--symmetrized'
-    ]
+    if fixed_params["ED_method"] == 'FULL':
+        cmd = [
+            'python3', 
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+            '--max_order', str(fixed_params["max_order"]),
+            '--Jxx', str(Jxx),
+            '--Jyy', str(Jyy),
+            '--Jzz', str(Jzz),
+            '--h', str(fixed_params["h"]),
+            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
+            '--base_dir', work_dir,
+            '--temp_min', str(fixed_params["temp_min"]),
+            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_bins', str(fixed_params["temp_bins"]),
+            '--thermo',
+            '--SI_units',
+            '--euler_resum',
+            '--symmetrized'
+        ]
+    elif fixed_params["ED_method"] == 'TPQ':
+        cmd = [
+            'python3', 
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+            '--max_order', str(fixed_params["max_order"]),
+            '--Jxx', str(Jxx),
+            '--Jyy', str(Jyy),
+            '--Jzz', str(Jzz),
+            '--h', str(fixed_params["h"]),
+            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
+            '--base_dir', work_dir,
+            '--temp_min', str(fixed_params["temp_min"]),
+            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_bins', str(fixed_params["temp_bins"]),
+            '--thermo',
+            '--SI_units',
+            '--euler_resum',
+            '--method=mTPQ'
+        ]
     
     cmd.append('--skip_cluster_gen')
     if fixed_params.get("skip_ham_prep", False):
@@ -186,6 +206,7 @@ def main():
     
     # Optimization parameters
     parser.add_argument('--method', type=str, default='L-BFGS-B', help='Optimization method')
+    parser.add_argument('--ED_method', type=str, default='FULL', help='ED method for NLCE')
     parser.add_argument('--max_iter', type=int, default=5000 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')
     
@@ -247,6 +268,7 @@ def main():
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
             "measure_spin": args.measure_spin,
+            "ED_method": args.ED_method
         }
         
         # Filter experimental data based on temperature range

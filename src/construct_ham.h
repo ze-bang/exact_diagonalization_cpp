@@ -1177,7 +1177,7 @@ public:
             if (progress_interval < 1) progress_interval = 1;
             
             // Process in batches to reduce memory pressure
-            const size_t BATCH_SIZE = 1000;
+            const size_t BATCH_SIZE = std::min(1000, int(total_basis_states));
             std::set<size_t> batch_processed;
             
             for (size_t batch_start = 0; batch_start < total_basis_states; batch_start += BATCH_SIZE) {
@@ -1812,7 +1812,7 @@ public:
      */
     SingleSiteOperator(int num_site, float spin_l, int op, int site_j) : Operator(num_site, spin_l) {
         if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for X, 1 for Y, 2 for Z");
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Z");
         }
         
         if (site_j < 0 || site_j >= num_site) {
@@ -1837,5 +1837,66 @@ public:
     }
 };
 
+class DoubleSiteOperator : public Operator {
+public:
+    /**
+     * Constructor for a double site operator
+     * @param num_site Total number of sites/qubits
+     * @param op Operator type: 0 for X, 1 for Y, 2 for Z
+     * @param site_j Site index to apply the operator to
+     */
+    DoubleSiteOperator(int num_site, float spin_l_, int op_i, int site_i, int op_j, int site_j) : Operator(num_site, spin_l_) {
+        if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Z");
+        }
+        if (site_j < 0 || site_j >= num_site || site_i < 0 || site_i >= num_site) {
+            throw std::invalid_argument("Site index out of range");
+        }
+        
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            // Check what type of operators we're dealing with
+            if (op_i == 2 && op_j == 2) {
+                // Both are identity operators with phase factors
+                int bit1 = (basis >> site_i) & 1;
+                int bit2 = (basis >> site_j) & 1;
+                return {basis, Complex(1.0,0.0)*double(spin_l_ * spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
+            } 
+            else if (op_i == 2) {
+                // Op1 is identity with phase, Op2 is bit flip
+                int bit1 = (basis >> site_i) & 1;
+                bool bit2_matches = ((basis >> site_j) & 1) != op_j;
+                
+                if (bit2_matches) {
+                    int flipped_basis = basis ^ (1 << site_j);
+                    return {flipped_basis, Complex(1.0,0.0) * double(2*spin_l_) * pow(-1, bit1)};
+                }
+            } 
+            else if (op_j == 2) {
+                // Op2 is identity with phase, Op1 is bit flip
+                int bit2 = (basis >> site_j) & 1;
+                bool bit1_matches = ((basis >> site_i) & 1) != op_i;
+                
+                if (bit1_matches) {
+                    // Flip the first bit
+                    int flipped_basis = basis ^ (1 << site_i);
+                    return {flipped_basis,  Complex(1.0,0.0)*double(2*spin_l_) * pow(-1, bit2)};
+                }
+            } 
+            else {
+                // Both are bit flip operators
+                bool bit1_matches = ((basis >> site_i) & 1) != op_i;
+                bool bit2_matches = ((basis >> site_j) & 1) != op_j;
+                
+                if (bit1_matches && bit2_matches) {
+                    // Flip both bits
+                    int flipped_basis = basis ^ (1 << site_i) ^ (1 << site_j);
+                    return {flipped_basis, Complex(1.0,0.0)*double(4*spin_l_*spin_l_)};
+                }
+            }
+            // Default case: no transformation applies
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+};
 
 #endif // CONSTRUCT_HAM_H

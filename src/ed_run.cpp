@@ -45,6 +45,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --t_end=<value>        : End time for time evolution" << std::endl;
         std::cout << "  --dt=<value>           : Time step for time evolution" << std::endl;
         std::cout << "  --help                : Show this help message" << std::endl;
+        std::cout << "  --sublattice_size=<value> : Size of the sublattice" << std::endl;
         return 1;
     }
 
@@ -247,6 +248,8 @@ int main(int argc, char* argv[]) {
             params.t_end = std::stod(arg.substr(8));
         }else if (arg.find("--dt=") == 0) {
             params.dt = std::stod(arg.substr(5));
+        }else if (arg.find("--sublattice_size=") == 0) {
+            params.sublattice_size = std::stoi(arg.substr(18));
         }
         else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
@@ -434,6 +437,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "Calculating observables..." << std::endl;
                 // Find all observable files
                 std::vector<std::string> observable_files;
+                std::vector<std::string> observable_names;
                 std::string cmd = "find " + directory + " -name 'observables_*.dat' > " + directory + "/observable_files.txt";
                 system(cmd.c_str());
 
@@ -443,6 +447,10 @@ int main(int argc, char* argv[]) {
                     while (std::getline(file_list, filename)) {
                         if (!filename.empty()) {
                             observable_files.push_back(filename);
+                            // Extract observable name from filename (e.g., "Sz_X" from "observables_Sz_X.dat")
+                            std::string base_name = filename.substr(filename.find_last_of("/\\") + 1);
+                            std::string obs_name = base_name.substr(12, base_name.length() - 4); // Remove "observables_" and ".dat"
+                            observable_names.push_back(obs_name);
                         }
                     }
                 }

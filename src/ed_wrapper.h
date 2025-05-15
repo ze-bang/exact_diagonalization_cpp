@@ -111,7 +111,7 @@ struct EDParameters {
     int max_subspace = 100; // For Davidson
     
     // TPQ-specific parameters
-    int num_samples = 20;
+    int num_samples = 1;
     double temp_min = 1e-3;
     double temp_max = 20;
     int num_temp_bins = 100;
@@ -120,6 +120,7 @@ struct EDParameters {
     int delta_tau = 1e-4; // time step for imaginary time evolution for cTPQ
     double large_value = 1e5; // Large value for TPQ
     mutable std::vector<Operator> observables = {}; // Observables to calculate for TPQ
+    mutable std::vector<std::string> observable_names = {}; // Names of observables to calculate for TPQ
     double omega_min = -10.0; // Minimum frequency for spectral function
     double omega_max = 10.0; // Maximum frequency for spectral function
     int num_points = 1000; // Number of points for spectral function
@@ -129,6 +130,7 @@ struct EDParameters {
     // Required lattice parameters
     int num_sites = 0; // Number of sites in the system
     float spin_length = 0.5; // Spin length
+    int sublattice_size = 1; // Size of the sublattice
 
     bool calc_observables = false; // Calculate custom observables
     bool measure_spin = false; // Measure spins
@@ -301,6 +303,28 @@ EDResults exact_diagonalization_core(
                         try {
                             Operator obs_op(params.num_sites, params.spin_length);
                             
+                            // Extract observable name from the filename
+                            std::string obs_name = "observable";
+                            size_t name_pos = observable_file.find("observables_");
+                            if (name_pos != std::string::npos) {
+                                size_t start = name_pos + 12; // Length of "observables_"
+                                size_t end = observable_file.find(".dat", start);
+                                if (end != std::string::npos) {
+                                    obs_name = observable_file.substr(start, end - start);
+                                }
+                            } else {
+                                // Get the filename without path
+                                size_t last_slash = observable_file.find_last_of("/\\");
+                                if (last_slash != std::string::npos) {
+                                    obs_name = observable_file.substr(last_slash + 11);
+                                    // Remove .dat extension if present
+                                    size_t dot_pos = obs_name.find(".dat");
+                                    if (dot_pos != std::string::npos) {
+                                        obs_name = obs_name.substr(0, dot_pos);
+                                    }
+                                }
+                            }
+                            
                             // Determine file type and load accordingly
                             if (observable_file.find("InterAll") != std::string::npos) {
                                 obs_op.loadFromInterAllFile(observable_file);
@@ -309,6 +333,7 @@ EDResults exact_diagonalization_core(
                             }
                             
                             params.observables.push_back(obs_op);
+                            params.observable_names.push_back(obs_name);
                             loaded_count++;
                         }
                         catch (const std::exception& e) {
@@ -331,9 +356,9 @@ EDResults exact_diagonalization_core(
                              params.output_dir,
                              params.compute_eigenvectors,
                              params.large_value,
-                             params.calc_observables,params.observables,
+                             params.calc_observables,params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
-                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin);
+                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
             break;
 
         case DiagonalizationMethod::cTPQ:
@@ -394,15 +419,15 @@ EDResults exact_diagonalization_core(
 
             canonical_tpq(H, hilbert_space_dim,
                         params.max_iterations, params.num_samples,
-                        params.num_measure_freq, 
+                        params.num_measure_freq,
                         results.eigenvalues,
                         params.output_dir,
                         params.delta_tau, 
                         params.compute_eigenvectors,
                         params.num_order,
-                        params.calc_observables,params.observables,
+                        params.calc_observables,params.observables, params.observable_names,
                         params.omega_min, params.omega_max,
-                        params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin); // n_max order for Taylor expansion
+                        params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); // n_max order for Taylor expansion
             break;
         
         case DiagonalizationMethod::BLOCK_LANCZOS:
@@ -842,27 +867,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         results.eigenvectors_path = params.output_dir;
     }
     
-    // 1. Determine the number of sites and create the Hamiltonian
-    int num_sites = 0;
-    
-    if (format != HamiltonianFileFormat::STANDARD) {
-        throw std::runtime_error("Only STANDARD format is supported for symmetrized diagonalization");
-    }
-    
-    // Read the number of sites from the file
-    std::ifstream trans_file(single_site_file);
-    if (!trans_file.is_open()) {
-        throw std::runtime_error("Error: Cannot open file " + single_site_file);
-    }
+    int num_sites = params.num_sites;
 
-    // Skip the first line
-    std::string dummy_line;
-    std::getline(trans_file, dummy_line);
-
-    // Read the second line to get num_sites
-    std::string dum;
-    trans_file >> dum >> num_sites;
-    trans_file.close();
     
     // Create the Hamiltonian with the correct number of sites
     Operator hamiltonian(num_sites, params.spin_length);
