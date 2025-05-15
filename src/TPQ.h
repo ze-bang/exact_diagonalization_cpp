@@ -202,9 +202,9 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
                     int n1 = site % sublattice_size;
                     int n2 = site2 % sublattice_size;
 
-                    // Apply operators
-                    std::vector<Complex> Szz_psi = Szz_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
-                    std::vector<Complex> Spm_psi = Spm_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
+            // Apply operators
+            std::vector<Complex> Szz_psi = Szz_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
+            std::vector<Complex> Spm_psi = Spm_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
 
             // Calculate expectation values
             Complex Szz_exp = Complex(0.0, 0.0);
@@ -1014,6 +1014,7 @@ void canonical_tpq(
         std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
         std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
         std::string spin_corr = dir + "/spin_corr_rand" + std::to_string(sample) + ".dat";
+        
         // Initialize output files
         {
             std::ofstream ss_out(ss_file);
@@ -1114,12 +1115,11 @@ void canonical_tpq(
                     }
                     spin_out << " " << step << std::endl;
                 }
-                // Optionally compute dynamical susceptibiltity
+                // Optionally compute dynamical susceptibility
                 if (compute_observables) {
                     // Compute dynamical susceptibilities
-                                        
-                    // Save the current TPQ state for later analysis
                     int count = 0;
+                    // Save the current TPQ state for later analysis
                     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
                     save_tpq_state(v1, state_file);
                     for (auto observable : observables) {
