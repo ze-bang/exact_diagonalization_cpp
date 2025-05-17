@@ -700,13 +700,16 @@ def main():
     inter_all_file = os.path.join(args.data_dir, "InterAll.dat")
     trans_file = os.path.join(args.data_dir, "Trans.dat")
     
-    # Extract number of sites from Trans.dat file
+    # Determine number of sites from Trans.dat file
     with open(trans_file, 'r') as file:
-        lines = file.readlines()
-        for i, line in enumerate(lines):
-            if line.strip().startswith('num'):
-                n_sites = int(line.strip().split()[1])
-                break
+        max_site_index = -1
+        for line in file:
+            parts = line.strip().split()
+            if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
+                site_index = int(parts[1])
+                max_site_index = max(max_site_index, site_index)
+        
+        n_sites = max_site_index + 1 if max_site_index >= 0 else 0
     print(f"Number of sites: {n_sites}")
     
     # Create output directory

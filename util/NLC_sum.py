@@ -15,7 +15,7 @@ Calculates thermodynamic properties of a lattice using cluster expansion.
 import matplotlib.pyplot as plt
 
 class NLCExpansion:
-    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, SI_units=False):
+    def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
         """
         Initialize the NLC expansion calculator.
         
@@ -28,7 +28,7 @@ class NLCExpansion:
         self.eigenvalue_dir = eigenvalue_dir
         
         self.SI = SI_units  # Flag for SI units
-
+        self.measure_spin = measure_spin  # Flag for measuring spin expectation values
         self.temp_values = np.logspace(np.log(temp_min)/np.log(10), np.log(temp_max)/np.log(10), num_temps)  # Default temperature range
 
         
@@ -77,7 +77,10 @@ class NLCExpansion:
                 'multiplicity': multiplicity,
                 'num_vertices': num_vertices,
                 'file_path': file_path,
-                'eigenvalues': None  # Will be loaded later
+                'eigenvalues': None,  # Will be loaded later
+                'sp': None,  # Will be loaded later
+                'sm': None,  # Will be loaded later
+                'sp': None   # Will be loaded later    
             }
     def read_eigenvalues(self):
         """Read eigenvalues for each cluster from ED output files."""
@@ -170,6 +173,74 @@ class NLCExpansion:
             
         return results
     
+    def read_spin_expectations(self, spin_exp_dir):
+        """
+        Read spin expectation values from files in the specified directory.
+        
+        Args:
+            spin_exp_dir: Directory containing spin expectation files
+        
+        Returns:
+            Dictionary mapping temperature to spin expectation values
+        """
+
+        spin_expectations = {
+            'sp': np.zeros_like(self.temp_values),
+            'sm': np.zeros_like(self.temp_values),
+            'sz': np.zeros_like(self.temp_values)
+        }
+        # Find all spin expectation files
+        pattern = os.path.join(spin_exp_dir, "spin_expectations_T*.dat")
+        spin_files = glob.glob(pattern)
+        
+        if not spin_files:
+            print(f"No spin expectation files found in {spin_exp_dir}")
+            return
+            
+        print(f"Found {len(spin_files)} spin expectation files")
+        
+        # Process each file
+        for file_path in spin_files:
+            # Extract temperature from filename
+            match = re.search(r'T(\d+\.\d+)\.dat', file_path)
+            if not match:
+                print(f"Could not extract temperature from filename: {file_path}")
+                continue
+                
+            temperature = float(match.group(1))
+            print(f"Processing spin expectations for T = {temperature}")
+            
+            # Read file data
+            try:
+                data = np.loadtxt(file_path, skiprows=1)
+            except Exception as e:
+                print(f"Error reading file {file_path}: {str(e)}")
+                continue
+            
+            # Extract site indices and spin expectations
+            sites = data[:, 0].astype(int)
+            sp_real = np.mean(data[:, 1])
+            sp_imag = np.mean(data[:, 2])
+            sm_real = np.mean(data[:, 3])
+            sm_imag = np.mean(data[:, 4])
+            sz_real = np.mean(data[:, 5])
+            sz_imag = np.mean(data[:, 6])
+
+            # Find the index corresponding to the temperature
+            temp_index = np.argmin(np.abs(self.temp_values - temperature))
+            if temp_index >= len(spin_expectations['sp']):
+                print(f"Warning: Temperature index {temp_index} out of bounds for spin expectations")
+                continue
+            # Store the spin expectation values
+            
+            # Store as complex numbers in a dictionary
+            spin_expectations['sp'][temp_index] = sp_real + 1j * sp_imag
+            spin_expectations['sm'][temp_index] = sm_real + 1j * sm_imag
+            spin_expectations['sz'][temp_index] = sz_real + 1j * sz_imag
+            
+        return spin_expectations
+
+
     def read_subcluster_info(self):
         """Read subcluster information from the provided file."""
 
@@ -271,11 +342,21 @@ class NLCExpansion:
         )
         
         # Initialize weights dictionary
-        self.weights = {
-            'energy': {},
-            'specific_heat': {},
-            'entropy': {}   
-        }
+        if self.measure_spin:
+            self.weights = {
+                'energy': {},
+                'specific_heat': {},
+                'entropy': {},
+                'sp': {},
+                'sm': {},
+                'sz': {}
+            }
+        else:
+            self.weights = {
+                'energy': {},
+                'specific_heat': {},
+                'entropy': {}   
+            }
         
         # Calculate weights for each cluster
         for cluster_id, _ in sorted_clusters:
@@ -286,7 +367,7 @@ class NLCExpansion:
             quantities = self.calculate_thermodynamic_quantities(
                 self.clusters[cluster_id]['eigenvalues'],
             )
-            
+
             # Get subclusters with their multiplicities
             subclusters = self.get_subclusters(cluster_id)
             
@@ -302,6 +383,26 @@ class NLCExpansion:
                 self.weights[prop][cluster_id] = property_value
 
 
+            if self.measure_spin:
+                # Read spin expectation values if needed
+                spin_exp_dir = os.path.join(self.eigenvalue_dir, f"cluster_{cluster_id}_order_{self.clusters[cluster_id]['order']}/output/spin_expectations")
+                quantities_spin =  self.read_spin_expectations(spin_exp_dir)
+                
+                print(f"Spin expectation values for cluster {cluster_id}: {quantities_spin}")
+
+                for prop in ['sp', 'sm', 'sz']:
+                    # Get the spin expectation value
+                    spin_value = quantities_spin[prop]
+                    # Subtract contributions from all subclusters with correct multiplicities
+                    for subcluster_id, multiplicity in subclusters.items():
+                        if subcluster_id in self.weights[prop]:
+                            spin_value -= self.weights[prop][subcluster_id] * multiplicity
+                    # Store the weight
+                    self.weights[prop][cluster_id] = spin_value
+            
+
+
+
     def sum_nlc(self, euler_resum=False, order_cutoff=None):
         """
         Perform the NLC summation with optional Euler resummation.
@@ -313,12 +414,24 @@ class NLCExpansion:
         Returns:
             Dictionary with summed properties
         """
-        results = {
-            'energy': np.zeros_like(self.temp_values),
-            'specific_heat': np.zeros_like(self.temp_values),
-            'entropy': np.zeros_like(self.temp_values)
-        }
-        
+
+        if self.measure_spin:
+            # Initialize results for spin expectation values
+            results = {
+                'energy': np.zeros_like(self.temp_values),
+                'specific_heat': np.zeros_like(self.temp_values),
+                'entropy': np.zeros_like(self.temp_values),
+                'sp': np.zeros_like(self.temp_values),
+                'sm': np.zeros_like(self.temp_values),
+                'sz': np.zeros_like(self.temp_values)
+            }
+        else:
+            results = {
+                'energy': np.zeros_like(self.temp_values),
+                'specific_heat': np.zeros_like(self.temp_values),
+                'entropy': np.zeros_like(self.temp_values)
+            }
+    
         # Calculate the NLC sum for each property
         for prop in ['energy', 'specific_heat', 'entropy']:
             # Sum by order
@@ -365,6 +478,55 @@ class NLCExpansion:
                 
                 # Use the highest order Euler sum
                 results[prop] = euler_sums[max_order]
+        
+
+        if self.measure_spin:
+            # Calculate spin expectation values
+            for prop in ['sp', 'sm', 'sz']:
+                # Sum by order
+                sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
+                
+                for cluster_id, weight in self.weights[prop].items():
+                    order = self.clusters[cluster_id]['order']
+                    if order_cutoff is not None and order > order_cutoff:
+                        continue
+                        
+                    sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
+                
+                if not euler_resum:
+                    # Regular summation
+                    for order, contribution in sum_by_order.items():
+                        results[prop] += contribution
+                else:
+                    # Euler resummation
+                    max_order = max(sum_by_order.keys()) if sum_by_order else 0
+                    
+                    # Initialize partial sums array
+                    partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
+                    
+                    # Calculate partial sums
+                    for order in range(max_order + 1):
+                        if order > 0:
+                            partial_sums[order] = partial_sums[order-1]
+                        if order in sum_by_order:
+                            partial_sums[order] += sum_by_order[order]
+                    
+                    # Apply Euler transformation
+                    euler_sums = np.zeros_like(partial_sums)
+                    euler_sums[0] = partial_sums[0]
+                    
+                    for k in range(1, max_order + 1):
+                        for j in range(k, max_order + 1):
+                            binomial = 1
+                            for l in range(j-k+1, j+1):
+                                binomial *= l
+                            for l in range(1, k+1):
+                                binomial //= l
+                            
+                            euler_sums[k] += binomial * (-1)**(j-k) * partial_sums[j]
+                    
+                    # Use the highest order Euler sum
+                    results[prop] = euler_sums[max_order]
         
         return results
     
@@ -424,6 +586,7 @@ if __name__ == "__main__":
     parser.add_argument('--temp_min', type=float, default=1e-4, help='Minimum temperature for calculations')
     parser.add_argument('--temp_max', type=float, default=1.0, help='Maximum temperature for calculations')
     parser.add_argument('--temp_bins', type=int, default=200, help='Number of temperature points to calculate')
+    parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
     
     args = parser.parse_args()
     
@@ -431,7 +594,7 @@ if __name__ == "__main__":
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Create NLC instance
-    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.SI_units)
+    nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units)
     
     # Run NLC calculation
     results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff)
@@ -458,6 +621,17 @@ if __name__ == "__main__":
         f.write("# Temperature\tEntropy\n")
         for i, temp in enumerate(nlc.temp_values):
             f.write(f"{temp:.8e}\t{results['entropy'][i]:.8e}\n")
+
+    # Save spin expectation values if requested
+    if args.measure_spin:
+        spin_file = os.path.join(args.output_dir, "nlc_spin_expectations.txt")
+        with open(spin_file, 'w') as f:
+            f.write("# Temperature\tsp\tsp_imag\tsm\tsm_imag\tsz\tsz_imag\n")
+            for i, temp in enumerate(nlc.temp_values):
+                sp = results['sp'][i]
+                sm = results['sm'][i]
+                sz = results['sz'][i]
+                f.write(f"{temp:.8e}\t{sp.real:.8e}\t{sp.imag:.8e}\t{sm.real:.8e}\t{sm.imag:.8e}\t{sz.real:.8e}\t{sz.imag:.8e}\n")
 
     # Plot results if requested
     if args.plot:
@@ -498,6 +672,22 @@ if __name__ == "__main__":
         entropy_plot_path = os.path.join(args.output_dir, "nlc_entropy.png")
         plt.savefig(entropy_plot_path)
         plt.close()
+
+        # Plot spin expectation values if requested
+        if args.measure_spin:
+            plt.figure(figsize=(8, 6))
+            plt.plot(temperatures, results['sp'], 'm-', label='sp')
+            plt.plot(temperatures, results['sm'], 'c-', label='sm')
+            plt.plot(temperatures, results['sz'], 'y-', label='sz')
+            plt.xlabel('Temperature (T)')
+            plt.ylabel('Spin Expectation Values')
+            plt.title('Spin Expectation Values vs Temperature')
+            plt.xscale('log')
+            plt.legend()
+            plt.tight_layout()
+            spin_plot_path = os.path.join(args.output_dir, "nlc_spin_expectations.png")
+            plt.savefig(spin_plot_path)
+            plt.close()
     
     print(f"NLC calculation completed! Results saved to {args.output_dir}")
     

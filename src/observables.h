@@ -21,7 +21,8 @@
 #include <fstream>
 #include <set>
 #include <thread>
-
+#include <mutex>
+#include "lanczos.h"
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //// Observables
@@ -176,7 +177,7 @@ Complex calculate_thermal_expectation(
 
     // Load eigenvalues from file
     std::vector<double> eigenvalues;
-    std::string eig_file = eig_dir + "/eigenvalues.bin";
+    std::string eig_file = eig_dir + "/eigenvalues.dat";
     std::ifstream infile(eig_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open eigenvalue file " << eig_file << std::endl;
@@ -210,7 +211,7 @@ Complex calculate_thermal_expectation(
         sum_exp += boltzmann;
         
         // Load eigenvector from file
-        std::string evec_file = eig_dir + "/eigenvector_" + std::to_string(i) + ".bin";
+        std::string evec_file = eig_dir + "/eigenvector_" + std::to_string(i) + ".dat";
         std::ifstream infile(evec_file, std::ios::binary);
         if (!infile) {
             std::cerr << "Error: Cannot open eigenvector file " << evec_file << std::endl;
@@ -263,7 +264,7 @@ Complex calculate_matrix_element(
 // where δ is approximated by a broadening function (Gaussian or Lorentzian)
 struct SpectralFunctionData {
     std::vector<double> frequencies;     // ω values
-    std::vector<double> spectral_function;  // A(ω) values
+    std::vector<std::complex<double>> spectral_function;  // A(ω) values
 };
 
 SpectralFunctionData calculate_spectral_function(
@@ -289,7 +290,7 @@ SpectralFunctionData calculate_spectral_function(
     
     // Load eigenvalues from file
     std::vector<double> eigenvalues;
-    std::string eig_file = eig_dir + "/eigenvalues.bin";
+    std::string eig_file = eig_dir + "/eigenvalues.dat";
     std::ifstream infile(eig_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open eigenvalue file " << eig_file << std::endl;
@@ -335,7 +336,7 @@ SpectralFunctionData calculate_spectral_function(
         
         // Load eigenstate |m⟩
         ComplexVector psi_m(N);
-        std::string evec_file_m = eig_dir + "/eigenvector_" + std::to_string(m) + ".bin";
+        std::string evec_file_m = eig_dir + "/eigenvector_" + std::to_string(m) + ".dat";
         std::ifstream infile_m(evec_file_m, std::ios::binary);
         if (!infile_m) {
             std::cerr << "Error: Cannot open eigenvector file " << evec_file_m << std::endl;
@@ -351,7 +352,7 @@ SpectralFunctionData calculate_spectral_function(
         for (size_t n = 0; n < num_eigenvalues; n++) {
             // Load eigenstate |n⟩
             ComplexVector psi_n(N);
-            std::string evec_file_n = eig_dir + "/eigenvector_" + std::to_string(n) + ".bin";
+            std::string evec_file_n = eig_dir + "/eigenvector_" + std::to_string(n) + ".dat";
             std::ifstream infile_n(evec_file_n, std::ios::binary);
             if (!infile_n) {
                 std::cerr << "Error: Cannot open eigenvector file " << evec_file_n << std::endl;
@@ -430,7 +431,7 @@ DynamicalSusceptibilityData calculate_dynamical_susceptibility(
     
     // Load eigenvalues from file
     std::vector<double> eigenvalues;
-    std::string eig_file = eig_dir + "/eigenvalues.bin";
+    std::string eig_file = eig_dir + "/eigenvalues.dat";
     std::ifstream infile(eig_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open eigenvalue file " << eig_file << std::endl;
@@ -472,7 +473,7 @@ DynamicalSusceptibilityData calculate_dynamical_susceptibility(
         if (probabilities[m] < 1e-12) continue;
         
         // Load eigenstate |m⟩
-        std::string evec_file_m = eig_dir + "/eigenvector_" + std::to_string(m) + ".bin";
+        std::string evec_file_m = eig_dir + "/eigenvector_" + std::to_string(m) + ".dat";
         std::ifstream infile_m(evec_file_m, std::ios::binary);
         if (!infile_m) {
             std::cerr << "Error: Cannot open eigenvector file " << evec_file_m << std::endl;
@@ -491,7 +492,7 @@ DynamicalSusceptibilityData calculate_dynamical_susceptibility(
             if (std::abs(prob_diff) < 1e-12) continue;
             
             // Load eigenstate |n⟩
-            std::string evec_file_n = eig_dir + "/eigenvector_" + std::to_string(n) + ".bin";
+            std::string evec_file_n = eig_dir + "/eigenvector_" + std::to_string(n) + ".dat";
             std::ifstream infile_n(evec_file_n, std::ios::binary);
             if (!infile_n) {
                 std::cerr << "Error: Cannot open eigenvector file " << evec_file_n << std::endl;
@@ -541,17 +542,21 @@ double calculate_quantum_fisher_information(
     
     // Load eigenvalues from file
     std::vector<double> eigenvalues;
-    std::string eig_file = eig_dir + "/eigenvalues.bin";
-    std::ifstream infile(eig_file, std::ios::binary);
-    if (!infile) {
-        std::cerr << "Error: Cannot open eigenvalue file " << eig_file << std::endl;
-        return 0.0;
+    std::ifstream eigenvalue_file(eig_dir + "/eigenvalues.txt");
+    if (!eigenvalue_file) {
+        std::cerr << "Error: Cannot open eigenvalue file " << eig_dir + "/eigenvalues.txt" << std::endl;
+        return -1;
     }
-    size_t num_eigenvalues;
-    infile.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-    eigenvalues.resize(num_eigenvalues);
-    infile.read(reinterpret_cast<char*>(eigenvalues.data()), num_eigenvalues * sizeof(double));
-    infile.close();
+    
+    double eigenvalue;
+    eigenvalues.clear();
+    while (eigenvalue_file >> eigenvalue) {
+        eigenvalues.push_back(eigenvalue);
+    }
+    size_t num_eigenvalues = eigenvalues.size();
+    eigenvalue_file.close();
+
+    std::cout << "Loaded " << num_eigenvalues << " eigenvalues from " << eig_dir + "/eigenvalues.txt" << std::endl;
     
     // Calculate partition function Z and Boltzmann probabilities
     // Using the log-sum-exp trick for numerical stability
@@ -582,56 +587,130 @@ double calculate_quantum_fisher_information(
     ComplexVector psi_n(N);
     ComplexVector A_psi_n(N);
     
-    // For each pair of eigenstates
-    for (size_t m = 0; m < num_eigenvalues; m++) {
-        // Load eigenvector |m⟩
-        std::string evec_file_m = eig_dir + "/eigenvector_" + std::to_string(m) + ".bin";
-        std::ifstream infile_m(evec_file_m, std::ios::binary);
-        if (!infile_m) {
-            std::cerr << "Error: Cannot open eigenvector file " << evec_file_m << std::endl;
-            continue;
-        }
-        infile_m.read(reinterpret_cast<char*>(psi_m.data()), N * sizeof(Complex));
-        infile_m.close();
-        
-        for (size_t n = 0; n < num_eigenvalues; n++) {
-            // Skip if p_m and p_n are both effectively zero
-            if (probabilities[m] < 1e-14 && probabilities[n] < 1e-14) continue;
-            
-            // Skip diagonal elements (they contribute zero to QFI)
-            if (m == n) continue;
-            
-            // Calculate coefficient (p_m - p_n)^2/(p_m + p_n)
-            double p_m = probabilities[m];
-            double p_n = probabilities[n];
-            double p_sum = p_m + p_n;
-            
-            // Handle numerical stability
-            if (p_sum < 1e-14) continue; // Skip if denominator is too small
-            
-            double coef = (p_m - p_n) * (p_m - p_n) / p_sum;
-            
-            // Load eigenvector |n⟩
-            std::string evec_file_n = eig_dir + "/eigenvector_" + std::to_string(n) + ".bin";
-            std::ifstream infile_n(evec_file_n, std::ios::binary);
-            if (!infile_n) {
-                std::cerr << "Error: Cannot open eigenvector file " << evec_file_n << std::endl;
-                continue;
-            }
-            infile_n.read(reinterpret_cast<char*>(psi_n.data()), N * sizeof(Complex));
-            infile_n.close();
-            
-            // Calculate matrix element ⟨m|A|n⟩
-            A(psi_n.data(), A_psi_n.data(), N);
-            Complex matrix_element;
-            cblas_zdotc_sub(N, psi_m.data(), 1, A_psi_n.data(), 1, &matrix_element);
-            
-            // Add contribution to QFI
-            double abs_squared = std::norm(matrix_element); // |⟨m|A|n⟩|^2
-            qfi += 2.0 * coef * abs_squared;
+    // Identify significant states to reduce computation
+    std::vector<size_t> significant_states;
+    for (size_t i = 0; i < num_eigenvalues; i++) {
+        if (probabilities[i] > 1e-12) {
+            significant_states.push_back(i);
         }
     }
     
+    std::cout << "Processing " << significant_states.size() << " significant states out of " 
+              << num_eigenvalues << " total states" << std::endl;
+    
+    // Create a thread pool
+    const size_t num_threads = std::thread::hardware_concurrency()/4;
+    std::cout << "Using " << num_threads << " threads" << std::endl;
+    
+    // Split work among threads
+    std::vector<std::thread> threads;
+    std::vector<double> partial_qfi(num_threads, 0.0);
+    std::mutex cout_mutex;
+    
+    // Launch threads
+    for (size_t t = 0; t < num_threads; t++) {
+        threads.emplace_back([&, t]() {
+            double local_qfi = 0.0;
+            size_t processed_count = 0;
+            
+            // Each thread processes a subset of states
+            for (size_t idx_m = t; idx_m < significant_states.size(); idx_m += num_threads) {
+                size_t m = significant_states[idx_m];
+                double p_m = probabilities[m];
+                
+                // Load eigenvector |m⟩ (only once per thread iteration)
+                std::string evec_file_m = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(m);
+                std::ifstream evec_stream_m(evec_file_m);
+                if (!evec_stream_m) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cerr << "Thread " << t << ": Cannot open eigenvector file " << evec_file_m << std::endl;
+                    continue;
+                }
+                
+                ComplexVector psi_m(N);
+                int dimension;
+                evec_stream_m >> dimension;
+                if (dimension != N) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cerr << "Thread " << t << ": Eigenvector dimension mismatch in " << evec_file_m << std::endl;
+                    evec_stream_m.close();
+                    continue;
+                }
+                
+                std::fill(psi_m.begin(), psi_m.end(), Complex(0.0, 0.0));
+                int index;
+                double real_part, imag_part;
+                while (evec_stream_m >> index >> real_part >> imag_part) {
+                    psi_m[index] = Complex(real_part, imag_part);
+                }
+                evec_stream_m.close();
+                
+                // Apply operator A to |m⟩ once and store the result
+                ComplexVector A_psi_m(N);
+                A(psi_m.data(), A_psi_m.data(), N);
+                
+                // Process all significant states for this m
+                for (size_t idx_n = 0; idx_n < significant_states.size(); idx_n++) {
+                    size_t n = significant_states[idx_n];
+                    if (m == n) continue;  // Skip diagonal elements
+                    
+                    double p_n = probabilities[n];
+                    double p_sum = p_m + p_n;
+                    if (p_sum < 1e-14) continue;
+                    
+                    double coef = (p_m - p_n) * (p_m - p_n) / p_sum;
+                    
+                    // Load eigenvector |n⟩
+                    std::string evec_file_n = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(n);
+                    std::ifstream evec_stream_n(evec_file_n);
+                    if (!evec_stream_n) continue;
+                    
+                    ComplexVector psi_n(N);
+                    int dim_n;
+                    evec_stream_n >> dim_n;
+                    if (dim_n != N) {
+                        evec_stream_n.close();
+                        continue;
+                    }
+                    
+                    std::fill(psi_n.begin(), psi_n.end(), Complex(0.0, 0.0));
+                    while (evec_stream_n >> index >> real_part >> imag_part) {
+                        psi_n[index] = Complex(real_part, imag_part);
+                    }
+                    evec_stream_n.close();
+                    
+                    // Calculate matrix element ⟨m|A|n⟩
+                    Complex matrix_element;
+                    cblas_zdotc_sub(N, psi_m.data(), 1, A_psi_n.data(), 1, &matrix_element);
+                    
+                    // Add contribution to local QFI
+                    local_qfi += 2.0 * coef * std::norm(matrix_element);
+                }
+                
+                // Occasionally report progress
+                if (++processed_count % 10 == 0) {
+                    std::lock_guard<std::mutex> lock(cout_mutex);
+                    std::cout << "Thread " << t << " processed " << processed_count << "/" 
+                              << (significant_states.size() / num_threads + 1) << " states" << std::endl;
+                }
+            }
+            
+            // Store the thread's result
+            partial_qfi[t] = local_qfi;
+        });
+    }
+    
+    // Wait for all threads to finish
+    for (auto& thread : threads) {
+        thread.join();
+    }
+    
+    // Combine results from all threads
+    for (double partial : partial_qfi) {
+        qfi += partial;
+    }
+    
+    std::cout << "Quantum Fisher Information calculation complete" << std::endl;
     return qfi;
 }
 
@@ -650,21 +729,25 @@ void compute_spin_expectations(
     // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
     std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
     
+    std::cout << "Reading eigenvalues and eigenvectors from " << eigdir << std::endl;
+
     // Load eigenvalues
     std::vector<double> eigenvalues;
-    std::ifstream eigenvalue_file(eigdir + "/eigenvalues.bin", std::ios::binary);
+    std::ifstream eigenvalue_file(eigdir + "/eigenvalues.txt");
     if (!eigenvalue_file) {
-        std::cerr << "Error: Cannot open eigenvalue file " << eigdir + "/eigenvalues.bin" << std::endl;
+        std::cerr << "Error: Cannot open eigenvalue file " << eigdir + "/eigenvalues.txt" << std::endl;
         return;
     }
     
-    size_t num_eigenvalues;
-    eigenvalue_file.read(reinterpret_cast<char*>(&num_eigenvalues), sizeof(size_t));
-    eigenvalues.resize(num_eigenvalues);
-    eigenvalue_file.read(reinterpret_cast<char*>(eigenvalues.data()), num_eigenvalues * sizeof(double));
+    double eigenvalue;
+    eigenvalues.clear();
+    while (eigenvalue_file >> eigenvalue) {
+        eigenvalues.push_back(eigenvalue);
+    }
+    size_t num_eigenvalues = eigenvalues.size();
     eigenvalue_file.close();
     
-    std::cout << "Loaded " << num_eigenvalues << " eigenvalues from " << eigdir + "/eigenvalues.bin" << std::endl;
+    std::cout << "Loaded " << num_eigenvalues << " eigenvalues from " << eigdir + "/eigenvalues.txt" << std::endl;
     
     // Calculate beta = 1/kT
     double beta = 1.0 / temperature;
@@ -695,15 +778,32 @@ void compute_spin_expectations(
     // Process each eigenvector
     for (size_t idx = 0; idx < num_eigenvalues; idx++) {
         // Load eigenvector
-        std::string evec_file = eigdir + "/eigenvector_" + std::to_string(idx) + ".bin";
-        std::ifstream evec_stream(evec_file, std::ios::binary);
+        std::string evec_file = eigdir + "/eigenvectors/eigenvector_" + std::to_string(idx);
+        std::ifstream evec_stream(evec_file);
         if (!evec_stream) {
             std::cerr << "Error: Cannot open eigenvector file " << evec_file << std::endl;
             continue;
         }
         
         ComplexVector psi(N);
-        evec_stream.read(reinterpret_cast<char*>(psi.data()), N * sizeof(Complex));
+        // Read the file contents - first line is dimension
+        int dimension;
+        evec_stream >> dimension;
+        if (dimension != N) {
+            std::cerr << "Error: Eigenvector dimension " << dimension << " doesn't match expected size " << N << std::endl;
+            evec_stream.close();
+            continue;
+        }
+
+        // Initialize psi to zeros
+        std::fill(psi.begin(), psi.end(), Complex(0.0, 0.0));
+
+        // Read non-zero entries
+        int index;
+        double real_part, imag_part;
+        while (evec_stream >> index >> real_part >> imag_part) {
+            psi[index] = Complex(real_part, imag_part);
+        }
         evec_stream.close();
         
         // Calculate Boltzmann factor

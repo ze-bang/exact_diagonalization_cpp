@@ -1,167 +1,277 @@
+# filepath: /home/pc_linux/exact_diagonalization_cpp/util/helper_pyrochlore.py
 import numpy as np
 import sys
 import os
-from mpl_toolkits.mplot3d import Axes3D
+import re
 import matplotlib.pyplot as plt
-import argparse
+from mpl_toolkits.mplot3d import Axes3D
 
-# Constants and configurations
-# Local z-axes for the four sublattices of pyrochlore
-z = np.array([np.array([1,1,1])/np.sqrt(3), 
-             np.array([1,-1,-1])/np.sqrt(3), 
-             np.array([-1,1,-1])/np.sqrt(3), 
-             np.array([-1,-1,1])/np.sqrt(3)])
-
-# Pyrochlore lattice parameters
-site_basis = np.array([[0.125,0.125,0.125], [0.125,-0.125,-0.125], 
-                        [-0.125,0.125,-0.125], [-0.125,-0.125,0.125]])
-basis = np.array([[0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]])
-
-def parse_arguments():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Generate pyrochlore lattice Hamiltonian')
-    parser.add_argument('--Jxx', type=float, required=True, help='Jxx coupling')
-    parser.add_argument('--Jyy', type=float, required=True, help='Jyy coupling')
-    parser.add_argument('--Jzz', type=float, required=True, help='Jzz coupling')
-    parser.add_argument('--h', type=float, required=True, help='Field strength')
-    parser.add_argument('--hx', type=float, required=True, help='Field x component')
-    parser.add_argument('--hy', type=float, required=True, help='Field y component')
-    parser.add_argument('--hz', type=float, required=True, help='Field z component')
-    parser.add_argument('--outdir', type=str, required=True, help='Output directory')
-    parser.add_argument('--dim1', type=int, required=True, help='Lattice dimension 1')
-    parser.add_argument('--dim2', type=int, required=True, help='Lattice dimension 2')
-    parser.add_argument('--dim3', type=int, required=True, help='Lattice dimension 3')
-    parser.add_argument('--pbc', type=int, default=0, help='Periodic boundary conditions (1=on, 0=off)')
+def generate_pyrochlore_cluster(dim1, dim2, dim3, use_pbc=False):
+    """
+    Generate a pyrochlore lattice cluster with cubic formation of tetrahedrons
     
-    return parser.parse_args()
-
-def indices_periodic_BC(i, j, k, u, d1, d2, d3):
-    if u == 0:
-        return np.array([[i, j, k, 1], [i, j, k, 2], [i, j, k, 3], 
-                          [np.mod(i-1, d1), j, k, 1], [i, np.mod(j-1, d2), k, 2], [i, j, np.mod(k-1, d3), 3]])
-    elif u == 1:
-        return np.array([[i, j, k, 0], [i, j, k, 2], [i, j, k, 3], 
-                          [np.mod(i+1, d1), j, k, 0], [np.mod(i+1, d1), np.mod(j-1, d2), k, 2], [np.mod(i+1, d1), j, np.mod(k-1, d3), 3]])
-    elif u == 2:
-        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 3], 
-                          [i, np.mod(j+1, d2), k, 0], [np.mod(i-1, d1), np.mod(j+1, d2), k, 1], [i, np.mod(j+1, d2), np.mod(k-1, d3), 3]])
-    elif u == 3:
-        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 2], 
-                          [i, j, np.mod(k+1, d3), 0], [np.mod(i-1, d1), j, np.mod(k+1, d3), 1], [i, np.mod(j-1, d2), np.mod(k+1, d3), 2]])
-
-def indices_open_BC(i, j, k, u, d1, d2, d3):
-    if u == 0:
-        return np.array([[i, j, k, 1], [i, j, k, 2], [i, j, k, 3], 
-                          [i-1, j, k, 1], [i, j-1, k, 2], [i, j, k-1, 3]])
-    elif u == 1:
-        return np.array([[i, j, k, 0], [i, j, k, 2], [i, j, k, 3], 
-                          [i+1, j, k, 0], [i+1, j-1, k, 2], [i+1, j, k-1, 3]])
-    elif u == 2:
-        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 3], 
-                          [i, j+1, k, 0], [i-1, j+1, k, 1], [i, j+1, k-1, 3]])
-    elif u == 3:
-        return np.array([[i, j, k, 0], [i, j, k, 1], [i, j, k, 2], 
-                          [i, j, k+1, 0], [i-1, j, k+1, 1], [i, j-1, k+1, 2]])
-
-def flattenIndex(Indx):
-    """Convert 4D indices to flattened 1D indices"""
-    temp = np.zeros(len(Indx))
-    for i in range(6):
-        temp[i] = Indx[i][0]*dim2*dim3*4 + Indx[i][1]*dim3*4 + Indx[i][2]*4 + Indx[i][3]
-    return temp
-
-def genNN_list(d1, d2, d3, PBC):
-    """Generate nearest neighbor list with either PBC or open BC"""
-    NN_list = np.zeros((d1*d2*d3*4, 6))
-    for i in range(d1):
-        for j in range(d2):
-            for k in range(d3):
-                for u in range(4):
-                    site_idx = i*d2*d3*4 + j*d3*4 + k*4 + u
-                    if PBC:
-                        indices = indices_periodic_BC(i, j, k, u, d1, d2, d3)
-                    else:
-                        indices = indices_open_BC(i, j, k, u, d1, d2, d3)
-                    NN_list[site_idx] = flattenIndex(indices)
-    return NN_list
-
-def HeisenbergNN(Jzz, Jpm, Jpmpm, indx1, indx2, max_site):
-    """Generate Heisenberg interaction terms"""
-    if indx1 < max_site and indx2 < max_site and indx1 >= 0 and indx2 >= 0:
-        Jzz = Jzz/2 
-        Jpm = Jpm/2
-        Jpmpm = Jpmpm/2
-        return np.array([
-            [2, indx1, 2, indx2, Jzz, 0],
-            [0, indx1, 1, indx2, -Jpm, 0],
-            [1, indx1, 0, indx2, -Jpm, 0],
-            [1, indx1, 1, indx2, Jpmpm, 0],
-            [0, indx1, 0, indx2, Jpmpm, 0]
-        ])
-    return np.array([])
-
-def Zeeman(h, indx):
-    """Generate Zeeman interaction terms"""
-    here = h[indx % 4]
-    return np.array([[2, indx, -here, 0]])
-
-def write_interALL(interALL, output_dir, file_name):
-    """Write interaction terms to file"""
-    num_param = len(interALL)
-    with open(output_dir+file_name, 'wt') as f:
-        f.write("===================\n")
-        f.write(f"num {num_param:8d}\n")
-        f.write("===================\n")
-        f.write("===================\n")
-        f.write("===================\n")
-        for i in range(num_param):
-            f.write(f" {int(interALL[i,0]):8d} " \
-                  + f" {int(interALL[i,1]):8d}   " \
-                  + f" {int(interALL[i,2]):8d}   " \
-                  + f" {int(interALL[i,3]):8d}   " \
-                  + f" {interALL[i,4]:8f}   " \
-                  + f" {interALL[i,5]:8f}   " \
-                  + "\n")
-
-def write_transfer(interALL, output_dir, file_name):
-    """Write transfer terms to file"""
-    num_param = len(interALL)
-    with open(output_dir+file_name, 'wt') as f:
-        f.write("===================\n")
-        f.write(f"num {num_param:8d}\n")
-        f.write("===================\n")
-        f.write("===================\n")
-        f.write("===================\n")
-        for i in range(num_param):
-            f.write(f" {int(interALL[i,0]):8d} " \
-                  + f" {int(interALL[i,1]):8d}   " \
-                  + f" {interALL[i,2]:8f}   " \
-                  + f" {interALL[i,3]:8f}" \
-                  + "\n")
-
-def write_site_positions(output_dir, dim1, dim2, dim3):
-    """Write site positions to a file in the format: index, x, y, z"""
-    with open(output_dir+"site_positions.dat", 'wt') as f:
-        f.write("# index, x, y, z\n")
+    Args:
+        dim1, dim2, dim3: Dimensions of the lattice
+        use_pbc: Whether to use periodic boundary conditions
         
-        for i in range(dim1):
-            for j in range(dim2):
-                for k in range(dim3):
-                    for u in range(4):
-                        # Calculate site index
-                        site_index = i*dim2*dim3*4 + j*dim3*4 + k*4 + u
-                        
-                        # Calculate position in Cartesian coordinates
-                        unit_cell_pos = i*basis[0] + j*basis[1] + k*basis[2]
-                        position = unit_cell_pos + site_basis[u]
-                        
-                        # Write to file
-                        f.write(f"{site_index} {position[0]:.6f} {position[1]:.6f} {position[2]:.6f}\n")
+    Returns:
+        vertices: Dictionary of {vertex_id: (x, y, z)}
+        edges: List of (vertex1, vertex2) tuples
+        tetrahedra: List of (v1, v2, v3, v4) tuples
+        node_mapping: Dictionary mapping original IDs to matrix indices
+    """
+    # Pyrochlore lattice parameters
+    site_basis = np.array([
+        [0.125, 0.125, 0.125],
+        [0.125, -0.125, -0.125],
+        [-0.125, 0.125, -0.125],
+        [-0.125, -0.125, 0.125]
+    ])
+    basis = np.array([
+        [0, 0.5, 0.5],
+        [0.5, 0, 0.5],
+        [0.5, 0.5, 0]
+    ])
+    
+    # Generate vertices
+    vertices = {}
+    vertex_id = 0
+    
+    for i in range(dim1):
+        for j in range(dim2):
+            for k in range(dim3):
+                for u in range(4):
+                    # Calculate position in Cartesian coordinates
+                    unit_cell_pos = i*basis[0] + j*basis[1] + k*basis[2]
+                    position = unit_cell_pos + site_basis[u]
+                    vertices[vertex_id] = tuple(position)
+                    vertex_id += 1
+    
+    # Generate edges based on nearest neighbors in the pyrochlore lattice
+    edges = []
+    for i in range(dim1):
+        for j in range(dim2):
+            for k in range(dim3):
+                for u in range(4):
+                    site_idx = i*dim2*dim3*4 + j*dim3*4 + k*4 + u
+                    
+                    # Find nearest neighbors
+                    neighbors = get_neighbors(i, j, k, u, dim1, dim2, dim3, use_pbc)
+                    
+                    for neighbor_idx in neighbors:
+                        if 0 <= neighbor_idx < len(vertices) and site_idx < neighbor_idx:
+                            edges.append((site_idx, neighbor_idx))
+    
+    # Generate tetrahedra (each unit cell has 2 tetrahedra)
+    tetrahedra = []
+    for i in range(dim1):
+        for j in range(dim2):
+            for k in range(dim3):
+                base_idx = i*dim2*dim3*4 + j*dim3*4 + k*4
+                # First tetrahedron in the unit cell
+                tetrahedra.append((base_idx, base_idx+1, base_idx+2, base_idx+3))
+                
+                # Second tetrahedron (connecting to adjacent unit cells)
+                # Only add if not at the edge, or if using periodic boundaries
+                if use_pbc or (i < dim1-1 and j < dim2-1 and k < dim3-1):
+                    # This is a simplification - proper implementation would 
+                    # consider the actual connectivity in the pyrochlore lattice
+                    # and periodic boundary conditions if enabled
+                    pass
+    
+    # Create a simple node mapping (in this case, identity mapping)
+    node_mapping = {i: i for i in range(len(vertices))}
+    
+    return vertices, edges, tetrahedra, node_mapping
 
-def write_lattice_parameters(output_dir):
-    """Write the unit cell site basis and lattice vectors to a file"""
-    with open(output_dir+"lattice_parameters.dat", 'wt') as f:
+def get_neighbors(i, j, k, u, dim1, dim2, dim3, use_pbc=False):
+    """
+    Get nearest neighbors for a site in the pyrochlore lattice
+    
+    Args:
+        i, j, k: Unit cell coordinates
+        u: Site index within unit cell (0-3)
+        dim1, dim2, dim3: Lattice dimensions
+        use_pbc: Whether to use periodic boundary conditions
+        
+    Returns:
+        List of neighbor indices
+    """
+    neighbors = []
+    
+    # Define the connectivity based on the pyrochlore lattice structure
+    if u == 0:
+        # Site 0 connects to sites 1, 2, and 3 within the same unit cell
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 1)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 2)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 3)
+        
+        # Connect to sites in adjacent unit cells
+        if use_pbc or i > 0:
+            i_prev = (i-1) % dim1 if use_pbc else i-1
+            neighbors.append(i_prev*dim2*dim3*4 + j*dim3*4 + k*4 + 1)
+        
+        if use_pbc or j > 0:
+            j_prev = (j-1) % dim2 if use_pbc else j-1
+            neighbors.append(i*dim2*dim3*4 + j_prev*dim3*4 + k*4 + 2)
+            
+        if use_pbc or k > 0:
+            k_prev = (k-1) % dim3 if use_pbc else k-1
+            neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k_prev*4 + 3)
+    
+    elif u == 1:
+        # Similar connectivity patterns for other sites
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 0)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 2)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 3)
+        
+        if use_pbc or i < dim1-1:
+            i_next = (i+1) % dim1 if use_pbc else i+1
+            neighbors.append(i_next*dim2*dim3*4 + j*dim3*4 + k*4 + 0)
+            
+            if use_pbc or j > 0:
+                j_prev = (j-1) % dim2 if use_pbc else j-1
+                neighbors.append(i_next*dim2*dim3*4 + j_prev*dim3*4 + k*4 + 2)
+            
+            if use_pbc or k > 0:
+                k_prev = (k-1) % dim3 if use_pbc else k-1
+                neighbors.append(i_next*dim2*dim3*4 + j*dim3*4 + k_prev*4 + 3)
+    
+    elif u == 2:
+        # Similarly for site 2
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 0)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 1)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 3)
+        
+        # Connect to sites in adjacent unit cells (simplified)
+        if use_pbc or j < dim2-1:
+            j_next = (j+1) % dim2 if use_pbc else j+1
+            neighbors.append(i*dim2*dim3*4 + j_next*dim3*4 + k*4 + 0)
+            
+            if use_pbc or i > 0:
+                i_prev = (i-1) % dim1 if use_pbc else i-1
+                neighbors.append(i_prev*dim2*dim3*4 + j_next*dim3*4 + k*4 + 1)
+            
+            if use_pbc or k > 0:
+                k_prev = (k-1) % dim3 if use_pbc else k-1
+                neighbors.append(i*dim2*dim3*4 + j_next*dim3*4 + k_prev*4 + 3)
+    
+    elif u == 3:
+        # Similarly for site 3
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 0)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 1)
+        neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k*4 + 2)
+        
+        # Connect to sites in adjacent unit cells (simplified)
+        if use_pbc or k < dim3-1:
+            k_next = (k+1) % dim3 if use_pbc else k+1
+            neighbors.append(i*dim2*dim3*4 + j*dim3*4 + k_next*4 + 0)
+            
+            if use_pbc or i > 0:
+                i_prev = (i-1) % dim1 if use_pbc else i-1
+                neighbors.append(i_prev*dim2*dim3*4 + j*dim3*4 + k_next*4 + 1)
+            
+            if use_pbc or j > 0:
+                j_prev = (j-1) % dim2 if use_pbc else j-1
+                neighbors.append(i*dim2*dim3*4 + j_prev*dim3*4 + k_next*4 + 2)
+    
+    # Filter out invalid indices
+    valid_neighbors = [n for n in neighbors if 0 <= n < dim1*dim2*dim3*4]
+    
+    return valid_neighbors
+
+def get_sublattice_index(vertex_id):
+    """Return the sublattice index (vertex_id mod 4)"""
+    return vertex_id % 4
+
+def create_nn_lists(edges, node_mapping, vertices):
+    """
+    Create nearest neighbor lists from the edge information
+    
+    Args:
+        edges: List of (vertex1, vertex2) tuples
+        node_mapping: Dictionary mapping original IDs to matrix indices
+        vertices: Dictionary of {vertex_id: (x, y, z)}
+        
+    Returns:
+        nn_list: Dictionary mapping each site to its nearest neighbors
+        positions: Dictionary mapping each site to its position
+        sublattice_indices: Dictionary mapping each site to its sublattice index
+    """
+    nn_list = {}
+    positions = {}
+    sublattice_indices = {}
+    
+    # Initialize empty lists for all vertices
+    for vertex_id in vertices:
+        nn_list[vertex_id] = []
+        positions[vertex_id] = vertices[vertex_id]
+        sublattice_indices[vertex_id] = get_sublattice_index(vertex_id)
+    
+    # Fill nearest neighbor lists based on edges
+    for v1, v2 in edges:
+        nn_list[v1].append(v2)
+        nn_list[v2].append(v1)
+    
+    return nn_list, positions, sublattice_indices
+
+def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping):
+    """
+    Write nearest neighbor list, positions, and sublattice indices to a file
+    
+    Args:
+        output_dir: Directory to write output files
+        cluster_name: Name of the cluster
+        nn_list: Dictionary mapping each site to its nearest neighbors
+        positions: Dictionary mapping each site to its position
+        sublattice_indices: Dictionary mapping each site to its sublattice index
+        node_mapping: Dictionary mapping original IDs to matrix indices
+    """
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+    
+    # Write nearest neighbor list
+    with open(f"{output_dir}/{cluster_name}_nn_list.dat", 'w') as f:
+        f.write("# Nearest neighbor list for cluster: " + cluster_name + "\n")
+        f.write("# Format: site_id, number_of_neighbors, [neighbor_ids]\n\n")
+        
+        for site_id in sorted(nn_list.keys()):
+            neighbors = nn_list[site_id]
+            matrix_index = node_mapping.get(site_id, site_id)  # Use matrix index if available
+            
+            f.write(f"{site_id} {len(neighbors)}")
+            for neighbor in sorted(neighbors):
+                f.write(f" {neighbor}")
+            f.write("\n")
+    
+    # Write site positions and sublattice indices
+    with open(f"{output_dir}/{cluster_name}_site_info.dat", 'w') as f:
+        f.write("# Site information for cluster: " + cluster_name + "\n")
+        f.write("# site_id, matrix_index, sublattice_index, x, y, z\n\n")
+        
+        for site_id in sorted(positions.keys()):
+            pos = positions[site_id]
+            sub_idx = sublattice_indices[site_id]
+            matrix_index = node_mapping.get(site_id, site_id)  # Use matrix index if available
+            
+            f.write(f"{site_id} {matrix_index} {sub_idx} {pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f}\n")
+
+    # Write lattice parameters
+    with open(f"{output_dir}/{cluster_name}_lattice_parameters.dat", 'w') as f:
         f.write("# Pyrochlore lattice parameters\n\n")
+        
+        # Define the site basis and lattice vectors
+        site_basis = np.array([
+            [0.125, 0.125, 0.125],
+            [0.125, -0.125, -0.125],
+            [-0.125, 0.125, -0.125],
+            [-0.125, -0.125, 0.125]
+        ])
+        basis = np.array([
+            [0, 0.5, 0.5],
+            [0.5, 0, 0.5],
+            [0.5, 0.5, 0]
+        ])
         
         # Write site basis
         f.write("# Unit cell site basis (4 sites per unit cell)\n")
@@ -177,231 +287,296 @@ def write_lattice_parameters(output_dir):
         for i, vector in enumerate(basis):
             f.write(f"{i} {vector[0]:.6f} {vector[1]:.6f} {vector[2]:.6f}\n")
 
-
-def lattice_pos(site_indx, dim1, dim2, dim3):
+def prepare_hamiltonian_parameters(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir):
+    """
+    Prepare Hamiltonian parameters for exact diagonalization
     
-    """Convert site index to 3D lattice position"""
-    i = site_indx // (dim2 * dim3 * 4)
-    j = (site_indx // (dim3 * 4)) % dim2
-    k = (site_indx // 4) % dim3
-    u = site_indx % 4
-
-    position = i * basis[0] + j * basis[1] + k * basis[2] + site_basis[u]
-
-    return position
-
-def plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table):
-    """Plot the pyrochlore lattice showing sites and their nearest neighbor connections"""
-    # Calculate all site positions
-    positions = []
-    sublattice_indices = []
+    Args:
+        output_dir: Directory to write output files
+        cluster_name: Name of the cluster
+        nn_list: Dictionary mapping each site to its nearest neighbors
+        positions: Dictionary mapping each site to its position
+        sublattice_indices: Dictionary mapping each site to its sublattice index
+        node_mapping: Dictionary mapping original IDs to matrix indices
+        Jxx, Jyy, Jzz: Exchange couplings
+        h: Field strength
+        field_dir: Field direction (3-vector)
+    """
+    # Prepare Hamiltonian parameters
+    Jpm = Jxx
+    Jpmpm = Jyy
     
-    for i in range(dim1):
-        for j in range(dim2):
-            for k in range(dim3):
-                for u in range(4):
-                    # Calculate position in Cartesian coordinates
-                    unit_cell_pos = i*basis[0] + j*basis[1] + k*basis[2]
-                    position = unit_cell_pos + site_basis[u]
-                    positions.append(position)
-                    sublattice_indices.append(u)
+    # Define local z-axes for pyrochlore lattice
+    z_local = np.array([
+        np.array([1, 1, 1]) / np.sqrt(3),
+        np.array([1, -1, -1]) / np.sqrt(3),
+        np.array([-1, 1, -1]) / np.sqrt(3),
+        np.array([-1, -1, 1]) / np.sqrt(3)
+    ])
     
-    # Convert to numpy array for easier handling
-    positions = np.array(positions)
-    sublattice_indices = np.array(sublattice_indices)
+    # Normalize field direction
+    field_dir = np.array(field_dir)
+    field_dir = field_dir / np.linalg.norm(field_dir)
     
-    # Create 3D plot
-    fig = plt.figure(figsize=(10, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    
-    # Colors for each sublattice
-    colors = ['r', 'g', 'b', 'purple']
-    
-    # Plot sites as scatter points, color by sublattice
-    for u in range(4):
-        mask = sublattice_indices == u
-        ax.scatter(
-            positions[mask, 0], 
-            positions[mask, 1], 
-            positions[mask, 2],
-            s=80,  # Point size
-            c=colors[u],
-            marker='o',
-            label=f'Sublattice {u}'
-        )
-    
-    # Connect nearest neighbors
-    for site_idx in range(len(look_up_table)):
-        site_pos = positions[site_idx]
-        
-        for neighbor_idx in look_up_table[site_idx]:
-            # Convert to integer and check bounds
-            neighbor_idx = int(neighbor_idx)
-            if 0 <= neighbor_idx < len(positions):
-                # Only draw each connection once to avoid duplicate lines
-                if site_idx < neighbor_idx:
-                    neighbor_pos = positions[neighbor_idx]
-                    
-                    ax.plot(
-                        [site_pos[0], neighbor_pos[0]],
-                        [site_pos[1], neighbor_pos[1]],
-                        [site_pos[2], neighbor_pos[2]],
-                        'k-', alpha=0.3, linewidth=1
-                    )
-    
-    # Set labels and title
-    ax.set_xlabel('X')
-    ax.set_ylabel('Y')
-    ax.set_zlabel('Z')
-    bc_type = "PBC" if use_pbc else "Open BC"
-    ax.set_title(f'Pyrochlore Lattice ({dim1}x{dim2}x{dim3} unit cells, {bc_type})')
-    
-    # Add a legend
-    ax.legend()
-    
-    # Equal aspect ratio
-    ax.set_box_aspect([1, 1, 1])
-    
-    # Save the figure
-    plt.savefig(f"{output_dir}pyrochlore_lattice.png", dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def one_body_correlations(file_name, All_N, output_dir):
-    num_green_one  = All_N
-    f        = open(output_dir+file_name, 'wt')
-    f.write("==================="+"\n")
-    f.write("loc "+"{0:8d}".format(num_green_one)+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    for i in range(3):
-        for all_i in range(0,All_N):
-            f.write(" {0:8d} ".format(i) \
-            +" {0:8d}   ".format(all_i)     \
-            +" {0:8f}   ".format(1)     \
-            +" {0:8f}   ".format(0)
-            +"\n")
-    f.close()
-
-
-def two_body_correlations(file_name, All_N, output_dir):
-    num_green_two  = All_N*All_N
-    f        = open(output_dir+file_name, 'wt')
-    f.write("==================="+"\n")
-    f.write("loc "+"{0:8d}".format(num_green_two)+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    for i in range(3):
-        for j in range(3):
-            for all_i in range(0,All_N):
-                for all_j in range(0,All_N):
-                    f.write(" {0:8d} ".format(i) \
-                    +" {0:8d}   ".format(all_i)     \
-                    +" {0:8d}   ".format(j)     \
-                    +" {0:8d}   ".format(all_j)     \
-                    +" {0:8f}   ".format(1) \
-                    +" {0:8f}   ".format(0) \
-                    +"\n")
-    f.close()
-
-def spin_operators(Op, Q, file_name, All_N, output_dir):
-    num_green_one  = All_N
-    f        = open(output_dir+file_name, 'wt')
-    f.write("==================="+"\n")
-    f.write("loc "+"{0:8d}".format(num_green_one)+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    f.write("==================="+"\n")
-    for all_i in range(0,All_N):
-        pos = lattice_pos(all_i, dim1, dim2, dim3)
-        factor = np.exp(1j*Q[0]*pos[0]+1j*Q[1]*pos[1]+1j*Q[2]*pos[2])
-
-        f.write(" {0:8d} ".format(Op)   \
-        +" {0:8d}   ".format(all_i)     \
-        +" {0:8f}   ".format(np.real(factor))     \
-        +" {0:8f}   ".format(np.imag(factor))     \
-        +"\n")
-
-    f.close()
-
-
-def main():
-    # Parse arguments
-    args = parse_arguments()
-    
-    # Make global variables accessible in functions
-    global dim1, dim2, dim3
-    dim1, dim2, dim3 = args.dim1, args.dim2, args.dim3
-    
-    # Extract parameters
-    use_pbc = args.pbc == 1
-    Jxx, Jyy, Jzz = args.Jxx, args.Jyy, args.Jzz
-    Jpm = -(Jxx+Jyy)/4  # J±
-    Jpmpm = (Jxx-Jyy)/4  # J±±
-    
-    # Field parameters
-    h = args.h
-    fielddir = np.array([args.hx, args.hy, args.hz])
-    fielddir = fielddir/np.linalg.norm(fielddir)
-    B = np.einsum('r, ir->i', h*fielddir, z)
-    
-    # Output directory
-    output_dir = "./" + args.outdir + "/"
-    if not os.path.isdir(output_dir):
-        os.mkdir(output_dir)
-    
-    # Generate nearest neighbor list with specified boundary condition
-    look_up_table = genNN_list(dim1, dim2, dim3, use_pbc)
-    max_site = dim1*dim2*dim3*4
-    
-    # Generate all interactions
     interALL = []
     transfer = []
+
+    gamma = np.exp(1j*2*np.pi/3)
+    # Define non-kramer pyrochlore factor
+    non_kramer_factor = np.array([[0, 1, gamma, gamma**2],
+                                  [1, 0, gamma**2, gamma],
+                                  [gamma, gamma**2, 0, 1],
+                                  [gamma**2, gamma, 1, 0]])
     
-    for i in range(max_site):
-        transfer.append(Zeeman(B, i))
-        for j in range(len(look_up_table[i])):
-            neighbor_idx = int(look_up_table[i][j])
-            if 0 <= neighbor_idx < max_site:  # Ensure valid neighbor index
-                interALL.append(HeisenbergNN(Jzz, Jpm, Jpmpm, i, neighbor_idx, max_site))
+    # Generate Heisenberg interactions
+    for site_id in sorted(nn_list.keys()):
+        # Site index (for the Hamiltonian)
+        i = site_id
+        
+        # Zeeman term
+        sub_idx = sublattice_indices[site_id]
+        local_field = h * np.dot(field_dir, z_local[sub_idx])
+        transfer.append([2, node_mapping[i], -local_field, 0])
+        
+        # Exchange interactions
+        for neighbor_id in nn_list[site_id]:
+            if site_id < neighbor_id:  # Only add each bond once
+                j = neighbor_id
+                
+                # Heisenberg interactions
+                interALL.append([2, node_mapping[i], 2, node_mapping[j], Jzz, 0])  # Sz-Sz
+                interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm, 0])   # S+-S-
+                interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm, 0])   # S--S+
+                Jpmpm_ = Jpmpm * non_kramer_factor[i % 4, j % 4]
+                interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S--S-
+                interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S+-S+
     
-    interALL = np.vstack([arr for arr in interALL if arr.size > 0])
-    transfer = np.vstack([arr for arr in transfer if arr.size > 0])
+    # Convert to arrays
+    interALL = np.array(interALL)
+    transfer = np.array(transfer)
+    
+    # Write interaction and transfer files
+    write_interALL(output_dir, interALL, f"InterAll.dat")
+    write_transfer(output_dir, transfer, f"Trans.dat")
     
     # Write field strength
-    fstrength = np.zeros((1,1))
-    fstrength[0,0] = h
-    np.savetxt(output_dir+"field_strength.dat", fstrength)
+    fstrength = np.array([[h]])
+    np.savetxt(f"{output_dir}/field_strength.dat", fstrength)
     
-    # Write boundary condition info
-    with open(output_dir+"boundary_condition.dat", 'w') as f:
-        f.write(f"PBC: {'True' if use_pbc else 'False'}\n")
-        f.write(f"Dimensions: {dim1}x{dim2}x{dim3}\n")
+    # Write correlation functions
+    max_site = len(nn_list)
+    opname = ['S+', 'S-', 'Sz']
     
-    # Write output files
-    write_interALL(interALL, output_dir, "InterAll.dat")
-    write_transfer(transfer, output_dir, "Trans.dat")
-    write_site_positions(output_dir, dim1, dim2, dim3)
-    write_lattice_parameters(output_dir)
-    plot_pyrochlore_lattice(output_dir, dim1, dim2, dim3, use_pbc, look_up_table)
+    for i in range(3):
+        write_one_body_correlations(output_dir, i, max_site, f"one_body_correlations{opname[i]}.dat")
+        for j in range(3):
+            write_two_body_correlations(output_dir, i, j, max_site, f"two_body_correlations{opname[i]}{opname[j]}.dat")
+            
+    # Write spin operators at specific k-points
+    write_spin_operators(output_dir, 1, [0, 0, 0], "observables_S-_Gamma.dat", max_site, positions)
+    write_spin_operators(output_dir, 2, [0, 0, 0], "observables_Sz_Gamma.dat", max_site, positions)
+    write_spin_operators(output_dir, 1, [2*np.pi, 0, 0], "observables_S-_X.dat", max_site, positions)
+    write_spin_operators(output_dir, 2, [2*np.pi, 0, 0], "observables_Sz_X.dat", max_site, positions)
 
-    # Write one-body and two-body correlation functions
-    one_body_correlations(f"one_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
-    two_body_correlations(f"two_body_correlations.dat", dim1*dim2*dim3*4, output_dir)
+def write_interALL(output_dir, interALL, file_name):
+    """Write interaction parameters to a file"""
+    num_param = len(interALL)
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"num {num_param:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for i in range(num_param):
+            f.write(f" {int(interALL[i,0]):8d} " \
+                   f" {int(interALL[i,1]):8d}   " \
+                   f" {int(interALL[i,2]):8d}   " \
+                   f" {int(interALL[i,3]):8d}   " \
+                   f" {interALL[i,4]:8f}   " \
+                   f" {interALL[i,5]:8f}   " \
+                   f"\n")
 
-    spin_operators(0, [0, 0, 0], "obervables_S+_Gamma.dat", dim1*dim2*dim3*4, output_dir)
-    spin_operators(1, [0, 0, 0], "obervables_S-_Gamma.dat", dim1*dim2*dim3*4, output_dir)
-    spin_operators(2, [0, 0, 0], "obervables_Sz_Gamma.dat", dim1*dim2*dim3*4, output_dir)
+def write_transfer(output_dir, transfer, file_name):
+    """Write transfer (field) parameters to a file"""
+    num_param = len(transfer)
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"num {num_param:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for i in range(num_param):
+            f.write(f" {int(transfer[i,0]):8d} " \
+                   f" {int(transfer[i,1]):8d}   " \
+                   f" {transfer[i,2]:8f}   " \
+                   f" {transfer[i,3]:8f}" \
+                   f"\n")
 
-    spin_operators(0, [2*np.pi, 0, 0], "obervables_S+_X.dat", dim1*dim2*dim3*4, output_dir)
-    spin_operators(1, [2*np.pi, 0, 0], "obervables_S-_X.dat", dim1*dim2*dim3*4, output_dir)
-    spin_operators(2, [2*np.pi, 0, 0], "obervables_Sz_X.dat", dim1*dim2*dim3*4, output_dir)
+def write_one_body_correlations(output_dir, Op, N, file_name):
+    """Write one-body correlation parameters to a file"""
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"loc {N:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for i in range(N):
+            f.write(f" {Op:8d} " \
+                   f" {i:8d}   " \
+                   f" {1:8f}   " \
+                   f" {0:8f}" \
+                   f"\n")
 
-    print(f"Generated pyrochlore lattice Hamiltonian with dimensions {dim1}x{dim2}x{dim3}")
-    print(f"Boundary conditions: {'Periodic' if use_pbc else 'Open'}")
-    print(f"Output saved to {output_dir}")
+def write_two_body_correlations(output_dir, Op1, Op2, N, file_name):
+    """Write two-body correlation parameters to a file"""
+    num_green_two = N * N
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"loc {num_green_two:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for i in range(N):
+            for j in range(N):
+                f.write(f" {Op1:8d} " \
+                       f" {i:8d}   " \
+                       f" {Op2:8d}   " \
+                       f" {j:8d}   " \
+                       f" {1:8f}   " \
+                       f" {0:8f}   " \
+                       f"\n")
+
+def write_spin_operators(output_dir, Op, Q, file_name, N, positions):
+    """Write spin operator parameters for specific k-points"""
+    with open(f"{output_dir}/{file_name}", 'w') as f:
+        f.write("===================\n")
+        f.write(f"loc {N:8d}\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        f.write("===================\n")
+        
+        for site_id in range(N):
+            pos = positions[site_id]
+            factor = np.exp(1j*Q[0]*pos[0] + 1j*Q[1]*pos[1] + 1j*Q[2]*pos[2])
+            
+            f.write(f" {Op:8d} " \
+                   f" {site_id:8d}   " \
+                   f" {np.real(factor):8f}   " \
+                   f" {np.imag(factor):8f}" \
+                   f"\n")
+
+def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=None):
+    """
+    Plot the cluster showing sites and their nearest neighbor connections
+    
+    Args:
+        vertices: Dictionary of {vertex_id: (x, y, z)}
+        edges: List of (vertex1, vertex2) tuples
+        output_dir: Directory to save the plot
+        cluster_name: Name of the cluster
+        sublattice_indices: Dictionary mapping each site to its sublattice index
+    """
+    try:
+        # Create 3D plot
+        fig = plt.figure(figsize=(10, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # Colors for each sublattice
+        colors = ['r', 'g', 'b', 'purple']
+        
+        # Plot vertices
+        for vertex_id, pos in vertices.items():
+            if sublattice_indices is None:
+                sub_idx = get_sublattice_index(vertex_id)
+            else:
+                sub_idx = sublattice_indices[vertex_id]
+            
+            ax.scatter(pos[0], pos[1], pos[2], s=80, c=colors[sub_idx], marker='o')
+            
+            # Add vertex label
+            ax.text(pos[0], pos[1], pos[2], str(vertex_id), fontsize=9)
+        
+        # Plot edges
+        for v1, v2 in edges:
+            pos1 = vertices[v1]
+            pos2 = vertices[v2]
+            
+            ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], [pos1[2], pos2[2]], 'k-', alpha=0.5)
+        
+        # Set labels and title
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title(f'Cluster: {cluster_name}')
+        
+        # Equal aspect ratio
+        ax.set_box_aspect([1, 1, 1])
+        
+        # Add a legend for sublattices
+        for i in range(4):
+            ax.scatter([], [], [], c=colors[i], marker='o', label=f'Sublattice {i}')
+        ax.legend()
+        
+        # Save the figure
+        if not os.path.isdir(output_dir):
+            os.makedirs(output_dir)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return True
+    except ImportError:
+        print("Warning: matplotlib not installed, skipping cluster plot")
+        return False
+
+def main():
+    """Main function to process command line arguments and run the program"""
+    if len(sys.argv) < 13:
+        print("Usage: python helper_pyrochlore.py Jxx Jyy Jzz h fieldx fieldy fieldz output_dir dim1 dim2 dim3 pbc")
+        sys.exit(1)
+    
+    # Parse command line arguments
+    Jxx = float(sys.argv[1])
+    Jyy = float(sys.argv[2])
+    Jzz = float(sys.argv[3])
+    h = float(sys.argv[4])
+    field_dir = [float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])]
+    output_dir = sys.argv[8]
+    dim1 = int(sys.argv[9])
+    dim2 = int(sys.argv[10])
+    dim3 = int(sys.argv[11])
+    use_pbc = bool(int(sys.argv[12]))
+    
+    # Ensure output directory exists
+    if not os.path.isdir(output_dir):
+        os.makedirs(output_dir)
+    
+    # Create cluster name
+    pbc_str = "pbc" if use_pbc else "obc"
+    cluster_name = f"pyrochlore_{dim1}x{dim2}x{dim3}_{pbc_str}"
+    
+    # Generate cluster
+    vertices, edges, tetrahedra, node_mapping = generate_pyrochlore_cluster(dim1, dim2, dim3, use_pbc)
+    
+    # Create nearest neighbor lists
+    nn_list, positions, sublattice_indices = create_nn_lists(edges, node_mapping, vertices)
+    
+    # Write nearest neighbor list and site info
+    write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
+    
+    # Prepare Hamiltonian parameters
+    prepare_hamiltonian_parameters(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir)
+    
+    # Plot cluster
+    plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)
+    
+    print(f"Generated pyrochlore lattice cluster with dimensions {dim1}x{dim2}x{dim3}")
+    print(f"Number of sites: {len(vertices)}")
+    print(f"Number of bonds: {len(edges)}")
+    print(f"Output written to: {output_dir}")
 
 if __name__ == "__main__":
     main()

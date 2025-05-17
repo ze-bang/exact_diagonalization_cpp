@@ -86,26 +86,41 @@ def run_ed_for_cluster(args):
         for line in f:
             if not line.startswith('#') and line.strip():
                 num_sites += 1
-    
-    # Read the number of elements in max_clique if symmetrized
-    if symmetrized:
-        block_size_file = os.path.join(ham_subdir, "sym_basis/sym_block_sizes.txt")
-        temp_num_sites = np.loadtxt(block_size_file, comments='#')
-        max_block_dim = np.max(temp_num_sites)
-        if max_block_dim > 12000:
-            logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization. Switching to LANCZOS.")
-            ed_options["method"] = "LANCZOS"
-    
 
-    cmd = [
-        ed_executable,
-        ham_subdir,
-        f'--method={ed_options["method"]}',
-        f'--eigenvalues=FULL',
-        f'--output={cluster_ed_dir}/output',
-        f'--num_sites={num_sites}',
-        '--spin_length=0.5'
-    ]
+
+    if ed_options["method"] == 'mTPQ':
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            f'--method={ed_options["method"]}',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5',
+            '--iterations=100000',
+            '--large_value=100'
+        ]
+    elif ed_options["method"] == 'FULL':
+        cmd = [
+            ed_executable,
+            ham_subdir,
+            f'--method={ed_options["method"]}',
+            f'--eigenvalues=FULL',
+            f'--output={cluster_ed_dir}/output',
+            f'--num_sites={num_sites}',
+            '--spin_length=0.5'
+        ]
+
+    # Read the number of elements in max_clique if symmetrized
+    # if symmetrized:
+    #     block_size_file = os.path.join(ham_subdir, "sym_basis/sym_block_sizes.txt")
+    #     temp_num_sites = np.loadtxt(block_size_file, comments='#')
+    #     max_block_dim = np.max(temp_num_sites)
+    #     if max_block_dim > 12000:
+    #         logging.warning(f"Max block dimension {max_block_dim} exceeds limit for cluster {cluster_id} for full diagonalization. Switching to LANCZOS.")
+    #         ed_options["method"] = "LANCZOS"
+    
+    if ed_options["measure_spin"]:
+        cmd.append('--measure_spin')
 
     if symmetrized:
         cmd.append('--symmetrized')
@@ -114,9 +129,9 @@ def run_ed_for_cluster(args):
     if ed_options["thermo"]:
         cmd.extend([
             '--thermo',
-            f'--temp-min={ed_options["temp_min"]}',
-            f'--temp-max={ed_options["temp_max"]}',
-            f'--temp-bins={ed_options["temp_bins"]}'
+            f'--temp_min={ed_options["temp_min"]}',
+            f'--temp_max={ed_options["temp_max"]}',
+            f'--temp_bins={ed_options["temp_bins"]}'
         ])
     
     try:
@@ -170,6 +185,7 @@ def main():
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
 
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
+    parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
     
     args = parser.parse_args()
     
@@ -277,6 +293,7 @@ def main():
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
             "temp_bins": args.temp_bins,
+            "measure_spin": args.measure_spin
         }
         
         # Prepare arguments for each cluster
@@ -304,7 +321,7 @@ def main():
         logging.info("Skipping Exact Diagonalization step.")
     
     # Step 3.5: Plot thermodynamic data for each cluster
-    if args.thermo and not args.skip_ed:
+    if args.thermo and not args.skip_ed and not args.method == "mTPQ":
         logging.info("="*80)
         logging.info("Step 3.5: Plotting thermodynamic data for each cluster")
         logging.info("="*80)
@@ -404,6 +421,75 @@ def main():
         
         except ImportError:
             logging.error("Matplotlib not installed. Skipping thermodynamic plots.")
+    elif args.method == 'mTPQ':
+        
+        logging.info("="*80)
+        logging.info("Step 3.5: Plotting mTPQ thermodynamic data for each cluster")
+        logging.info("="*80)
+
+        # Create directory for thermodynamic plots
+        thermo_plots_dir = os.path.join(args.base_dir, f'thermo_plots_order_{args.max_order}')
+        os.makedirs(thermo_plots_dir, exist_ok=True)
+
+        try:
+            import matplotlib.pyplot as plt
+            
+            # Iterate through all clusters
+            for cluster_id, order, _ in tqdm(clusters, desc="Plotting mTPQ thermodynamic data"):
+                cluster_ed_dir = os.path.join(ed_dir, f'cluster_{cluster_id}_order_{order}')
+                output_dir = os.path.join(cluster_ed_dir, "output")
+                
+                # Check if directory exists
+                if not os.path.exists(output_dir):
+                    logging.warning(f"No output directory found for cluster {cluster_id}")
+                    continue
+                    
+                # Find all SS_rand*.dat files
+                ss_files = os.path.join(output_dir, "SS_rand0.dat")
+                
+                if not ss_files:
+                    logging.warning(f"No SS_rand*.dat files found for cluster {cluster_id}")
+                    continue
+                    
+                SS_data = np.loadtxt(ss_files, unpack=True, skiprows=2)
+
+                logging.info(f"Loaded data from {ss_files} for cluster {cluster_id}")   
+
+                all_temps = 1.0 / SS_data[0]
+                all_energies = SS_data[1] 
+                all_variances = SS_data[2] * SS_data[0]**2
+
+                fig, axs = plt.subplots(2, 1, figsize=(10, 8))
+                fig.suptitle(f"mTPQ Thermodynamic Properties for Cluster {cluster_id} (Order {order})")
+
+                # Plot energy
+                axs[0].plot(all_temps, all_energies, label='Energy')
+                axs[0].set_xlabel("Temperature")
+                axs[0].set_ylabel("Energy per site")
+                axs[0].set_xscale('log')
+                axs[0].grid(True)
+                axs[0].legend()
+                
+                # Plot specific heat
+                axs[1].plot(all_temps, all_variances, label='Specific Heat')
+                axs[1].set_xlabel("Temperature")
+                axs[1].set_ylabel("Specific Heat")
+                axs[1].set_xscale('log')
+                axs[1].grid(True)
+                axs[1].legend()
+                
+                # Save plot
+                plt.tight_layout()
+                plt.savefig(os.path.join(thermo_plots_dir, f"mTPQ_thermo_cluster_{cluster_id}_order_{order}.png"))
+                plt.close(fig)
+
+                logging.info(f"mTPQ thermodynamic plots and data created for cluster {cluster_id}")
+
+        except ImportError:
+            logging.error("Matplotlib not installed. Skipping mTPQ thermodynamic plots.")
+        except Exception as e:
+            logging.error(f"Error in mTPQ thermodynamic analysis: {e}")
+            logging.error(traceback.format_exc())
 
     # Step 4: Perform NLCE summation
     if not args.skip_nlc:
@@ -411,18 +497,33 @@ def main():
         logging.info("Step 4: Performing NLCE summation")
         logging.info("="*80)
         
-        nlc_params = [
-            'python3',
-            'util/NLC_sum.py',
-            f'--cluster_dir={cluster_info_dir}',
-            f'--eigenvalue_dir={ed_dir}',
-            f'--output_dir={nlc_dir}',
-            '--plot',
-            f'--temp_min={args.temp_min}',
-            f'--temp_max={args.temp_max}',
-            f'--temp_bins={args.temp_bins}',
-        ]
-        
+        if args.method == 'mTPQ':
+            logging.info("Using mTPQ method for NLCE summation")
+            # Add mTPQ specific parameters here if needed
+            nlc_params = [
+                'python3',
+                'util/NLC_sum_TPQ.py',
+                f'--cluster_dir={cluster_info_dir}',
+                f'--eigenvalue_dir={ed_dir}',
+                f'--output_dir={nlc_dir}',
+                '--plot',
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ]
+        else:
+            nlc_params = [
+                'python3',
+                'util/NLC_sum.py',
+                f'--cluster_dir={cluster_info_dir}',
+                f'--eigenvalue_dir={ed_dir}',
+                f'--output_dir={nlc_dir}',
+                '--plot',
+                f'--temp_min={args.temp_min}',
+                f'--temp_max={args.temp_max}',
+                f'--temp_bins={args.temp_bins}',
+            ]
+            
         if args.SI_units:
             nlc_params.append('--SI_units')
         
@@ -432,6 +533,8 @@ def main():
         if args.order_cutoff:
             nlc_params.append(f'--order_cutoff={args.order_cutoff}')
         
+        if args.measure_spin:
+            nlc_params.append('--measure_spin')
         
         logging.info(f"Running command: {' '.join(nlc_params)}")
         try:

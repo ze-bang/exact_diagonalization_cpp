@@ -35,32 +35,54 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
     Jxx, Jyy, Jzz = params
     
     # Create command for nlce.py
-    cmd = [
-        'python3', 
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
-        '--max_order', str(fixed_params["max_order"]),
-        '--Jxx', str(Jxx),
-        '--Jyy', str(Jyy),
-        '--Jzz', str(Jzz),
-        '--h', str(fixed_params["h"]),
-        '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
-        '--base_dir', work_dir,
-        '--temp_min', str(fixed_params["temp_min"]),
-        '--temp_max', str(fixed_params["temp_max"]),
-        '--temp_bins', str(fixed_params["temp_bins"]),
-        '--thermo',
-        '--SI_units',
-        '--euler_resum',
-        '--symmetrized',
-        '--method=LANCZOS'
-    ]
+    if fixed_params["ED_method"] == 'FULL':
+        cmd = [
+            'python3', 
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+            '--max_order', str(fixed_params["max_order"]),
+            '--Jxx', str(Jxx),
+            '--Jyy', str(Jyy),
+            '--Jzz', str(Jzz),
+            '--h', str(fixed_params["h"]),
+            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
+            '--base_dir', work_dir,
+            '--temp_min', str(fixed_params["temp_min"]),
+            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_bins', str(fixed_params["temp_bins"]),
+            '--thermo',
+            '--SI_units',
+            '--euler_resum',
+            '--symmetrized'
+        ]
+    elif fixed_params["ED_method"] == 'mTPQ':
+        cmd = [
+            'python3', 
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+            '--max_order', str(fixed_params["max_order"]),
+            '--Jxx', str(Jxx),
+            '--Jyy', str(Jyy),
+            '--Jzz', str(Jzz),
+            '--h', str(fixed_params["h"]),
+            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
+            '--base_dir', work_dir,
+            '--temp_min', str(fixed_params["temp_min"]),
+            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_bins', str(fixed_params["temp_bins"]),
+            '--thermo',
+            '--SI_units',
+            '--euler_resum',
+            '--method=mTPQ'
+        ]
     
     cmd.append('--skip_cluster_gen')
     if fixed_params.get("skip_ham_prep", False):
         cmd.append('--skip_ham_prep')
     
+    if fixed_params.get("measure_spin", False):
+        cmd.append('--measure_spin')
     
     
+
     
     try:
         logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}")
@@ -184,6 +206,7 @@ def main():
     
     # Optimization parameters
     parser.add_argument('--method', type=str, default='L-BFGS-B', help='Optimization method')
+    parser.add_argument('--ED_method', type=str, default='FULL', help='ED method for NLCE')
     parser.add_argument('--max_iter', type=int, default=5000 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')
     
@@ -191,6 +214,8 @@ def main():
     parser.add_argument('--temp_min', type=float, default=1.0, help='Minimum temperature for NLCE')
     parser.add_argument('--temp_max', type=float, default=20.0, help='Maximum temperature for NLCE')
 
+
+    parser.add_argument('--measure_spin', action='store_true', help='Measure spin instead of specific heat')
 
     args = parser.parse_args()
     
@@ -241,7 +266,9 @@ def main():
             "temp_bins": args.temp_bins,
             "skip_ham_prep": args.skip_ham_prep,
             "temp_min": args.temp_min,
-            "temp_max": args.temp_max
+            "temp_max": args.temp_max,
+            "measure_spin": args.measure_spin,
+            "ED_method": args.ED_method
         }
         
         # Filter experimental data based on temperature range
@@ -279,6 +306,8 @@ def main():
         logging.info(f"Best parameters: Jxx={best_params[0]:.4f}, Jyy={best_params[1]:.4f}, Jzz={best_params[2]:.4f}")
         logging.info(f"Final chi-squared: {result.fun:.4f}")
         
+        # best_params = initial_params  # Placeholder for the best parameters
+
         # Run NLCE with best parameters to get final fit
         calc_temp, calc_spec_heat = run_nlce(best_params, fixed_params, exp_temp, work_dir)
         
