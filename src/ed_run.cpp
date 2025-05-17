@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --dt=<value>           : Time step for time evolution" << std::endl;
         std::cout << "  --help                : Show this help message" << std::endl;
         std::cout << "  --sublattice_size=<value> : Size of the sublattice" << std::endl;
-        return 1;
+        return 0;
     }
 
     // Directory with Hamiltonian files
@@ -64,7 +64,7 @@ int main(int argc, char* argv[]) {
     params.temp_min = 0.001;
     params.temp_max = 20.0;
     params.num_temp_bins = 100;
-    params.num_samples = 20;
+    params.num_samples = 1;
 
     // Required parameters - must be specified by user
     params.num_sites = 0;
@@ -354,7 +354,7 @@ int main(int argc, char* argv[]) {
                 );
                 if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
                     std::cout << "Thermal Pure Quantum (TPQ) method completed." << std::endl;
-                    return 1;
+                    return 0;
                 }
                 // Display eigenvalues
                 std::cout << "Eigenvalues (standard):" << std::endl;
@@ -390,19 +390,6 @@ int main(int argc, char* argv[]) {
             // If thermodynamic data computed, save it
             if (compute_thermo) {
                 if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
-                    std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
-                    if (thermo_file.is_open()) {
-                        thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
-                        for (size_t i = 0; i < standard_results.thermo_data.temperatures.size(); i++) {
-                            thermo_file << standard_results.thermo_data.temperatures[i] << " "
-                                       << standard_results.thermo_data.energy[i] << " "
-                                       << standard_results.thermo_data.specific_heat[i] << " "
-                                       << standard_results.thermo_data.entropy[i] << " "
-                                       << standard_results.thermo_data.free_energy[i] << std::endl;
-                        }
-                        thermo_file.close();
-                        std::cout << "Saved thermodynamic data to " << thermo_output + "/thermo_data.txt" << std::endl;
-                    }
                 }
                 // Check if full spectrum is calculated
                 else {
@@ -665,7 +652,7 @@ int main(int argc, char* argv[]) {
             
             if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
                 std::cout << "Thermal Pure Quantum (TPQ) method completed" << std::endl;
-                return 1;
+                return 0;
             }
             // Display eigenvalues
             std::cout << "Eigenvalues (symmetrized):" << std::endl;

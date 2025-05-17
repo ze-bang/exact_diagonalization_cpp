@@ -264,7 +264,7 @@ Complex calculate_matrix_element(
 // where δ is approximated by a broadening function (Gaussian or Lorentzian)
 struct SpectralFunctionData {
     std::vector<double> frequencies;     // ω values
-    std::vector<double> spectral_function;  // A(ω) values
+    std::vector<std::complex<double>> spectral_function;  // A(ω) values
 };
 
 SpectralFunctionData calculate_spectral_function(

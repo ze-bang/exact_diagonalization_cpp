@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include "observables.h"
 #include "construct_ham.h"
+#include <memory>
 
 #define GET_VARIABLE_NAME(Variable) (#Variable)
 
@@ -179,6 +180,19 @@ std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> crea
 }
 
 
+std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> createSingleOperators_pair(int num_sites, float spin_length) {
+    std::vector<SingleSiteOperator> Szz_ops;
+    std::vector<SingleSiteOperator> Spm_ops;
+
+    for (int site = 0; site < num_sites; site++) {
+        Szz_ops.emplace_back(num_sites, spin_length, 2, site);
+        Spm_ops.emplace_back(num_sites, spin_length, 0, site);
+    }
+    return {Szz_ops, Spm_ops};
+}
+
+
+
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
     int num_sites,
@@ -217,6 +231,65 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
             }
             for (int i = 0; i < N; i++) {
                 Spm_exp += std::conj(tpq_state[i]) * Spm_psi[i];
+            }
+            Spm_exps[n1*sublattice_size+n2] += Spm_exp;
+            Szz_exps[n1*sublattice_size+n2] += Szz_exp;
+        }
+    }
+
+    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
+        Spm_exps[i] /= double(num_sites);
+        Szz_exps[i] /= double(num_sites);
+        Spm_exps[sublattice_size*sublattice_size] += Spm_exps[i];
+        Szz_exps[sublattice_size*sublattice_size] += Szz_exps[i];
+    }
+    
+    return {Szz_exps, Spm_exps};
+
+}
+
+std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
+    const ComplexVector& tpq_state,
+    int num_sites,
+    float spin_length,
+    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
+    int sublattice_size
+){
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+    
+    ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
+    ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
+
+    // Create S operators for each site
+    std::vector<SingleSiteOperator> Szz_ops;
+    std::vector<SingleSiteOperator> Spm_ops;
+
+    Szz_ops = double_site_ops.first;
+    Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
+    for (int site = 0; site < num_sites; site++) {
+        for (int site2 = 0; site2 < num_sites; site2++) {
+            int n1 = site % sublattice_size;
+            int n2 = site2 % sublattice_size;
+
+            // Apply operators
+            std::vector<Complex> Szz_psi = Szz_ops[site].apply({tpq_state.begin(), tpq_state.end()});
+            std::vector<Complex> Szz_psi2 = Szz_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
+
+            std::vector<Complex> Spm_psi = Spm_ops[site].apply({tpq_state.begin(), tpq_state.end()});
+            std::vector<Complex> Spm_psi2 = Spm_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
+
+
+            // Calculate expectation values
+            Complex Szz_exp = Complex(0.0, 0.0);
+            Complex Spm_exp = Complex(0.0, 0.0);
+
+
+            for (int i = 0; i < N; i++) {
+                Szz_exp += std::conj(Szz_psi[i]) * Szz_psi2[i];
+            }
+            for (int i = 0; i < N; i++) {
+                Spm_exp += std::conj(Spm_psi[i]) * Spm_psi2[i];
             }
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
             Szz_exps[n1*sublattice_size+n2] += Szz_exp;
@@ -298,7 +371,7 @@ void time_evolve_tpq_state(
     ComplexVector& tpq_state,
     int N,
     double delta_t,
-    int n_max = 10,
+    int n_max = 100,
     bool normalize = true
 ) {
     // Temporary vectors for calculation
@@ -346,6 +419,72 @@ void time_evolve_tpq_state(
         cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
     }
 }
+
+
+/**
+ * Create a time evolution operator using Taylor expansion of exp(-iH*delta_t)
+ * 
+ * @param H Hamiltonian operator function
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param n_max Maximum order of Taylor expansion
+ * @param normalize Whether to normalize the state after evolution
+ * @return Function that applies time evolution to a complex vector
+ */
+std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    double delta_t,
+    int n_max = 10,
+    bool normalize = true
+) {
+    // Precompute coefficients for each term in the Taylor series
+    auto coefficients = std::make_shared<std::vector<Complex>>(n_max + 1);
+    (*coefficients)[0] = Complex(1.0, 0.0);  // 0th order term
+    double factorial = 1.0;
+    
+    for (int order = 1; order <= n_max; order++) {
+        factorial *= order;
+        // For exp(-iH*t), each term has (-i)^order
+        Complex coef = std::pow(Complex(0.0, -1.0), order);  
+        (*coefficients)[order] = coef * std::pow(delta_t, order) / factorial;
+    }
+    
+    // Return a function that applies the time evolution
+    return [H, coefficients, n_max, normalize](const Complex* input, Complex* output, int size) -> void {
+        // Temporary vectors for calculation
+        std::vector<Complex> term(size);
+        std::vector<Complex> Hterm(size);
+        std::vector<Complex> result(size);
+        
+        // Copy input to term and result
+        std::copy(input, input + size, term.begin());
+        std::copy(input, input + size, result.begin());
+        
+        // Apply Taylor expansion terms
+        for (int order = 1; order <= n_max; order++) {
+            // Apply H to the previous term
+            H(term.data(), Hterm.data(), size);
+            std::swap(term, Hterm);
+            
+            // Add this term to the result
+            for (int i = 0; i < size; i++) {
+                result[i] += (*coefficients)[order] * term[i];
+            }
+        }
+        
+        // Normalize if requested
+        if (normalize) {
+            double norm = cblas_dznrm2(size, result.data(), 1);
+            Complex scale_factor = Complex(1.0/norm, 0.0);
+            cblas_zscal(size, &scale_factor, result.data(), 1);
+        }
+        
+        // Copy result to output
+        std::copy(result.begin(), result.end(), output);
+    };
+}
+
 
 /**
  * Save the current TPQ state to a file
@@ -421,7 +560,7 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
     double dt = 0.1,
     double eta = 0.1,
     bool use_lorentzian = false,
-    int n_max = 10 // Order of Taylor expansion
+    int n_max = 100 // Order of Taylor expansion
 ) {
     SpectralFunctionData result;
     
@@ -512,6 +651,72 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
     }
     
     return result;
+}
+
+
+std::vector<Complex> calculate_spectral_function_from_tpq_U_t(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& tpq_state,
+    int N,
+    const int num_steps
+) {
+    // Pre-allocate all buffers needed for calculation
+    ComplexVector O_psi(N);        // O|ψ>
+    ComplexVector O_psi_next(N);   // For time evolution of O|ψ>
+    ComplexVector state(N);        // |ψ(t)>
+    ComplexVector state_next(N);   // For time evolution of |ψ>
+    ComplexVector O_dag_state(N);  // O†|ψ(t)>
+    
+    // Initialize state to tpq_state
+    std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
+    
+    // Calculate O|ψ> once
+    O(state.data(), O_psi.data(), N);
+    
+    // Prepare time evolution
+    std::vector<Complex> time_correlation(num_steps);
+    
+    // Calculate initial O†|ψ>
+    O(state.data(), O_dag_state.data(), N);
+    
+    // Calculate initial correlation C(0) = <ψ|O†O|ψ>
+    time_correlation[0] = Complex(0.0, 0.0);
+    for (int i = 0; i < N; i++) {
+        time_correlation[0] += std::conj(O_dag_state[i]) * O_psi[i];
+    }
+    
+    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
+        
+    // Time evolution loop
+    for (int step = 1; step < num_steps; step++) {
+        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
+        U_t(state.data(), state_next.data(), N);
+        
+        // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
+        U_t(O_psi.data(), O_psi_next.data(), N);
+        
+        // Calculate O†|ψ(t)>
+        O(state_next.data(), O_dag_state.data(), N);
+        
+        // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
+        time_correlation[step] = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            time_correlation[step] += std::conj(O_dag_state[i]) * O_psi_next[i];
+        }
+        
+        // Update states for next iteration
+        std::swap(state, state_next);
+        std::swap(O_psi, O_psi_next);
+        
+        if (step % 100 == 0) {
+            std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
+        }
+    }
+    
+    std::cout << "Calculating spectral function via Fourier transform..." << std::endl;
+    
+    return time_correlation;
 }
 
 
@@ -640,6 +845,47 @@ void writeFluctuationData(
     float spin_length,
     const std::vector<SingleSiteOperator>& Sz_ops,
     const std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>>& double_site_ops,
+    int sublattice_size,
+    int step
+) {
+    std::ofstream flct_out(flct_file, std::ios::app);
+    auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
+    
+    flct_out << std::setprecision(16) << inv_temp 
+             << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
+             << " " << Sz2[sublattice_size].real() << " " << Sz2[sublattice_size].imag();
+    
+    for (int i = 0; i < sublattice_size; i++) {
+        flct_out << " " << Sz[i].real() << " " << Sz[i].imag() 
+                 << " " << Sz2[i].real() << " " << Sz2[i].imag();
+    }
+    flct_out << " " << step << std::endl;
+
+    std::ofstream spin_out(spin_corr, std::ios::app);
+    auto [Szz, Spm] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
+    
+    spin_out << std::setprecision(16) << inv_temp 
+             << " " << Spm[sublattice_size*sublattice_size].real() << " " << Spm[sublattice_size*sublattice_size].imag() 
+             << " " << Szz[sublattice_size*sublattice_size].real() << " " << Szz[sublattice_size*sublattice_size].imag();
+    
+    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
+        spin_out << " " << Spm[i].real() << " " << Spm[i].imag() 
+                 << " " << Szz[i].real() << " " << Szz[i].imag();
+    }
+    spin_out << " " << step << std::endl;
+}
+
+
+
+void writeFluctuationData(
+    const std::string& flct_file,
+    const std::string& spin_corr,
+    double inv_temp,
+    const ComplexVector& tpq_state,
+    int num_sites,
+    float spin_length,
+    const std::vector<SingleSiteOperator>& Sz_ops,
+    const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
     int sublattice_size,
     int step
 ) {
@@ -853,13 +1099,134 @@ void computeObservableDynamics(
             for (size_t j = 0; j < spectrum.frequencies.size(); j++) {
                 dyn_out << std::setprecision(16) 
                       << spectrum.frequencies[j] << " " 
-                      << spectrum.spectral_function[j] << std::endl;
+                      << spectrum.spectral_function[j].real() << " "
+                      << spectrum.spectral_function[j].imag() << std::endl;
             }
             dyn_out.close();
             std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
         }
     }
 }
+
+
+void computeObservableDynamics_U_t(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    std::function<void(const Complex*, Complex*, int)> U_nt,
+    const ComplexVector& tpq_state,
+    const std::vector<Operator>& observables,
+    const std::vector<std::string>& observable_names,
+    int N, 
+    const std::string& dir,
+    int sample,
+    int step,
+    double omega_min = -10.0,
+    double omega_max = 10.0,
+    int num_points = 1000,
+    double t_end = 100.0,
+    double dt = 0.01
+) {
+    // Save the current TPQ state for later analysis
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+    save_tpq_state(tpq_state, state_file);
+
+    for (size_t i = 0; i < observables.size(); i++) {
+        std::cout << "Computing dynamical susceptibility for sample " << sample 
+                  << ", step " << step << ", observable: " << observable_names[i] << std::endl;
+                  
+        std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_" 
+                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
+
+        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
+                             
+        // Create a lambda to adapt Operator to the required function signature
+        auto operatorFunc = [&observables, i](const Complex* in, Complex* out, int size) {
+            // Convert input to vector
+            std::vector<Complex> input(in, in + size);
+            // Apply operator
+            std::vector<Complex> result = observables[i].apply(input);
+            // Copy result to output
+            std::copy(result.begin(), result.end(), out);
+        };
+        
+        // Calculate spectral function with current parameters
+        auto time_correlation = calculate_spectral_function_from_tpq_U_t(
+            U_t, operatorFunc, tpq_state, N, int(t_end/dt+1));
+        
+        std::vector<double> time_points(time_correlation.size());
+        for (size_t j = 0; j < time_correlation.size(); j++) {
+            time_points[j] = j * dt;
+        }
+
+        auto negative_time_correlation = calculate_spectral_function_from_tpq_U_t(
+            U_nt, operatorFunc, tpq_state, N, int(t_end/dt+1));
+
+
+        // Combine negative and positive time correlations into one vector
+        // The negative time correlations (except t=0) go first in reverse order,
+        // followed by all positive time correlations
+        std::vector<Complex> combined_time_correlation;
+        std::vector<double> combined_time_points;
+        combined_time_correlation.reserve(time_correlation.size() + negative_time_correlation.size() - 1);
+        combined_time_points.reserve(time_correlation.size() + negative_time_correlation.size() - 1);
+        // Add negative time correlations first (in reverse order, skipping t=0)
+        for (int j = negative_time_correlation.size() - 1; j > 0; j--) {
+            combined_time_correlation.push_back(negative_time_correlation[j]);
+            combined_time_points.push_back(-j * dt);
+        }
+
+        // Add positive time correlations
+        combined_time_correlation.insert(combined_time_correlation.end(), 
+                                        time_correlation.begin(), 
+                                        time_correlation.end());
+                                        
+        combined_time_points.insert(combined_time_points.end(), 
+                                    time_points.begin(), 
+                                    time_points.end());
+
+        // Write time correlation to file
+        std::ofstream time_corr_out(time_corr_file);
+        if (time_corr_out.is_open()) {
+            time_corr_out << "# t time_correlation" << std::endl;
+            for (size_t j = 0; j < combined_time_correlation.size(); j++) {
+                time_corr_out << std::setprecision(16) 
+                      << combined_time_points[j] << " " 
+                      << combined_time_correlation[j].real() << " "
+                      << combined_time_correlation[j].imag() << std::endl;
+            }
+            time_corr_out.close();
+            std::cout << "Time correlation saved to " << time_corr_file << std::endl;
+        }
+
+        // Calculate spectral function by fourier transforming combined time correlation
+        std::vector<double> frequencies(num_points);
+        std::vector<Complex> spectral_function(num_points);
+        double omega_step = (omega_max - omega_min) / num_points;
+        for (int j = 0; j < num_points; j++) {
+            frequencies[j] = omega_min + j * omega_step;
+            spectral_function[j] = Complex(0.0, 0.0);
+            for (int k = 0; k < combined_time_correlation.size(); k++) {
+                Complex phase = std::exp(Complex(0.0, -frequencies[j] * combined_time_points[k]));
+                spectral_function[j] += combined_time_correlation[k] * phase * dt;
+            }
+        }
+
+        // Write spectral function to file
+        std::ofstream dyn_out(dyn_file);
+        if (dyn_out.is_open()) {
+            dyn_out << "# omega spectral_function" << std::endl;
+            for (size_t j = 0; j < frequencies.size(); j++) {
+                dyn_out << std::setprecision(16) 
+                      << frequencies[j] << " " 
+                      << spectral_function[j].real() << " "
+                      << spectral_function[j].imag() << std::endl;
+            }
+            dyn_out.close();
+            std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
+        }
+    }
+}
+
 
 /**
  * Standard TPQ (microcanonical) implementation
@@ -886,11 +1253,11 @@ void microcanonical_tpq(
     bool compute_observables = false,
     std::vector<Operator> observables = {},
     std::vector<std::string> observable_names = {},
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
     double t_end = 100.0,
-    double dt = 0.1,
+    double dt = 0.01,
     float spin_length = 0.5,
     bool measure_sz = false,
     int sublattice_size = 1
@@ -906,7 +1273,17 @@ void microcanonical_tpq(
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops = createDoubleSiteOperators(num_sites, spin_length);
+    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+
+    std::function<void(const Complex*, Complex*, int)> U_t;
+    std::function<void(const Complex*, Complex*, int)> U_nt;   
+    if (compute_observables) {
+        U_t = create_time_evolution_operator(H, N, dt, 10);
+        U_nt = create_time_evolution_operator(H, N, -dt, 10);
+    }
+
+
+    std::array<double, 3> measure_inv_temp = {{10.0, 100.0, 1000.0}};
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
@@ -926,32 +1303,25 @@ void microcanonical_tpq(
 
         // For each element, compute v0 = (L-H)|v1⟩ = Lv1 - v0
         for (int i = 0; i < N; i++) {
-            v0[i] = (LargeValue * v1[i]) - v0[i];
+            v0[i] = (LargeValue * num_sites * v1[i]) - v0[i];
         }
 
         
-        // Calculate initial energy and norm
-        auto [energy, variance] = calculateEnergyAndVariance(H, v1, N);
-        double first_norm = cblas_dznrm2(N, v1.data(), 1);
-        double current_norm = first_norm;
-        
         // Write initial state (infinite temperature)
         double inv_temp = 0.0;
-        writeTPQData(ss_file, inv_temp, 0, 0, current_norm, 0);
-        
-        {
-            std::ofstream norm_out(norm_file, std::ios::app);
-            norm_out << std::setprecision(16) << inv_temp << " " 
-                     << current_norm << " " << first_norm << " " << 0 << std::endl;
-        }
-        
-        // Step 1: Calculate v0 = H|v1⟩
         int step = 1;
         
         // Calculate energy and variance for step 1
         auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
         double nsite = N; // This should be the actual number of sites, approximating as N for now
-        inv_temp = (2.0) / (LargeValue - energy1);
+        inv_temp = (2.0) / (LargeValue* num_sites - energy1);
+
+        double first_norm = cblas_dznrm2(N, v0.data(), 1);
+        Complex scale_factor = Complex(1.0/first_norm, 0.0);
+
+        cblas_zscal(N, &scale_factor, v0.data(), 1);
+
+        double current_norm = first_norm;
         
         writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
         
@@ -973,18 +1343,18 @@ void microcanonical_tpq(
             
             // For each element, compute v0 = (L-H)|v0⟩ = L*v0 - v1
             for (int i = 0; i < N; i++) {
-                v0[i] = (LargeValue * v0[i]) - v1[i];
+                v0[i] = (LargeValue * num_sites * v0[i]) - v1[i];
             }
 
             current_norm = cblas_dznrm2(N, v0.data(), 1);
-            Complex scale_factor = Complex(1.0/current_norm, 0.0);
+            scale_factor = Complex(1.0/current_norm, 0.0);
             cblas_zscal(N, &scale_factor, v0.data(), 1);
             
             // Calculate energy and variance
             auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
             
             // Update inverse temperature
-            inv_temp = (2.0*step) / (LargeValue - energy_step);
+            inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
             
             // Write data
             writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
@@ -995,20 +1365,27 @@ void microcanonical_tpq(
                          << current_norm << " " << first_norm << " " << step << std::endl;
             }
             
+            energy1 = energy_step;
+
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 if (measure_sz){
                     writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
                 }
-                // Optionally compute dynamical susceptibility
-                if (compute_observables) {
-                    computeObservableDynamics(H, v0, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
+            }
+            // If inv_temp is at one of the specified inverse temperature points, compute observables
+            for (auto temp : measure_inv_temp) {
+                if (std::abs(inv_temp - temp) < 4e-3) {
+                    std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
+                    if (compute_observables) {
+                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
+                    }
                 }
             }
         }
         
         // Store final energy for this sample
-        eigenvalues.push_back(energy);
+        eigenvalues.push_back(energy1);
     }
 }
 

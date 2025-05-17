@@ -54,7 +54,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
             '--euler_resum',
             '--symmetrized'
         ]
-    elif fixed_params["ED_method"] == 'TPQ':
+    elif fixed_params["ED_method"] == 'mTPQ':
         cmd = [
             'python3', 
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),

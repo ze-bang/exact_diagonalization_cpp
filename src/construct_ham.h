@@ -980,6 +980,14 @@ public:
         return resultVec;
     }
 
+    // Return sparse matrix
+    Eigen::SparseMatrix<Complex> getSparseMatrix() const {
+        if (!matrixBuilt_) {
+            buildSparseMatrix();
+        }
+        return sparseMatrix_;
+    }
+
     // Print the operator as a matrix
     Matrix returnSymmetrizedMatrix(const std::string& dir){
         int dim = 1 << n_bits_;
@@ -1774,28 +1782,24 @@ private:
     mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
     mutable bool matrixBuilt_ = false;
 
-    // Build the sparse matrix from transforms if needed
     void buildSparseMatrix() const {
-        if (matrixBuilt_) return;
+        if (matrixBuilt_) return;  // Already built
         
         int dim = 1 << n_bits_;
         sparseMatrix_.resize(dim, dim);
-        
-        // Use triplets to efficiently build the sparse matrix
-        std::vector<Eigen::Triplet<Complex>> triplets;
         
         for (int i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
                 if (j >= 0 && j < dim) {
-                    triplets.emplace_back(j, i, scalar);
+                    sparseMatrix_.coeffRef(j, i) += scalar;
                 }
             }
         }
         
-        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
     }
+
 };
 
 
@@ -1845,6 +1849,12 @@ public:
      * @param op Operator type: 0 for X, 1 for Y, 2 for Z
      * @param site_j Site index to apply the operator to
      */
+
+    DoubleSiteOperator() : Operator(0, 0) {
+        // Default constructor
+    }
+
+
     DoubleSiteOperator(int num_site, float spin_l_, int op_i, int site_i, int op_j, int site_j) : Operator(num_site, spin_l_) {
         if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
             throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Z");

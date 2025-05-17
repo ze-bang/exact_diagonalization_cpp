@@ -99,7 +99,7 @@ struct EDResults {
 
 // Structure for ED parameters
 struct EDParameters {
-    int max_iterations = 1000;
+    int max_iterations = 100000;
     int num_eigenvalues = 1;
     double tolerance = 1e-10;
     bool compute_eigenvectors = false;
