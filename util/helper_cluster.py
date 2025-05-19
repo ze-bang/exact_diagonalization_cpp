@@ -214,8 +214,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
         i = site_id
         
         # Zeeman term
-        sub_idx = sublattice_indices[site_id]
-        local_field = h * np.dot(field_dir, z_local[sub_idx])
+        local_field = h * 0.6717 * 5.5 * np.dot(field_dir, z_local[site_id % 4])
         transfer.append([2, node_mapping[i], -local_field, 0])
         
         # Exchange interactions
