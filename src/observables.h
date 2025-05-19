@@ -431,7 +431,7 @@ DynamicalSusceptibilityData calculate_dynamical_susceptibility(
     
     // Load eigenvalues from file
     std::vector<double> eigenvalues;
-    std::string eig_file = eig_dir + "/eigenvalues.dat";
+    std::string eig_file = eig_dir + "/eigenvalues.txt";
     std::ifstream infile(eig_file, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open eigenvalue file " << eig_file << std::endl;
@@ -574,6 +574,8 @@ double calculate_quantum_fisher_information(
         probabilities[i] = exp_factor; // Will normalize by Z later
     }
     
+    std::cout << "Calculated partition function Z = " << Z << std::endl;
+
     // Normalize probabilities
     for (size_t i = 0; i < num_eigenvalues; i++) {
         probabilities[i] /= Z;
@@ -587,17 +589,7 @@ double calculate_quantum_fisher_information(
     ComplexVector psi_n(N);
     ComplexVector A_psi_n(N);
     
-    // Identify significant states to reduce computation
-    std::vector<size_t> significant_states;
-    for (size_t i = 0; i < num_eigenvalues; i++) {
-        if (probabilities[i] > 1e-12) {
-            significant_states.push_back(i);
-        }
-    }
-    
-    std::cout << "Processing " << significant_states.size() << " significant states out of " 
-              << num_eigenvalues << " total states" << std::endl;
-    
+
     // Create a thread pool
     const size_t num_threads = std::thread::hardware_concurrency()/4;
     std::cout << "Using " << num_threads << " threads" << std::endl;
@@ -614,12 +606,11 @@ double calculate_quantum_fisher_information(
             size_t processed_count = 0;
             
             // Each thread processes a subset of states
-            for (size_t idx_m = t; idx_m < significant_states.size(); idx_m += num_threads) {
-                size_t m = significant_states[idx_m];
+            for (size_t m = t; m < N; m += num_threads) {
                 double p_m = probabilities[m];
                 
                 // Load eigenvector |m⟩ (only once per thread iteration)
-                std::string evec_file_m = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(m);
+                std::string evec_file_m = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(m) + ".dat";
                 std::ifstream evec_stream_m(evec_file_m);
                 if (!evec_stream_m) {
                     std::lock_guard<std::mutex> lock(cout_mutex);
@@ -650,18 +641,16 @@ double calculate_quantum_fisher_information(
                 A(psi_m.data(), A_psi_m.data(), N);
                 
                 // Process all significant states for this m
-                for (size_t idx_n = 0; idx_n < significant_states.size(); idx_n++) {
-                    size_t n = significant_states[idx_n];
+                for (size_t n = 0; n < N; n++) {
                     if (m == n) continue;  // Skip diagonal elements
                     
                     double p_n = probabilities[n];
                     double p_sum = p_m + p_n;
-                    if (p_sum < 1e-14) continue;
                     
                     double coef = (p_m - p_n) * (p_m - p_n) / p_sum;
                     
                     // Load eigenvector |n⟩
-                    std::string evec_file_n = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(n);
+                    std::string evec_file_n = eig_dir + "/eigenvectors/eigenvector_" + std::to_string(n) + ".dat";
                     std::ifstream evec_stream_n(evec_file_n);
                     if (!evec_stream_n) continue;
                     
@@ -691,7 +680,7 @@ double calculate_quantum_fisher_information(
                 if (++processed_count % 10 == 0) {
                     std::lock_guard<std::mutex> lock(cout_mutex);
                     std::cout << "Thread " << t << " processed " << processed_count << "/" 
-                              << (significant_states.size() / num_threads + 1) << " states" << std::endl;
+                              << (N / num_threads + 1) << " states" << std::endl;
                 }
             }
             

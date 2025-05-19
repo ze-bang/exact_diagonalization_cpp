@@ -921,68 +921,70 @@ int main(int argc, char* argv[]) {
                     }
                 };
                 
-                // Calculate spectral function and dynamical susceptibility for all temperatures
-                std::cout << "Calculating spectral function and dynamical susceptibility for " << obs_name << " at all temperatures" << std::endl;
+                // // Calculate spectral function and dynamical susceptibility for all temperatures
+                // std::cout << "Calculating spectral function and dynamical susceptibility for " << obs_name << " at all temperatures" << std::endl;
                 
-                for (double T : temperatures) {
-                    std::cout << "Processing temperature T=" << T << std::endl;
+                // for (double T : temperatures) {
+                //     std::cout << "Processing temperature T=" << T << std::endl;
                     
-                    // Calculate spectral function
-                    SpectralFunctionData spectral_data = calculate_spectral_function(
-                        observable_op,
-                        1 << params.num_sites,
-                        standard_output,
-                        params.omega_min,  // omega_min
-                        params.omega_max,   // omega_max
-                        params.num_points,   // num_points
-                        0.1,    // eta (broadening)
-                        T,      // temperature
-                        false   // use Gaussian broadening
-                    );
+                //     // Calculate spectral function
+                //     SpectralFunctionData spectral_data = calculate_spectral_function(
+                //         observable_op,
+                //         1 << params.num_sites,
+                //         standard_output,
+                //         params.omega_min,  // omega_min
+                //         params.omega_max,   // omega_max
+                //         params.num_points,   // num_points
+                //         0.1,    // eta (broadening)
+                //         T,      // temperature
+                //         false   // use Gaussian broadening
+                //     );
                     
-                    // Save spectral function data with temperature in filename
-                    std::string spectral_file = obs_output_dir + "/spectral_" + obs_name + "_T" + std::to_string(T) + ".dat";
-                    std::ofstream spectral_out(spectral_file);
-                    if (spectral_out) {
-                        spectral_out << "# Frequency Spectral_Function T=" << T << std::endl;
-                        for (size_t i = 0; i < spectral_data.frequencies.size(); i++) {
-                            spectral_out << spectral_data.frequencies[i] << " " 
-                                            << spectral_data.spectral_function[i] << std::endl;
-                        }
-                        spectral_out.close();
-                        std::cout << "Saved spectral function to " << spectral_file << std::endl;
-                    }
+                //     // Save spectral function data with temperature in filename
+                //     std::string spectral_file = obs_output_dir + "/spectral_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                //     std::ofstream spectral_out(spectral_file);
+                //     if (spectral_out) {
+                //         spectral_out << "# Frequency Spectral_Function T=" << T << std::endl;
+                //         for (size_t i = 0; i < spectral_data.frequencies.size(); i++) {
+                //             spectral_out << spectral_data.frequencies[i] << " " 
+                //                             << spectral_data.spectral_function[i] << std::endl;
+                //         }
+                //         spectral_out.close();
+                //         std::cout << "Saved spectral function to " << spectral_file << std::endl;
+                //     }
                     
-                    // Calculate dynamical susceptibility
-                    DynamicalSusceptibilityData chi_data = calculate_dynamical_susceptibility(
-                        observable_op,
-                        1 << params.num_sites,
-                        standard_output,
-                        params.omega_min,  // omega_min
-                        params.omega_max,   // omega_max
-                        params.num_points,   // num_points
-                        0.1,    // eta (broadening)
-                        T       // temperature
-                    );
+                //     // Calculate dynamical susceptibility
+                //     DynamicalSusceptibilityData chi_data = calculate_dynamical_susceptibility(
+                //         observable_op,
+                //         1 << params.num_sites,
+                //         standard_output,
+                //         params.omega_min,  // omega_min
+                //         params.omega_max,   // omega_max
+                //         params.num_points,   // num_points
+                //         0.1,    // eta (broadening)
+                //         T       // temperature
+                //     );
                     
-                    // Save dynamical susceptibility data with temperature in filename
-                    std::string chi_file = obs_output_dir + "/chi_" + obs_name + "_T" + std::to_string(T) + ".dat";
-                    std::ofstream chi_out(chi_file);
-                    if (chi_out) {
-                        chi_out << "# Frequency Chi_Real Chi_Imag T=" << T << std::endl;
-                        for (size_t i = 0; i < chi_data.frequencies.size(); i++) {
-                            chi_out << chi_data.frequencies[i] << " " 
-                                    << chi_data.chi[i].real() << " "
-                                    << chi_data.chi[i].imag() << std::endl;
-                        }
-                        chi_out.close();
-                        std::cout << "Saved dynamical susceptibility to " << chi_file << std::endl;
-                    }
-                }
+                //     // Save dynamical susceptibility data with temperature in filename
+                //     std::string chi_file = obs_output_dir + "/chi_" + obs_name + "_T" + std::to_string(T) + ".dat";
+                //     std::ofstream chi_out(chi_file);
+                //     if (chi_out) {
+                //         chi_out << "# Frequency Chi_Real Chi_Imag T=" << T << std::endl;
+                //         for (size_t i = 0; i < chi_data.frequencies.size(); i++) {
+                //             chi_out << chi_data.frequencies[i] << " " 
+                //                     << chi_data.chi[i].real() << " "
+                //                     << chi_data.chi[i].imag() << std::endl;
+                //         }
+                //         chi_out.close();
+                //         std::cout << "Saved dynamical susceptibility to " << chi_file << std::endl;
+                //     }
+                // }
                 
                 // Calculate quantum Fisher information for different temperatures
                 std::string qfi_file = obs_output_dir + "/qfi_" + obs_name + ".dat";
                 std::ofstream qfi_out(qfi_file);
+                std::vector<double> temperatures = {{0.1, 0.01, 0.001}};
+
                 if (qfi_out) {
                     qfi_out << "# Temperature QFI" << std::endl;
                     for (double T : temperatures) {
