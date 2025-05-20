@@ -25,15 +25,9 @@ spectral_function_imag = data[:, 2]
 # Combine real and imaginary parts to create complex spectral function
 spectral_function = spectral_function_real + 1j * spectral_function_imag
 
-omega_neg = -omega[1:]
-spectral_function_neg = spectral_function[1:]
 
-omega = np.concatenate((omega_neg, omega))
-spectral_function = np.concatenate((spectral_function_neg, spectral_function))
-
-
-omega_f = np.fft.fftfreq(len(omega), d=(omega[1]-omega[0]))
-spectral_function_f = np.fft.ifft(spectral_function)
+omega_f = np.fft.fftfreq(len(omega), d=(omega[1]-omega[0])/(2*np.pi))
+spectral_function_f = np.fft.fft(spectral_function, norm="ortho")
 
 # Plot the spectral function
 plt.figure(figsize=(10, 6))

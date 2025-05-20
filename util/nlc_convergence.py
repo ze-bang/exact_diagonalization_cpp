@@ -286,7 +286,7 @@ def main():
     parser.add_argument('--Jyy', type=float, default=1.0, help='Jyy coupling')
     parser.add_argument('--Jzz', type=float, default=1.0, help='Jzz coupling')
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
-    parser.add_argument('--field_dir', type=float, nargs=3, default=[0, 0, 1], help='Field direction (x,y,z)')
+    parser.add_argument('--field_dir', type=float, nargs=3, default=[1, 1, 1], help='Field direction (x,y,z)')
     
     # ED parameters (same as nlce.py)
     parser.add_argument('--method', type=str, default='FULL', help='Diagonalization method (FULL, LANCZOS, etc.)')

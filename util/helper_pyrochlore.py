@@ -287,13 +287,12 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         for i, vector in enumerate(basis):
             f.write(f"{i} {vector[0]:.6f} {vector[1]:.6f} {vector[2]:.6f}\n")
 
-def prepare_hamiltonian_parameters(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir):
+def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     
     Args:
         output_dir: Directory to write output files
-        cluster_name: Name of the cluster
         nn_list: Dictionary mapping each site to its nearest neighbors
         positions: Dictionary mapping each site to its position
         sublattice_indices: Dictionary mapping each site to its sublattice index
@@ -347,7 +346,10 @@ def prepare_hamiltonian_parameters(output_dir, cluster_name, nn_list, positions,
                 interALL.append([2, node_mapping[i], 2, node_mapping[j], Jzz, 0])  # Sz-Sz
                 interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm, 0])   # S+-S-
                 interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm, 0])   # S--S+
-                Jpmpm_ = Jpmpm * non_kramer_factor[i % 4, j % 4]
+                if non_kramer:
+                    Jpmpm_ = Jpmpm * non_kramer_factor[i % 4, j % 4]
+                else:
+                    Jpmpm_ = Jpmpm
                 interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S--S-
                 interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S+-S+
     
@@ -549,15 +551,17 @@ def main():
     dim2 = int(sys.argv[10])
     dim3 = int(sys.argv[11])
     use_pbc = bool(int(sys.argv[12]))
-    
+
+    non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
     
     # Create cluster name
     pbc_str = "pbc" if use_pbc else "obc"
-    cluster_name = f"pyrochlore_{dim1}x{dim2}x{dim3}_{pbc_str}"
-    
+    non_kramer_str = "non_kramer" if non_kramer else "kramer"
+    cluster_name = f"pyrochlore_{dim1}x{dim2}x{dim3}_{pbc_str}_{non_kramer_str}"
+
     # Generate cluster
     vertices, edges, tetrahedra, node_mapping = generate_pyrochlore_cluster(dim1, dim2, dim3, use_pbc)
     
@@ -568,8 +572,8 @@ def main():
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
     
     # Prepare Hamiltonian parameters
-    prepare_hamiltonian_parameters(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir)
-    
+    prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, node_mapping, Jxx, Jyy, Jzz, h, field_dir)
+
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)
     
