@@ -159,6 +159,13 @@ EDResults exact_diagonalization_core(
     
     // Call the appropriate diagonalization method
     switch (method) {
+        case DiagonalizationMethod::FULL:
+            std::cout << "Using full diagonalization" << std::endl;
+            full_diagonalization(H, hilbert_space_dim, params.num_eigenvalues, results.eigenvalues, 
+                                 params.output_dir, params.compute_eigenvectors);
+            break;
+
+
         case DiagonalizationMethod::LANCZOS:
             std::cout << "Using standard Lanczos method" << std::endl;
             lanczos(H, hilbert_space_dim, params.max_iterations, params.num_eigenvalues, 
