@@ -481,7 +481,7 @@ def main():
     hx, hy, hz = args.hx, args.hy, args.hz
     
     # Output directory
-    output_dir = "./" + args.outdir + "/"
+    output_dir = args.outdir + "/"
     if not os.path.isdir(output_dir):
         os.mkdir(output_dir)
     
