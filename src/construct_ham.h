@@ -13,6 +13,8 @@
 #include <Eigen/Dense>
 #include <set>
 #include <queue>
+#include <memory>
+#include <omp.h>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -931,14 +933,14 @@ public:
     std::vector<int> symmetrized_block_ham_sizes;
     // Constructor
     
-    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {}
+    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), sparseMatrix_(nullptr) {}
 
     // Copy assignment operator
     Operator& operator=(const Operator& other) {
         if (this != &other) {  // Check for self-assignment
             n_bits_ = other.n_bits_;
             transforms_ = other.transforms_;
-            sparseMatrix_ = other.sparseMatrix_;
+            sparseMatrix_ = other.sparseMatrix_; // Shared pointer will automatically handle reference counting
             matrixBuilt_ = other.matrixBuilt_;
             symmetrized_block_ham_sizes = other.symmetrized_block_ham_sizes;
         }
@@ -952,31 +954,45 @@ public:
     }
 
     // Apply the operator to a complex vector using Eigen sparse matrix operations
+    void apply(const std::vector<Complex>& vec, std::vector<Complex>& resultVec) const {
+        // Ensure result vector is properly sized
+        if (resultVec.size() != vec.size()) {
+            resultVec.resize(vec.size());
+        }
+        // Zero out result vector
+        std::fill(resultVec.begin(), resultVec.end(), Complex(0.0, 0.0));
+        
+        // Use sparse matrix if available for better performance
+        if (matrixBuilt_) {
+            // Convert input vector to Eigen format
+            Eigen::Map<const Eigen::VectorXcd> eigenVec(vec.data(), vec.size());
+            // Compute product using optimized sparse matrix multiplication
+            Eigen::VectorXcd eigenResult = (*sparseMatrix_) * eigenVec;
+            // Copy back to result vector
+            std::copy(eigenResult.data(), eigenResult.data() + vec.size(), resultVec.begin());
+        } else {
+            // Fallback to the original transform-based calculation
+            #pragma omp parallel for schedule(dynamic)
+            for (size_t i = 0; i < vec.size(); ++i) {
+                if (std::abs(vec[i]) < 1e-15) continue; // Skip near-zero elements
+                
+                for (const auto& transform : transforms_) {
+                    auto [j, scalar] = transform(i);
+                    if (j >= 0 && j < vec.size() && std::abs(scalar) > 1e-15) {
+                        #pragma omp critical
+                        {
+                            resultVec[j] += scalar * vec[i];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Overload that returns a new vector for backward compatibility
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
-        int dim = 1 << n_bits_;
-        
-        if (vec.size() != static_cast<size_t>(dim)) {
-            throw std::invalid_argument("Input vector dimension does not match operator dimension");
-        }
-        
-        // Build the sparse matrix if not already built
-        buildSparseMatrix();
-        
-        // Convert input vector to Eigen vector
-        Eigen::VectorXcd eigenVec(dim);
-        for (int i = 0; i < dim; ++i) {
-            eigenVec(i) = vec[i];
-        }
-        
-        // Perform sparse matrix-vector multiplication
-        Eigen::VectorXcd result = sparseMatrix_ * eigenVec;
-        
-        // Convert back to std::vector
-        std::vector<Complex> resultVec(dim);
-        for (int i = 0; i < dim; ++i) {
-            resultVec[i] = result(i);
-        }
-        
+        std::vector<Complex> resultVec(vec.size());
+        apply(vec, resultVec);
         return resultVec;
     }
 
@@ -985,7 +1001,7 @@ public:
         if (!matrixBuilt_) {
             buildSparseMatrix();
         }
-        return sparseMatrix_;
+        return *sparseMatrix_;
     }
 
     // Print the operator as a matrix
@@ -1742,10 +1758,6 @@ public:
             // Write matrix dimensions
             file << block_size << " " << block_size << std::endl;
             
-            // Write number of non-zeros for pre-allocation
-            // int nnz = blockMatrix.nonZeros();
-            // file << nnz << std::endl;
-            
             // Write non-zero elements (row, col, real, imag) in binary format
             for (int k = 0; k < blockMatrix.outerSize(); ++k) {
                 for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
@@ -1758,7 +1770,6 @@ public:
             }
             
             file.close();
-            // std::cout << "Saved block " << block << " with " << nnz << " non-zeros to " << filename << std::endl;
             
             block_start += block_size;
         }
@@ -1779,27 +1790,39 @@ private:
         {{1, 0}, {0, 1}}
     };
 
-    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
+    mutable std::shared_ptr<Eigen::SparseMatrix<Complex>> sparseMatrix_;
     mutable bool matrixBuilt_ = false;
 
     void buildSparseMatrix() const {
         if (matrixBuilt_) return;  // Already built
         
         int dim = 1 << n_bits_;
-        sparseMatrix_.resize(dim, dim);
+        
+        // Create a new sparse matrix if it doesn't exist
+        if (!sparseMatrix_) {
+            sparseMatrix_ = std::make_shared<Eigen::SparseMatrix<Complex>>(dim, dim);
+        } else {
+            // Resize if dimensions have changed
+            sparseMatrix_->resize(dim, dim);
+            sparseMatrix_->setZero();
+        }
+        
+        // Build coefficients
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        triplets.reserve(dim * 5); // Estimate of non-zeros
         
         for (int i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {
-                    sparseMatrix_.coeffRef(j, i) += scalar;
+                if (j >= 0 && j < dim && std::abs(scalar) > 1e-10) {
+                    triplets.emplace_back(j, i, scalar);
                 }
             }
         }
         
+        sparseMatrix_->setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
     }
-
 };
 
 

@@ -118,6 +118,7 @@ int main(int argc, char* argv[]) {
     bool compute_thermo = false;
     bool measure_spin = false;
     bool skip_ED = false;
+    bool num_eigenvalues_override = false;
 
     // Parse command line options
     for (int i = 2; i < argc; i++) {
@@ -157,6 +158,7 @@ int main(int argc, char* argv[]) {
             else{
                 params.num_eigenvalues = std::stoi(arg.substr(14));
             }
+            num_eigenvalues_override = true;
         }
         else if (arg == "--skip_ED") {
             skip_ED = true;
@@ -291,7 +293,7 @@ int main(int argc, char* argv[]) {
         run_standard = true; // Default to running standard diagonalization
     }
     
-    if (full_spectrum) {
+    if (full_spectrum && !num_eigenvalues_override) {
         params.num_eigenvalues = (1ULL << params.num_sites);
     }
 
@@ -1010,17 +1012,15 @@ int main(int argc, char* argv[]) {
             std::string obs_output_dir = params.output_dir + "/spin_expectations";
             system(("mkdir -p " + obs_output_dir).c_str());
             
-            for (double T : temperatures) {
-                std::cout << "Computing spin expectations at T=" << T << std::endl;
-                compute_spin_expectations(
-                    directory + "/output",
-                    obs_output_dir,
-                    params.num_sites,
-                    params.spin_length,
-                    T,
-                    true  // print output
-                );
-            }
+            std::cout << "Computing spin expectations at T=0" << std::endl;
+            compute_spin_expectations(
+                directory + "/output",
+                obs_output_dir,
+                params.num_sites,
+                params.spin_length,
+                0.0,
+                true  // print output
+            );
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();

@@ -115,7 +115,7 @@ int main() {
     system("mkdir -p pyrochlore_test/full_diag");
     
     auto start = std::chrono::high_resolution_clock::now();
-    full_diagonalization(ham_apply, N, ref_eigenvalues, ref_dir, true);
+    full_diagonalization(ham_apply, N, N, ref_eigenvalues, ref_dir, true);
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
     

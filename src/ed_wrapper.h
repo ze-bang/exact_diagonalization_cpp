@@ -253,12 +253,6 @@ EDResults exact_diagonalization_core(
                        results.eigenvalues, params.output_dir, 
                        params.compute_eigenvectors);
             break;
-            
-        case DiagonalizationMethod::FULL:
-            std::cout << "Using full diagonalization" << std::endl;
-            full_diagonalization(H, hilbert_space_dim, results.eigenvalues, 
-                               params.output_dir, params.compute_eigenvectors);
-            break;
         
         case DiagonalizationMethod::OSS:
             std::cout << "Spectrum slicing for full diagonalization" << std::endl;

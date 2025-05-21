@@ -2389,7 +2389,7 @@ void shift_invert_lanczos_robust(std::function<void(const Complex*, Complex*, in
 }
 
 // Full diagonalization using LAPACK for Hermitian matrices
-void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N,
+void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int num_eigs,
                           std::vector<double>& eigenvalues, std::string dir = "",
                           bool compute_eigenvectors = false) {
     
@@ -2443,7 +2443,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     if (compute_eigenvectors && !dir.empty()) {
         std::cout << "Full diagonalization: Saving eigenvectors to " << evec_dir << std::endl;
         
-        for (int i = 0; i < N; i++) {
+        for (int i = 0; i < num_eigs; i++) {
             // Extract eigenvector from column of full_matrix
             ComplexVector eigenvector(N);
             for (int j = 0; j < N; j++) {
@@ -3119,7 +3119,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     if (N <= 1000) {
         if (mpi_rank == 0) {
             std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
-            full_diagonalization(H, N, eigenvalues, evec_dir, compute_eigenvectors);
+            full_diagonalization(H, N, N, eigenvalues, evec_dir, compute_eigenvectors);
         }
         return;
     }
@@ -3489,7 +3489,7 @@ void spectrum_slicing_solver(std::function<void(const Complex*, Complex*, int)> 
     // For very small matrices, just use full diagonalization
     if (N <= 1000) {
         std::cout << "Small matrix detected, using direct diagonalization" << std::endl;
-        full_diagonalization(H, N, eigenvalues, result_dir, compute_eigenvectors);
+        full_diagonalization(H, N, N, eigenvalues, result_dir, compute_eigenvectors);
         return;
     }
     
