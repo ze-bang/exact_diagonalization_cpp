@@ -1777,22 +1777,7 @@ public:
         std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
     }
 
-
-private:
-    std::vector<TransformFunction> transforms_;
-    int n_bits_; // Number of bits in the basis representation
-    float spin_l_;
-    const std::array<std::array<double, 4>, 3> operators = {
-        {{0, 1, 0, 0}, {0, 0, 1, 0},{1, 0, 0, -1}}
-    };
-
-    const std::array<std::array<double, 2>, 2> basis = {
-        {{1, 0}, {0, 1}}
-    };
-
-    mutable std::shared_ptr<Eigen::SparseMatrix<Complex>> sparseMatrix_;
-    mutable bool matrixBuilt_ = false;
-
+    
     void buildSparseMatrix() const {
         if (matrixBuilt_) return;  // Already built
         
@@ -1823,6 +1808,21 @@ private:
         sparseMatrix_->setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
     }
+private:
+    std::vector<TransformFunction> transforms_;
+    int n_bits_; // Number of bits in the basis representation
+    float spin_l_;
+    const std::array<std::array<double, 4>, 3> operators = {
+        {{0, 1, 0, 0}, {0, 0, 1, 0},{1, 0, 0, -1}}
+    };
+
+    const std::array<std::array<double, 2>, 2> basis = {
+        {{1, 0}, {0, 1}}
+    };
+
+    mutable std::shared_ptr<Eigen::SparseMatrix<Complex>> sparseMatrix_;
+    mutable bool matrixBuilt_ = false;
+
 };
 
 

@@ -1013,14 +1013,30 @@ int main(int argc, char* argv[]) {
             system(("mkdir -p " + obs_output_dir).c_str());
             
             std::cout << "Computing spin expectations at T=0" << std::endl;
-            compute_spin_expectations(
-                directory + "/output",
-                obs_output_dir,
+            compute_eigenstate_spin_expectations_from_file(
+                symmetrized_output + "/eigenvectors/eigenvector_0.dat",
                 params.num_sites,
                 params.spin_length,
-                0.0,
+                obs_output_dir + "/spin_expectations_T0.dat",
                 true  // print output
             );
+
+            compute_eigenstate_spin_correlations_from_file(
+                symmetrized_output + "/eigenvectors/eigenvector_0.dat",
+                params.num_sites,
+                params.spin_length,
+                obs_output_dir + "/spin_correlations_T0.dat",
+                true  // print output
+            );
+
+            // compute_spin_expectations(
+            //     directory + "/output",
+            //     obs_output_dir,
+            //     params.num_sites,
+            //     params.spin_length,
+            //     0.0,
+            //     true  // print output
+            // );
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();

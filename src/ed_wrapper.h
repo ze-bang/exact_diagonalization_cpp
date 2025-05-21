@@ -696,6 +696,10 @@ EDResults exact_diagonalization_from_files(
             if (!interaction_file.empty()) {
                 hamiltonian.loadFromInterAllFile(interaction_file);
             }
+
+            if (method != DiagonalizationMethod::FULL){
+                hamiltonian.buildSparseMatrix();
+            }
             break;
         }
         
@@ -870,6 +874,11 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Load the terms from files
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
+
+
+    if (method != DiagonalizationMethod::FULL){
+        hamiltonian.buildSparseMatrix();
+    }
     
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";

@@ -767,7 +767,7 @@ void compute_spin_expectations(
     // Process each eigenvector
     for (size_t idx = 0; idx < num_eigenvalues; idx++) {
         // Load eigenvector
-        std::string evec_file = eigdir + "/eigenvectors/eigenvector_" + std::to_string(idx);
+        std::string evec_file = eigdir + "/eigenvectors/eigenvector_" + std::to_string(idx) + ".dat";
         std::ifstream evec_stream(evec_file);
         if (!evec_stream) {
             std::cerr << "Error: Cannot open eigenvector file " << evec_file << std::endl;
@@ -869,5 +869,494 @@ void compute_spin_expectations(
     }
 }
 
+// Load eigenstate from file with format like eigenvector_block0_0.dat
+ComplexVector load_eigenstate_from_file(const std::string& filename, int expected_dimension = -1) {
+    std::ifstream file(filename);
+    if (!file) {
+        std::cerr << "Error: Cannot open eigenvector file " << filename << std::endl;
+        return ComplexVector();
+    }
+    
+    // Read the first line which contains dimension
+    int dimension;
+    file >> dimension;
+    
+    if (expected_dimension > 0 && dimension != expected_dimension) {
+        std::cerr << "Warning: File dimension " << dimension << " doesn't match expected dimension " 
+                  << expected_dimension << std::endl;
+    }
+    
+    // Initialize vector with zeros
+    ComplexVector eigenstate(dimension, Complex(0.0, 0.0));
+    
+    // Read entries
+    int index;
+    double real_part, imag_part;
+
+    // skip the first line
+    std::string line;
+    std::getline(file, line);
+
+    while (file >> index >> real_part >> imag_part) {
+        eigenstate[index] = Complex(real_part, imag_part);
+    }
+    
+    file.close();
+    return eigenstate;
+}
+
+// Calculate spin expectations for a single eigenstate
+std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
+    const ComplexVector& eigenstate,   // Eigenstate as complex vector
+    int num_sites,                     // Number of sites
+    float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
+    const std::string& output_file = "",  // Optional: output file path
+    bool print_output = true           // Whether to print the results to console
+) {
+    // Check dimension
+    int N = 1 << num_sites;  // 2^num_sites
+    if (eigenstate.size() != N) {
+        std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
+                  << " doesn't match expected size " << N << std::endl;
+        return {};
+    }
+    
+    // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
+    std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
+    
+    // Create spin operators for each site
+    std::vector<SingleSiteOperator> Sp_ops;
+    std::vector<SingleSiteOperator> Sm_ops;
+    std::vector<SingleSiteOperator> Sz_ops;
+    
+    for (int site = 0; site < num_sites; site++) {
+        Sp_ops.emplace_back(num_sites, spin_l, 0, site);
+        Sm_ops.emplace_back(num_sites, spin_l, 1, site);
+        Sz_ops.emplace_back(num_sites, spin_l, 2, site);
+    }
+    
+    // For each site, compute the expectation values
+    for (int site = 0; site < num_sites; site++) {
+        // Apply operators
+        std::vector<Complex> Sp_psi = Sp_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+        std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+        std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+        
+        // Calculate expectation values
+        Complex Sp_exp = Complex(0.0, 0.0);
+        Complex Sm_exp = Complex(0.0, 0.0);
+        Complex Sz_exp = Complex(0.0, 0.0);
+        
+        for (int i = 0; i < N; i++) {
+            Sp_exp += std::conj(eigenstate[i]) * Sp_psi[i];
+            Sm_exp += std::conj(eigenstate[i]) * Sm_psi[i];
+            Sz_exp += std::conj(eigenstate[i]) * Sz_psi[i];
+        }
+        
+        expectations[0][site] = Sp_exp;
+        expectations[1][site] = Sm_exp;
+        expectations[2][site] = Sz_exp;
+    }
+    
+    // Print results if requested
+    if (print_output) {
+        std::cout << "\nSpin Expectation Values for eigenstate:" << std::endl;
+        std::cout << std::setw(5) << "Site" 
+                << std::setw(20) << "S^+ (real)" 
+                << std::setw(20) << "S^+ (imag)" 
+                << std::setw(20) << "S^- (real)"
+                << std::setw(20) << "S^- (imag)"
+                << std::setw(20) << "S^z (real)"
+                << std::setw(20) << "S^z (imag)" << std::endl;
+        
+        for (int site = 0; site < num_sites; site++) {
+            std::cout << std::setw(5) << site 
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[0][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[1][site].imag()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].real()
+                    << std::setw(20) << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+        }
+    }
+    
+    // Save to file if path provided
+    if (!output_file.empty()) {
+        std::ofstream out(output_file);
+        if (out.is_open()) {
+            out << "# Site S+_real S+_imag S-_real S-_imag Sz_real Sz_imag" << std::endl;
+            for (int site = 0; site < num_sites; site++) {
+                out << site << " "
+                    << std::setprecision(10) << expectations[0][site].real() << " "
+                    << std::setprecision(10) << expectations[0][site].imag() << " "
+                    << std::setprecision(10) << expectations[1][site].real() << " "
+                    << std::setprecision(10) << expectations[1][site].imag() << " "
+                    << std::setprecision(10) << expectations[2][site].real() << " "
+                    << std::setprecision(10) << expectations[2][site].imag() << std::endl;
+            }
+            out.close();
+            std::cout << "Spin expectations saved to " << output_file << std::endl;
+        }
+    }
+    
+    return expectations;
+}
+
+
+
+// Compute two-site correlations (Sz*Sz and S+*S-) for a single eigenstate
+std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlations(
+    const ComplexVector& eigenstate,   // Eigenstate as complex vector
+    int num_sites,                     // Number of sites
+    float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
+    const std::string& output_file = "",  // Optional: output file path
+    bool print_output = true           // Whether to print the results to console
+) {
+    // Check dimension
+    int N = 1 << num_sites;  // 2^num_sites
+    if (eigenstate.size() != N) {
+        std::cerr << "Error: Eigenstate dimension " << eigenstate.size() 
+                  << " doesn't match expected size " << N << std::endl;
+        return {};
+    }
+    
+    // Initialize correlations tensor: 2 types (Sz*Sz, S+*S-) x num_sites x num_sites
+    std::vector<std::vector<std::vector<Complex>>> correlations(
+        2, std::vector<std::vector<Complex>>(
+            num_sites, std::vector<Complex>(num_sites, Complex(0.0, 0.0))
+        )
+    );
+    
+    // For each site pair, compute correlations
+    for (int site_i = 0; site_i < num_sites; site_i++) {
+        for (int site_j = 0; site_j < num_sites; site_j++) {
+            // Skip if it's the same site
+            
+            // Create double site operators
+            DoubleSiteOperator SzSz_op(num_sites, spin_l, 2, site_i, 2, site_j); // Sz*Sz
+            DoubleSiteOperator SpSm_op(num_sites, spin_l, 0, site_i, 1, site_j); // S+*S-
+            
+            // Apply operators
+            std::vector<Complex> SzSz_psi = SzSz_op.apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+            std::vector<Complex> SpSm_psi = SpSm_op.apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
+            
+            // Calculate expectation values
+            Complex SzSz_exp = Complex(0.0, 0.0);
+            Complex SpSm_exp = Complex(0.0, 0.0);
+            
+            for (int i = 0; i < N; i++) {
+                SzSz_exp += std::conj(eigenstate[i]) * SzSz_psi[i];
+                SpSm_exp += std::conj(eigenstate[i]) * SpSm_psi[i];
+            }
+            
+            // Store correlation values
+            correlations[0][site_i][site_j] = SzSz_exp;  // Sz*Sz
+            correlations[1][site_i][site_j] = SpSm_exp;  // S+*S-
+        }
+    }
+    
+    // Print results if requested
+    if (print_output) {
+        std::cout << "\nSpin-Spin Correlations for eigenstate:" << std::endl;
+        
+        // Print Sz*Sz correlations
+        std::cout << "\nSz*Sz Correlations:" << std::endl;
+        std::cout << std::setw(5) << "i\\j";
+        for (int j = 0; j < num_sites; j++) {
+            std::cout << std::setw(10) << j;
+        }
+        std::cout << std::endl;
+        
+        for (int i = 0; i < num_sites; i++) {
+            std::cout << std::setw(5) << i;
+            for (int j = 0; j < num_sites; j++) {
+                std::cout << std::setw(10) << std::setprecision(4) << correlations[0][i][j].real();
+            }
+            std::cout << std::endl;
+        }
+        
+        // Print S+*S- correlations
+        std::cout << "\nS+*S- Correlations:" << std::endl;
+        std::cout << std::setw(5) << "i\\j";
+        for (int j = 0; j < num_sites; j++) {
+            std::cout << std::setw(10) << j;
+        }
+        std::cout << std::endl;
+        
+        for (int i = 0; i < num_sites; i++) {
+            std::cout << std::setw(5) << i;
+            for (int j = 0; j < num_sites; j++) {
+                std::cout << std::setw(10) << std::setprecision(4) << correlations[1][i][j].real();
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+    // Save to file if path provided
+    if (!output_file.empty()) {
+        std::ofstream out(output_file);
+        if (out.is_open()) {
+            out << "# Site_i Site_j SzSz_real SzSz_imag SpSm_real SpSm_imag" << std::endl;
+            for (int i = 0; i < num_sites; i++) {
+                for (int j = 0; j < num_sites; j++) {
+                    out << i << " " << j << " "
+                        << std::setprecision(10) << correlations[0][i][j].real() << " "
+                        << std::setprecision(10) << correlations[0][i][j].imag() << " "
+                        << std::setprecision(10) << correlations[1][i][j].real() << " "
+                        << std::setprecision(10) << correlations[1][i][j].imag() << std::endl;
+                }
+            }
+            out.close();
+            std::cout << "Spin correlations saved to " << output_file << std::endl;
+        }
+    }
+    
+    return correlations;
+}
+
+// Compute spin expectations for a specific eigenstate loaded from a file
+std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations_from_file(
+    const std::string& eigenstate_file, // File containing the eigenstate
+    int num_sites,                     // Number of sites
+    float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
+    const std::string& output_file = "",  // Optional: output file path
+    bool print_output = true           // Whether to print the results to console
+) {
+    // Calculate expected dimension
+    int expected_dimension = 1 << num_sites;  // 2^num_sites
+    
+    // Load eigenstate from file
+    ComplexVector eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
+    
+    if (eigenstate.empty()) {
+        std::cerr << "Error: Failed to load eigenstate from " << eigenstate_file << std::endl;
+        return {};
+    }
+    
+    std::cout << "Loaded eigenstate from " << eigenstate_file << " with dimension " << eigenstate.size() << std::endl;
+    // Calculate spin expectations
+    return compute_eigenstate_spin_expectations(eigenstate, num_sites, spin_l, output_file, print_output);
+}
+
+std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlations_from_file(
+    const std::string& eigenstate_file, // File containing the eigenstate
+    int num_sites,                     // Number of sites
+    float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
+    const std::string& output_file = "",  // Optional: output file path
+    bool print_output = true           // Whether to print the results to console
+) {
+    // Calculate expected dimension
+    int expected_dimension = 1 << num_sites;  // 2^num_sites
+    
+    // Load eigenstate from file
+    ComplexVector eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
+    
+    if (eigenstate.empty()) {
+        std::cerr << "Error: Failed to load eigenstate from " << eigenstate_file << std::endl;
+        return {};
+    }
+    
+    std::cout << "Loaded eigenstate from " << eigenstate_file << " with dimension " << eigenstate.size() << std::endl;
+    // Calculate spin correlations
+    return compute_eigenstate_spin_correlations(eigenstate, num_sites, spin_l, output_file, print_output);
+}
+
+
+// Compute thermal expectation values of two-site correlators (Sz*Sz and S+*S-)
+void compute_spin_correlations(
+    const std::string& eigdir,  // Directory with eigenvalues and eigenvectors
+    const std::string output_dir, // Directory for output files
+    int num_sites,              // Number of sites
+    float spin_l,              // Spin length (e.g., 0.5 for spin-1/2)
+    double temperature,         // Temperature T (in energy units)
+    bool print_output = true    // Whether to print the results to console
+) {
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+    
+    // Initialize correlations tensor: 2 types (Sz*Sz, S+*S-) x num_sites x num_sites
+    std::vector<std::vector<std::vector<Complex>>> correlations(
+        2, std::vector<std::vector<Complex>>(
+            num_sites, std::vector<Complex>(num_sites, Complex(0.0, 0.0))
+        )
+    );
+    
+    std::cout << "Reading eigenvalues and eigenvectors from " << eigdir << std::endl;
+
+    // Load eigenvalues
+    std::vector<double> eigenvalues;
+    std::ifstream eigenvalue_file(eigdir + "/eigenvalues.txt");
+    if (!eigenvalue_file) {
+        std::cerr << "Error: Cannot open eigenvalue file " << eigdir + "/eigenvalues.txt" << std::endl;
+        return;
+    }
+    
+    double eigenvalue;
+    eigenvalues.clear();
+    while (eigenvalue_file >> eigenvalue) {
+        eigenvalues.push_back(eigenvalue);
+    }
+    size_t num_eigenvalues = eigenvalues.size();
+    eigenvalue_file.close();
+    
+    std::cout << "Loaded " << num_eigenvalues << " eigenvalues from " << eigdir + "/eigenvalues.txt" << std::endl;
+    
+    // Calculate beta = 1/kT
+    double beta = 1.0 / temperature;
+    
+    // Using the log-sum-exp trick for numerical stability
+    double max_exp = -beta * eigenvalues[0];
+    for (size_t i = 1; i < eigenvalues.size(); i++) {
+        max_exp = std::max(max_exp, -beta * eigenvalues[i]);
+    }
+    
+    // Calculate partition function Z
+    double Z = 0.0;
+    for (size_t i = 0; i < eigenvalues.size(); i++) {
+        Z += std::exp(-beta * eigenvalues[i] - max_exp);
+    }
+    
+    // Precompute all two-site operators
+    std::vector<std::vector<DoubleSiteOperator>> SzSz_ops(num_sites, std::vector<DoubleSiteOperator>(num_sites));
+    std::vector<std::vector<DoubleSiteOperator>> SpSm_ops(num_sites, std::vector<DoubleSiteOperator>(num_sites));
+    
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            if (i != j) {
+                SzSz_ops[i][j] = DoubleSiteOperator(num_sites, spin_l, 2, i, 2, j);
+                SpSm_ops[i][j] = DoubleSiteOperator(num_sites, spin_l, 0, i, 1, j);
+            }
+        }
+    }
+    
+    // Process each eigenvector
+    for (size_t idx = 0; idx < num_eigenvalues; idx++) {
+        // Load eigenvector
+        std::string evec_file = eigdir + "/eigenvectors/eigenvector_" + std::to_string(idx) + ".dat";
+        std::ifstream evec_stream(evec_file);
+        if (!evec_stream) {
+            std::cerr << "Error: Cannot open eigenvector file " << evec_file << std::endl;
+            continue;
+        }
+        
+        ComplexVector psi(N);
+        // Read the file contents - first line is dimension
+        int dimension;
+        evec_stream >> dimension;
+        if (dimension != N) {
+            std::cerr << "Error: Eigenvector dimension " << dimension << " doesn't match expected size " << N << std::endl;
+            evec_stream.close();
+            continue;
+        }
+
+        // Initialize psi to zeros
+        std::fill(psi.begin(), psi.end(), Complex(0.0, 0.0));
+
+        // Read non-zero entries
+        int index;
+        double real_part, imag_part;
+        while (evec_stream >> index >> real_part >> imag_part) {
+            psi[index] = Complex(real_part, imag_part);
+        }
+        evec_stream.close();
+        
+        // Calculate Boltzmann factor
+        double boltzmann = std::exp(-beta * eigenvalues[idx] - max_exp) / Z;
+        
+        // For each pair of sites, compute the correlation functions
+        for (int i = 0; i < num_sites; i++) {
+            for (int j = 0; j < num_sites; j++) {
+                if (i == j) continue; // Skip same site
+                
+                // Apply operators
+                std::vector<Complex> SzSz_psi = SzSz_ops[i][j].apply(std::vector<Complex>(psi.begin(), psi.end()));
+                std::vector<Complex> SpSm_psi = SpSm_ops[i][j].apply(std::vector<Complex>(psi.begin(), psi.end()));
+                
+                // Calculate expectation values
+                Complex SzSz_exp = Complex(0.0, 0.0);
+                Complex SpSm_exp = Complex(0.0, 0.0);
+                
+                for (int k = 0; k < N; k++) {
+                    SzSz_exp += std::conj(psi[k]) * SzSz_psi[k];
+                    SpSm_exp += std::conj(psi[k]) * SpSm_psi[k];
+                }
+                
+                // Add weighted contribution to thermal average
+                correlations[0][i][j] += boltzmann * SzSz_exp; // Sz*Sz
+                correlations[1][i][j] += boltzmann * SpSm_exp; // S+*S-
+            }
+        }
+        
+        // Progress reporting
+        if ((idx + 1) % 10 == 0 || idx == num_eigenvalues - 1) {
+            std::cout << "Processed " << idx + 1 << "/" << num_eigenvalues << " eigenvectors" << std::endl;
+        }
+    }
+    
+    // Print results if requested
+    if (print_output) {
+        std::cout << "\nSpin-Spin Correlations at T = " << temperature << ":" << std::endl;
+        
+        // Print Sz*Sz correlations
+        std::cout << "\nSz*Sz Correlations:" << std::endl;
+        std::cout << std::setw(5) << "i\\j";
+        for (int j = 0; j < num_sites; j++) {
+            std::cout << std::setw(10) << j;
+        }
+        std::cout << std::endl;
+        
+        for (int i = 0; i < num_sites; i++) {
+            std::cout << std::setw(5) << i;
+            for (int j = 0; j < num_sites; j++) {
+                if (i == j) {
+                    std::cout << std::setw(10) << "---";
+                } else {
+                    std::cout << std::setw(10) << std::setprecision(4) << correlations[0][i][j].real();
+                }
+            }
+            std::cout << std::endl;
+        }
+        
+        // Print S+*S- correlations
+        std::cout << "\nS+*S- Correlations:" << std::endl;
+        std::cout << std::setw(5) << "i\\j";
+        for (int j = 0; j < num_sites; j++) {
+            std::cout << std::setw(10) << j;
+        }
+        std::cout << std::endl;
+        
+        for (int i = 0; i < num_sites; i++) {
+            std::cout << std::setw(5) << i;
+            for (int j = 0; j < num_sites; j++) {
+                if (i == j) {
+                    std::cout << std::setw(10) << "---";
+                } else {
+                    std::cout << std::setw(10) << std::setprecision(4) << correlations[1][i][j].real();
+                }
+            }
+            std::cout << std::endl;
+        }
+    }
+    
+    // Save to file
+    std::string outfile = output_dir + "/spin_correlations_T" + std::to_string(temperature) + ".dat";
+    std::ofstream out(outfile);
+    if (out.is_open()) {
+        out << "# Site_i Site_j SzSz_real SzSz_imag SpSm_real SpSm_imag" << std::endl;
+        for (int i = 0; i < num_sites; i++) {
+            for (int j = 0; j < num_sites; j++) {
+                if (i != j) {
+                    out << i << " " << j << " "
+                        << std::setprecision(10) << correlations[0][i][j].real() << " "
+                        << std::setprecision(10) << correlations[0][i][j].imag() << " "
+                        << std::setprecision(10) << correlations[1][i][j].real() << " "
+                        << std::setprecision(10) << correlations[1][i][j].imag() << std::endl;
+                }
+            }
+        }
+        out.close();
+        std::cout << "Spin correlations saved to " << outfile << std::endl;
+    }
+}
 
 #endif // OBSERVABLES_H
