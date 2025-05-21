@@ -44,6 +44,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
             '--Jyy', str(Jyy),
             '--Jzz', str(Jzz),
             '--h', str(fixed_params["h"]),
+            '--ed_executable', str(fixed_params["ED_path"]),
             '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
             '--base_dir', work_dir,
             '--temp_min', str(fixed_params["temp_min"]),
@@ -63,6 +64,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
             '--Jyy', str(Jyy),
             '--Jzz', str(Jzz),
             '--h', str(fixed_params["h"]),
+            '--ed_executable', str(fixed_params["ED_path"]),
             '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
             '--base_dir', work_dir,
             '--temp_min', str(fixed_params["temp_min"]),
@@ -186,7 +188,10 @@ def main():
                         help='Directory for output files')
     parser.add_argument('--work_dir', type=str, default='nlc_fit_work_dir',
                         help='Working directory for temporary files (default: create temp dir)')
-    
+    parser.add_argument('--ed_executable', type=str, default='./build/ED',
+                        help='Path to the ED executable')
+
+
     # Initial guess and bounds for parameters
     parser.add_argument('--initial_Jxx', type=float, default=0.0, help='Initial guess for Jxx coupling')
     parser.add_argument('--initial_Jyy', type=float, default=0.0, help='Initial guess for Jyy coupling')
@@ -268,7 +273,8 @@ def main():
             "temp_min": args.temp_min,
             "temp_max": args.temp_max,
             "measure_spin": args.measure_spin,
-            "ED_method": args.ED_method
+            "ED_method": args.ED_method,
+            "ED_path": args.ed_executable
         }
         
         # Filter experimental data based on temperature range

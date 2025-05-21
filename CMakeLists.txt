@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(ExactDiagonalization LANGUAGES CXX CUDA)
+project(ExactDiagonalization LANGUAGES CXX)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
