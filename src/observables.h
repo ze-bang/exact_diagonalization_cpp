@@ -905,6 +905,122 @@ ComplexVector load_eigenstate_from_file(const std::string& filename, int expecte
     return eigenstate;
 }
 
+// Load classical eigenstate (basis state with Nth largest amplitude) from file
+ComplexVector load_classical_eigenstate_from_file(
+    const std::string& filename, 
+    int expected_dimension = -1,
+    int nth_state = 1            // Select the nth most probable state (default: most probable)
+) {
+    std::ifstream file(filename);
+    if (!file) {
+        std::cerr << "Error: Cannot open eigenvector file " << filename << std::endl;
+        return {-1, 0.0};
+    }
+    
+    // Read the first line which contains dimension
+    int dimension;
+    file >> dimension;
+    
+    if (expected_dimension > 0 && dimension != expected_dimension) {
+        std::cerr << "Warning: File dimension " << dimension << " doesn't match expected dimension " 
+                  << expected_dimension << std::endl;
+    }
+    
+    // Vector to store all basis states and their probabilities
+    std::vector<std::pair<int, double>> state_probs;
+    
+    // Read entries
+    int index;
+    double real_part, imag_part;
+    
+    // Skip the first line
+    std::string line;
+    std::getline(file, line);
+    
+    // Sort states by probability (highest first)
+    std::vector<std::tuple<int, double, Complex>> state_data;
+    state_data.reserve(dimension);
+
+    while (file >> index >> real_part >> imag_part) {
+        Complex value(real_part, imag_part);
+        double probability = std::norm(value);  // |z|^2 = real^2 + imag^2
+        state_data.emplace_back(index, probability, value);
+    }
+
+    file.close();
+
+    // Sort by probability (highest first)
+    std::sort(state_data.begin(), state_data.end(), 
+              [](const auto& a, const auto& b) { return std::get<1>(a) > std::get<1>(b); });
+
+    // Group states with the same probability
+    std::vector<std::vector<std::tuple<int, double, Complex>>> groups;
+    if (!state_data.empty()) {
+        std::vector<std::tuple<int, double, Complex>> current_group;
+        double current_prob = std::get<1>(state_data[0]);
+        
+        for (const auto& state : state_data) {
+            // If probability is significantly different, start a new group
+            if (std::abs(std::get<1>(state) - current_prob) > 1e-10) {
+                if (!current_group.empty()) {
+                    groups.push_back(current_group);
+                }
+                current_group.clear();
+                current_prob = std::get<1>(state);
+            }
+            current_group.push_back(state);
+        }
+        
+        // Add the last group
+        if (!current_group.empty()) {
+            groups.push_back(current_group);
+        }
+    }
+
+    // Print information about the groups
+    std::cout << "Found " << groups.size() << " groups of states with different probabilities" << std::endl;
+    for (size_t i = 0; i < std::min(size_t(5), groups.size()); ++i) {
+        std::cout << "Group " << (i+1) << ": " << groups[i].size() << " states with probability " 
+                  << std::get<1>(groups[i][0]) << std::endl;
+    }
+
+    // Check if we have enough groups
+    if (nth_state > groups.size()) {
+        std::cerr << "Error: Requested " << nth_state << "th group, but only " << groups.size() 
+                  << " groups available." << std::endl;
+        return ComplexVector();
+    }
+
+    // Select the nth group (1-indexed)
+    const auto& selected_group = groups[nth_state - 1];
+    std::cout << "Selected group " << nth_state << " with " << selected_group.size() 
+              << " states of probability " << std::get<1>(selected_group[0]) << std::endl;
+
+    // Create eigenstate with selected states
+    ComplexVector eigenstate(dimension, Complex(0.0, 0.0));
+    for (const auto& state : selected_group) {
+        int idx = std::get<0>(state);
+        Complex value = std::get<2>(state);
+        eigenstate[idx] = value;
+    }
+
+    // Renormalize the eigenstate
+    double norm = 0.0;
+    for (const Complex& c : eigenstate) {
+        norm += std::norm(c);
+    }
+    norm = std::sqrt(norm);
+
+    if (norm > 1e-10) {
+        for (Complex& c : eigenstate) {
+            c /= norm;
+        }
+    }
+
+    return eigenstate;
+}
+
+
 // Calculate spin expectations for a single eigenstate
 std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     const ComplexVector& eigenstate,   // Eigenstate as complex vector
@@ -1120,14 +1236,21 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations_from_file
     int num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file = "",  // Optional: output file path
-    bool print_output = true           // Whether to print the results to console
+    bool print_output = true,           // Whether to print the results to console
+    bool classical = false,               // Whether to load a classical eigenstate
+    int nth_state = 1                   // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
     int expected_dimension = 1 << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
-    ComplexVector eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
-    
+    ComplexVector eigenstate;
+    if (classical) {
+        eigenstate = load_classical_eigenstate_from_file(eigenstate_file, expected_dimension, nth_state);
+    } else {
+        eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
+    }
+
     if (eigenstate.empty()) {
         std::cerr << "Error: Failed to load eigenstate from " << eigenstate_file << std::endl;
         return {};
@@ -1143,14 +1266,21 @@ std::vector<std::vector<std::vector<Complex>>> compute_eigenstate_spin_correlati
     int num_sites,                     // Number of sites
     float spin_l,                      // Spin length (e.g., 0.5 for spin-1/2)
     const std::string& output_file = "",  // Optional: output file path
-    bool print_output = true           // Whether to print the results to console
+    bool print_output = true,           // Whether to print the results to console
+    bool classical = false,              // Whether to load a classical eigenstate
+    int nth_state = 1                    // Select the nth most probable state (default: most probable)
 ) {
     // Calculate expected dimension
     int expected_dimension = 1 << num_sites;  // 2^num_sites
     
     // Load eigenstate from file
-    ComplexVector eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
-    
+    ComplexVector eigenstate;
+    if (classical) {
+        eigenstate = load_classical_eigenstate_from_file(eigenstate_file, expected_dimension, nth_state);
+    } else {
+        eigenstate = load_eigenstate_from_file(eigenstate_file, expected_dimension);
+    }
+
     if (eigenstate.empty()) {
         std::cerr << "Error: Failed to load eigenstate from " << eigenstate_file << std::endl;
         return {};

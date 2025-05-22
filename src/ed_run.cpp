@@ -54,11 +54,11 @@ int main(int argc, char* argv[]) {
 
     // Default parameters
     EDParameters params;
-    params.num_eigenvalues = (1<<10);
+    params.num_eigenvalues = 1;
     params.compute_eigenvectors = false;
     params.output_dir = directory + "/output";
     params.tolerance = 1e-10;
-    params.max_iterations = (1<<10);
+    params.max_iterations = 1000000;
     params.block_size = 10;
     params.shift = 0.0;
     params.temp_min = 0.001;
@@ -613,17 +613,25 @@ int main(int argc, char* argv[]) {
                 std::string obs_output_dir = params.output_dir + "/spin_expectations";
                 system(("mkdir -p " + obs_output_dir).c_str());
                 
-                for (double T : temperatures) {
-                    std::cout << "Computing spin expectations at T=" << T << std::endl;
-                    compute_spin_expectations(
-                        standard_output,
-                        obs_output_dir,
+                std::cout << "Computing spin expectations at T=0" << std::endl;
+                    compute_eigenstate_spin_expectations_from_file(
+                        standard_output + "/eigenvectors/eigenvector_0.txt",
                         params.num_sites,
                         params.spin_length,
-                        T,
-                        true  // print output
+                        obs_output_dir + "/spin_expectations_T0.dat",
+                        true,
+                        true,
+                        1
                     );
-                }
+                    
+                    compute_eigenstate_spin_correlations_from_file(
+                        standard_output + "/eigenvectors/eigenvector_0.txt",
+                        params.num_sites,
+                        params.spin_length,
+                        obs_output_dir + "/spin_correlations_T0.dat",
+                        true,
+                        false
+                    );
             }
         }
         catch (const std::exception& e) {
@@ -1011,23 +1019,32 @@ int main(int argc, char* argv[]) {
             std::cout << "Calculating spin expectations..." << std::endl;
             std::string obs_output_dir = params.output_dir + "/spin_expectations";
             system(("mkdir -p " + obs_output_dir).c_str());
-            
-            std::cout << "Computing spin expectations at T=0" << std::endl;
-            compute_eigenstate_spin_expectations_from_file(
-                symmetrized_output + "/eigenvectors/eigenvector_0.dat",
-                params.num_sites,
-                params.spin_length,
-                obs_output_dir + "/spin_expectations_T0.dat",
-                true  // print output
-            );
+        
 
-            compute_eigenstate_spin_correlations_from_file(
-                symmetrized_output + "/eigenvectors/eigenvector_0.dat",
-                params.num_sites,
-                params.spin_length,
-                obs_output_dir + "/spin_correlations_T0.dat",
-                true  // print output
-            );
+            std::cout << "Computing spin expectations at T=0" << std::endl;
+            for (int i = 0; i < 10; i++){
+                compute_eigenstate_spin_expectations_from_file(
+                    symmetrized_output + "/eigenvectors/eigenvector_0.dat",
+                    params.num_sites,
+                    params.spin_length,
+                    obs_output_dir + "/spin_expectations_T0_" + std::to_string(i+1) + ".dat",
+                    true,
+                    true,
+                    i+1
+                );
+                
+                compute_eigenstate_spin_correlations_from_file(
+                    symmetrized_output + "/eigenvectors/eigenvector_0.dat",
+                    params.num_sites,
+                    params.spin_length,
+                    obs_output_dir + "/spin_correlations_T0_" + std::to_string(i+1) + ".dat",
+                    true,
+                    true,
+                    i+1
+                );
+            }
+
+
 
             // compute_spin_expectations(
             //     directory + "/output",

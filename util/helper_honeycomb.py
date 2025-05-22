@@ -149,14 +149,16 @@ def flattenIndex(indices, dim2):
 
 def genNN_list(d1, d2, PBC):
     """Generate nearest neighbor list with either PBC or open BC"""
-    NN_list = []
-    bond_list = []  # To track bond types (x, y, z)
-    
+    NN_list = np.zeros((d1*d2*2, 3), dtype=int)  # To track nearest neighbors
+    bond_list = np.zeros((d1*d2*2, 3), dtype=str)  # To track bond types
+
+
     for i in range(d1):
         for j in range(d2):
             for u in range(2):  # 2 sublattices
                 site_idx = i*d2*2 + j*2 + u
                 
+
                 if PBC:
                     neighbor_indices = indices_periodic_BC(i, j, u, d1, d2)
                 else:
@@ -171,13 +173,13 @@ def genNN_list(d1, d2, PBC):
                 else:  # Sublattice B
                     bond_types_for_site = ['z', 'x', 'y'][:len(nn_flat)]
                 
-                NN_list.append(nn_flat)
-                bond_list.append(bond_types_for_site)
-    
+                NN_list[site_idx] = nn_flat
+                bond_list[site_idx] = bond_types_for_site
+
     return NN_list, bond_list
 
 def genNNN_list(d1, d2, PBC):
-    NN_list = []
+    NN_list = np.zeros((d1*d2*2, 6), dtype=int)  # To track next-nearest neighbors
 
     for i in range(d1):
         for j in range(d2):
@@ -189,12 +191,11 @@ def genNNN_list(d1, d2, PBC):
                     neighbor_indices = indices_open_BC_NNN(i, j, u, d1, d2)
                 
                 nn_flat = flattenIndex(neighbor_indices, d2)
-                NN_list.append(nn_flat)
-
+                NN_list[site_idx] = nn_flat
     return NN_list
 
 def genNNNN_list(d1, d2, PBC):
-    NN_list = []
+    NN_list = np.zeros((d1*d2*2, 3), dtype=int)  # To track next-nearest neighbors
 
     for i in range(d1):
         for j in range(d2):
@@ -206,7 +207,7 @@ def genNNNN_list(d1, d2, PBC):
                     neighbor_indices = indices_open_BC_NNNN(i, j, u, d1, d2)
                 
                 nn_flat = flattenIndex(neighbor_indices, d2)
-                NN_list.append(nn_flat)
+                NN_list[site_idx] = nn_flat
 
     return NN_list
 
@@ -257,10 +258,10 @@ def Zeeman(h, hx, hy, hz):
     
     # Scale by field strength
     hx, hy, hz = h * h_dir
-    
+
     return np.array([
-        [0, 0, -hx, 0],  # σx term
-        [1, 0, -hy, 0],  # σy term
+        [0, 0, -hx/2, hy/2],  # σ+ term
+        [1, 0, -hx/2, -hy/2],  # σ- term
         [2, 0, -hz, 0]   # σz term
     ])
 

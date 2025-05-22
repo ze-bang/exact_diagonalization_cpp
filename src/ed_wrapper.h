@@ -247,7 +247,7 @@ EDResults exact_diagonalization_core(
             
         case DiagonalizationMethod::LOBPCG:
             std::cout << "Using LOBPCG method" << std::endl;
-            lobpcg_eigenvalues(H, hilbert_space_dim, params.max_iterations, 
+            lobpcg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
                             params.num_eigenvalues, params.tolerance, 
                             results.eigenvalues, params.output_dir, 
                             params.compute_eigenvectors);
