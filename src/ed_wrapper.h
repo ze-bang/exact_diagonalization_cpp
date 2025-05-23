@@ -197,14 +197,6 @@ EDResults exact_diagonalization_core(
                                 params.output_dir, params.compute_eigenvectors);
             break;
             
-        case DiagonalizationMethod::SHIFT_INVERT_ROBUST:
-            std::cout << "Using robust shift-invert Lanczos method with shift = " << params.shift << std::endl;
-            shift_invert_lanczos_robust(H, hilbert_space_dim, params.max_iterations, 
-                                      params.num_eigenvalues, params.shift, 
-                                      params.tolerance, results.eigenvalues, 
-                                      params.output_dir, params.compute_eigenvectors);
-            break;
-            
         case DiagonalizationMethod::CG:
             std::cout << "Using conjugate gradient method" << std::endl;
             cg_diagonalization(H, hilbert_space_dim, params.max_iterations, 
@@ -264,9 +256,9 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::OSS:
             std::cout << "Spectrum slicing for full diagonalization" << std::endl;
             optimal_spectrum_solver(
-                H, hilbert_space_dim, 
+                H, hilbert_space_dim,
                 results.eigenvalues, params.output_dir, 
-                params.compute_eigenvectors, params.tolerance
+                params.compute_eigenvectors
             );
             break;
             
@@ -434,9 +426,9 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;
             block_lanczos(H, hilbert_space_dim, 
-                        params.max_iterations, params.num_eigenvalues, 
+                        params.max_iterations, params.num_eigenvalues, params.block_size, 
                         params.tolerance, results.eigenvalues, 
-                        params.output_dir, params.compute_eigenvectors, params.block_size);
+                        params.output_dir, params.compute_eigenvectors);
             break;
         
         // case DiagonalizationMethod::LANCZOS_CUDA:
