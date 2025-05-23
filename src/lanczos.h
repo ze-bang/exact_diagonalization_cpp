@@ -1201,9 +1201,9 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
 
 // Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
 void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                              int max_iter, int num_eigs, double target_lower, double target_upper,
+                              int max_iter, int num_eigs,
                               double tol, std::vector<double>& eigenvalues, std::string dir = "",
-                              bool compute_eigenvectors = false) {
+                              bool compute_eigenvectors = false, double target_lower=0, double target_upper=0) {
     
     std::cout << "Starting Chebyshev Filtered Lanczos algorithm" << std::endl;
     
