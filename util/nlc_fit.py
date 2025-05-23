@@ -35,7 +35,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
     Jxx, Jyy, Jzz = params
     
     # Create command for nlce.py
-    if fixed_params["ED_method"] == 'FULL':
+    if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
         cmd = [
             'python3', 
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),

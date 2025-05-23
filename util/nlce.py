@@ -99,7 +99,7 @@ def run_ed_for_cluster(args):
             '--iterations=100000',
             '--large_value=100'
         ]
-    elif ed_options["method"] == 'FULL':
+    elif ed_options["method"] == 'FULL' or ed_options["method"] == 'OSS':
         cmd = [
             ed_executable,
             ham_subdir,

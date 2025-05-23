@@ -461,7 +461,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
     // Create a directory for temporary basis vector files
-    std::string temp_dir = dir+"/lanczos_basis_vectors";
+    std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
     system(cmd.c_str());
 
@@ -581,7 +581,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
     // Create a directory for temporary basis vector files
-    std::string temp_dir = dir+"/lanczos_basis_vectors";
+    std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
     system(cmd.c_str());
 
@@ -811,7 +811,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     cblas_zscal(N, &scale_factor, v_current.data(), 1);
     
     // Create a directory for temporary basis vector files
-    std::string temp_dir = dir+"/lanczos_basis_vectors";
+    std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
     std::string cmd = "mkdir -p " + temp_dir;
     system(cmd.c_str());
 
@@ -924,7 +924,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     
     // Create directories for output
     std::string temp_dir = dir + "/block_lanczos_temp";
-    std::string evec_dir = dir + "/block_lanczos_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -1199,165 +1199,246 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     std::cout << "Block Lanczos completed successfully" << std::endl;
 }
 
-// Chebyshev filtered Lanczos algorithm implementation
-void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int max_iter, int exct, 
-             double tol, std::vector<double>& eigenvalues, std::vector<ComplexVector>* eigenvectors = nullptr) {
+// Chebyshev Filtered Lanczos algorithm with automatic spectrum range estimation
+void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
+                              int max_iter, int num_eigs, double target_lower, double target_upper,
+                              double tol, std::vector<double>& eigenvalues, std::string dir = "",
+                              bool compute_eigenvectors = false) {
     
-    // Step 1: Estimate spectral bounds using a few steps of power iteration
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
+    std::cout << "Starting Chebyshev Filtered Lanczos algorithm" << std::endl;
     
-    // Create random vector for power iteration
-    ComplexVector v_rand(N);
-    for (int i = 0; i < N; i++) {
-        v_rand[i] = Complex(dist(gen), dist(gen));
+    // Create directories for output
+    std::string temp_dir = dir + "/chebyshev_lanczos_temp";
+    std::string evec_dir = dir + "/eigenvectors";
+    
+    if (compute_eigenvectors) {
+        system(("mkdir -p " + evec_dir).c_str());
     }
+    system(("mkdir -p " + temp_dir).c_str());
     
-    // Normalize
-    double norm = cblas_dznrm2(N, v_rand.data(), 1);
-    Complex scale = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v_rand.data(), 1);
+    // Step 1: Automatic spectrum range estimation
+    std::cout << "Estimating spectral bounds..." << std::endl;
     
-    // Estimate largest eigenvalue using power iteration
-    const int power_steps = 20;
-    ComplexVector Hv(N);
-    for (int i = 0; i < power_steps; i++) {
-        H(v_rand.data(), Hv.data(), N);
+    double lambda_min, lambda_max;
+    
+    if (target_lower == 0.0 && target_upper == 0.0) {
+        // Need to estimate full spectral range
+        // Use Lanczos with a few iterations to get bounds
+        std::vector<double> bounds_estimate;
+        lanczos_no_ortho(H, N, std::min(50, N/20), 10, 1e-6, bounds_estimate, "", false);
         
-        // Replace v with Hv (normalized)
-        double norm = cblas_dznrm2(N, Hv.data(), 1);
-        Complex scale = Complex(1.0/norm, 0.0);
+        if (bounds_estimate.size() >= 2) {
+            lambda_min = bounds_estimate.front();
+            lambda_max = bounds_estimate.back();
+        } else {
+            // Fallback: use power iteration for largest eigenvalue
+            std::mt19937 gen(std::random_device{}());
+            std::uniform_real_distribution<double> dist(-1.0, 1.0);
+            ComplexVector v(N), Hv(N);
+            
+            // Initialize random vector
+            for (int i = 0; i < N; i++) {
+                v[i] = Complex(dist(gen), dist(gen));
+            }
+            double norm = cblas_dznrm2(N, v.data(), 1);
+            Complex scale(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, v.data(), 1);
+            
+            // Power iteration for largest eigenvalue
+            for (int iter = 0; iter < 20; iter++) {
+                H(v.data(), Hv.data(), N);
+                Complex dot;
+                cblas_zdotc_sub(N, v.data(), 1, Hv.data(), 1, &dot);
+                lambda_max = std::real(dot);
+                
+                norm = cblas_dznrm2(N, Hv.data(), 1);
+                scale = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale, Hv.data(), 1);
+                v = Hv;
+            }
+            
+            // Estimate smallest eigenvalue using shifted inverse power iteration
+            lambda_min = -lambda_max; // Initial guess
+        }
         
-        for (int j = 0; j < N; j++) {
-            v_rand[j] = Hv[j] * scale;
+        // Add safety margin
+        double range = lambda_max - lambda_min;
+        lambda_min -= 0.1 * range;
+        lambda_max += 0.1 * range;
+        
+        // If no target range specified, compute eigenvalues in full range
+        target_lower = lambda_min;
+        target_upper = lambda_max;
+    } else {
+        // Target range specified, but still need full spectral bounds for filter
+        // Use wider range estimation
+        lambda_min = target_lower - 2.0 * (target_upper - target_lower);
+        lambda_max = target_upper + 2.0 * (target_upper - target_lower);
+        
+        // Refine with a few Lanczos iterations
+        std::vector<double> bounds_check;
+        lanczos_no_ortho(H, N, std::min(30, N/50), 5, 1e-6, bounds_check, "", false);
+        
+        if (!bounds_check.empty()) {
+            lambda_min = std::min(lambda_min, bounds_check.front() - 0.1 * std::abs(bounds_check.front()));
+            lambda_max = std::max(lambda_max, bounds_check.back() + 0.1 * std::abs(bounds_check.back()));
         }
     }
     
-    // Apply H one more time for Rayleigh quotient
-    H(v_rand.data(), Hv.data(), N);
-    Complex rayleigh_quotient;
-    cblas_zdotc_sub(N, v_rand.data(), 1, Hv.data(), 1, &rayleigh_quotient);
+    std::cout << "Estimated spectral bounds: [" << lambda_min << ", " << lambda_max << "]" << std::endl;
+    std::cout << "Target interval: [" << target_lower << ", " << target_upper << "]" << std::endl;
     
-    // Estimate spectral bounds
-    double lambda_max = std::real(rayleigh_quotient);
-    double lambda_min = -lambda_max;  // Conservative estimate for symmetric H
+    // Step 2: Design Chebyshev filter
+    const int filter_degree = 20; // Polynomial degree for filter
     
-    // Allow for non-symmetric spectrum
-    double spectral_center = (lambda_max + lambda_min) / 2.0;
-    double spectral_radius = (lambda_max - lambda_min) / 2.0;
+    // Map spectral range to [-1, 1]
+    double a = (lambda_max + lambda_min) / 2.0;
+    double b = (lambda_max - lambda_min) / 2.0;
     
-    std::cout << "Chebyshev Filtered Lanczos: Estimated spectral bounds [" 
-              << lambda_min << ", " << lambda_max << "]" << std::endl;
+    // Map target interval to normalized coordinates
+    double target_lower_normalized = (target_lower - a) / b;
+    double target_upper_normalized = (target_upper - a) / b;
     
-    // Step 2: Apply Chebyshev filter to enhance convergence to desired eigenvalues
+    // Ensure target interval is within [-1, 1]
+    target_lower_normalized = std::max(-1.0, std::min(1.0, target_lower_normalized));
+    target_upper_normalized = std::max(-1.0, std::min(1.0, target_upper_normalized));
+    
+    std::cout << "Filter polynomial degree: " << filter_degree << std::endl;
+    
+    // Step 3: Define Chebyshev filtered operator
+    auto apply_chebyshev_filter = [&](const Complex* v_in, Complex* v_out, int size) {
+        ComplexVector t0(size), t1(size), t2(size);
+        ComplexVector temp(size);
+        
+        // Jackson damping coefficients to reduce Gibbs oscillations
+        std::vector<double> jackson_coeff(filter_degree + 1);
+        for (int k = 0; k <= filter_degree; k++) {
+            double theta = M_PI * k / (filter_degree + 1);
+            jackson_coeff[k] = ((filter_degree - k + 1) * cos(theta) + 
+                               sin(theta) / tan(M_PI / (filter_degree + 1))) / (filter_degree + 1);
+        }
+        
+        // Chebyshev expansion coefficients for characteristic function on [target_lower, target_upper]
+        std::vector<double> cheb_coeff(filter_degree + 1);
+        
+        // Compute Chebyshev coefficients using Gauss-Chebyshev quadrature
+        const int quad_points = 100;
+        for (int k = 0; k <= filter_degree; k++) {
+            cheb_coeff[k] = 0.0;
+            for (int j = 0; j < quad_points; j++) {
+                double theta_j = M_PI * (j + 0.5) / quad_points;
+                double x = cos(theta_j);
+                
+                // Evaluate characteristic function
+                double f_x = (x >= target_lower_normalized && x <= target_upper_normalized) ? 1.0 : 0.0;
+                
+                // Add contribution to coefficient
+                cheb_coeff[k] += f_x * cos(k * theta_j);
+            }
+            cheb_coeff[k] *= 2.0 / quad_points;
+            if (k == 0) cheb_coeff[k] /= 2.0;
+            
+            // Apply Jackson damping
+            cheb_coeff[k] *= jackson_coeff[k];
+        }
+        
+        // Initialize Chebyshev recursion
+        // T_0(x) = 1
+        std::copy(v_in, v_in + size, t0.data());
+        
+        // Accumulate result
+        std::fill(v_out, v_out + size, Complex(0.0, 0.0));
+        
+        // Add T_0 contribution
+        for (int i = 0; i < size; i++) {
+            v_out[i] += cheb_coeff[0] * t0[i];
+        }
+        
+        if (filter_degree > 0) {
+            // T_1(x) = x = (H - aI) / b
+            H(v_in, temp.data(), size);
+            for (int i = 0; i < size; i++) {
+                t1[i] = (temp[i] - Complex(a, 0.0) * v_in[i]) / Complex(b, 0.0);
+            }
+            
+            // Add T_1 contribution
+            for (int i = 0; i < size; i++) {
+                v_out[i] += cheb_coeff[1] * t1[i];
+            }
+            
+            // Chebyshev recurrence for higher terms
+            for (int k = 2; k <= filter_degree; k++) {
+                // T_k(x) = 2x T_{k-1}(x) - T_{k-2}(x)
+                H(t1.data(), temp.data(), size);
+                
+                for (int i = 0; i < size; i++) {
+                    double x_times_t1 = std::real((temp[i] - Complex(a, 0.0) * t1[i]) / Complex(b, 0.0));
+                    t2[i] = 2.0 * x_times_t1 - t0[i];
+                }
+                
+                // Add T_k contribution
+                for (int i = 0; i < size; i++) {
+                    v_out[i] += cheb_coeff[k] * t2[i];
+                }
+                
+                // Update for next iteration
+                t0 = t1;
+                t1 = t2;
+            }
+        }
+    };
+    
+    // Step 4: Run standard Lanczos with filtered operator
+    std::cout << "Running Lanczos with Chebyshev filter..." << std::endl;
     
     // Initialize random starting vector
+    std::mt19937 gen(std::random_device{}());
+    std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
+    
+    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         v_current[i] = Complex(dist(gen), dist(gen));
     }
     
-    // Normalize the starting vector
-    norm = cblas_dznrm2(N, v_current.data(), 1);
-    scale = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v_current.data(), 1);
+    // Apply filter to starting vector for better convergence
+    ComplexVector filtered_start(N);
+    apply_chebyshev_filter(v_current.data(), filtered_start.data(), N);
     
-    // Apply Chebyshev filter of degree 10 to enhance low eigenvalues
-    const int cheby_degree = 10;
-    ComplexVector v_prev(N), v_next(N), v_temp(N);
-    
-    // First Chebyshev term: T_0(x) = 1 (identity)
-    ComplexVector c0 = v_current;
-    
-    // Second Chebyshev term: T_1(x) = x
-    H(v_current.data(), v_temp.data(), N);
-    
-    // Scale and shift to map [lambda_min, lambda_max] to [-1, 1]
-    for (int i = 0; i < N; i++) {
-        v_temp[i] = (v_temp[i] - Complex(spectral_center, 0.0)) / Complex(spectral_radius, 0.0);
+    // Normalize
+    double norm = cblas_dznrm2(N, filtered_start.data(), 1);
+    if (norm > tol) {
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, filtered_start.data(), 1);
+        v_current = filtered_start;
+    } else {
+        // Filter annihilated the vector, use original normalized
+        norm = cblas_dznrm2(N, v_current.data(), 1);
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, v_current.data(), 1);
     }
     
-    ComplexVector c1 = v_temp;
+    // Store first basis vector
+    write_basis_vector(temp_dir, 0, v_current, N);
     
-    // Use Chebyshev recurrence relation: T_{n+1}(x) = 2x*T_n(x) - T_{n-1}(x)
-    // We focus on low eigenvalues, so we apply a filter that enhances these
-    for (int k = 2; k <= cheby_degree; k++) {
-        // First calculate 2*x*T_n(x)
-        H(c1.data(), v_temp.data(), N);
-        
-        // Scale and shift
-        for (int i = 0; i < N; i++) {
-            v_temp[i] = (v_temp[i] - Complex(spectral_center, 0.0)) / Complex(spectral_radius, 0.0);
-        }
-        
-        // Scale by 2
-        Complex factor(2.0, 0.0);
-        cblas_zscal(N, &factor, v_temp.data(), 1);
-        
-        // Subtract T_{n-1}(x) to get T_{n+1}(x)
-        for (int i = 0; i < N; i++) {
-            v_next[i] = v_temp[i] - c0[i];
-        }
-        
-        // Update for next iteration
-        c0 = c1;
-        c1 = v_next;
-    }
-    
-    // Use the filtered vector as the starting vector for Lanczos
-    v_current = c1;
-    
-    // Normalize again
-    norm = cblas_dznrm2(N, v_current.data(), 1);
-    scale = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v_current.data(), 1);
-    
-    // Create a directory for temporary basis vector files
-    std::string temp_dir = "chebyshev_lanczos_basis_vectors";
-    std::string cmd = "mkdir -p " + temp_dir;
-    system(cmd.c_str());
-
-    // Write the first basis vector to file
-    std::string basis_file = temp_dir + "/basis_0.dat";
-    std::ofstream outfile(basis_file, std::ios::binary);
-    if (!outfile) {
-        std::cerr << "Error: Cannot open file " << basis_file << " for writing" << std::endl;
-        return;
-    }
-    outfile.write(reinterpret_cast<char*>(v_current.data()), N * sizeof(Complex));
-    outfile.close();
-    
-    v_prev = ComplexVector(N, Complex(0.0, 0.0));
+    ComplexVector v_prev(N, Complex(0.0, 0.0));
+    ComplexVector v_next(N);
     ComplexVector w(N);
     
-    // Initialize alpha and beta vectors for tridiagonal matrix
-    std::vector<double> alpha;  // Diagonal elements
-    std::vector<double> beta;   // Off-diagonal elements
-    beta.push_back(0.0);        // β_0 is not used
+    std::vector<double> alpha;
+    std::vector<double> beta;
+    beta.push_back(0.0);
     
-    max_iter = std::min(N, max_iter);
+    // Run Lanczos with filtered operator
+    int actual_iter = std::min(max_iter, N);
     
-    std::cout << "Chebyshev Filtered Lanczos: Starting iterations..." << std::endl;
-    
-    // Helper function to read basis vector from file
-    auto read_basis_vector = [&temp_dir](int index, int N) -> ComplexVector {
-        ComplexVector vec(N);
-        std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-        std::ifstream infile(filename, std::ios::binary);
-        if (!infile) {
-            std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
-            return vec;
-        }
-        infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
-        return vec;
-    };
-    
-    // Lanczos iteration
-    for (int j = 0; j < max_iter; j++) {
-        // w = H*v_j
-        H(v_current.data(), w.data(), N);
+    for (int j = 0; j < actual_iter; j++) {
+        std::cout << "Chebyshev-Lanczos iteration " << j + 1 << "/" << actual_iter << std::endl;
         
-        // w = w - beta_j * v_{j-1}
+        // Apply filtered operator: w = P(H) * v_j
+        apply_chebyshev_filter(v_current.data(), w.data(), N);
+        
+        // Standard Lanczos orthogonalization
         if (j > 0) {
             Complex neg_beta = Complex(-beta[j], 0.0);
             cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
@@ -1366,7 +1447,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         // alpha_j = <v_j, w>
         Complex dot_product;
         cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-        alpha.push_back(std::real(dot_product));  // α should be real for Hermitian operators
+        alpha.push_back(std::real(dot_product));
         
         // w = w - alpha_j * v_j
         Complex neg_alpha = Complex(-alpha[j], 0.0);
@@ -1374,124 +1455,157 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
         
         // Full reorthogonalization
         for (int k = 0; k <= j; k++) {
-            // Read basis vector k from file
-            ComplexVector basis_k = read_basis_vector(k, N);
-            
+            ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
             Complex overlap;
             cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
             
-            Complex neg_overlap = -overlap;
-            cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            if (std::abs(overlap) > tol) {
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+            }
         }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
         
-        // Check for invariant subspace
         if (norm < tol) {
-            std::cout << "Chebyshev Filtered Lanczos: Invariant subspace found at iteration " << j + 1 << std::endl;
+            std::cout << "Lanczos breakdown at iteration " << j + 1 << std::endl;
+            actual_iter = j + 1;
             break;
         }
         
         // v_{j+1} = w / beta_{j+1}
-        for (int i = 0; i < N; i++) {
-            v_next[i] = w[i] / norm;
+        Complex scale(1.0/norm, 0.0);
+        cblas_zscal(N, &scale, w.data(), 1);
+        
+        if (j < actual_iter - 1) {
+            write_basis_vector(temp_dir, j + 1, w, N);
         }
         
-        // Store basis vector to file
-        if (j < max_iter - 1) {
-            std::string next_basis_file = temp_dir + "/basis_" + std::to_string(j+1) + ".dat";
-            std::ofstream outfile(next_basis_file, std::ios::binary);
-            if (!outfile) {
-                std::cerr << "Error: Cannot open file " << next_basis_file << " for writing" << std::endl;
-                return;
-            }
-            outfile.write(reinterpret_cast<char*>(v_next.data()), N * sizeof(Complex));
-            outfile.close();
-        }
-        
-        // Update for next iteration
         v_prev = v_current;
-        v_current = v_next;
+        v_current = w;
+        
+        // Check convergence periodically
+        if ((j + 1) % 10 == 0 || j == actual_iter - 1) {
+            int m = alpha.size();
+            std::vector<double> diag = alpha;
+            std::vector<double> offdiag(m - 1);
+            for (int i = 0; i < m - 1; i++) {
+                offdiag[i] = beta[i + 1];
+            }
+            
+            std::vector<double> ritz_values(m);
+            int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
+                                     diag.data(), offdiag.data(), nullptr, m);
+            
+            if (info == 0) {
+                // Count eigenvalues in target range
+                int count_in_range = 0;
+                for (int i = 0; i < m; i++) {
+                    if (diag[i] >= target_lower && diag[i] <= target_upper) {
+                        count_in_range++;
+                    }
+                }
+                std::cout << "  Found " << count_in_range << " Ritz values in target range" << std::endl;
+                
+                if (count_in_range >= num_eigs) {
+                    std::cout << "  Sufficient eigenvalues found, stopping early" << std::endl;
+                    actual_iter = j + 1;
+                    break;
+                }
+            }
+        }
     }
     
-    // Construct and solve tridiagonal matrix
+    // Step 5: Solve tridiagonal eigenvalue problem
     int m = alpha.size();
+    std::cout << "Solving tridiagonal system of size " << m << std::endl;
     
-    std::cout << "Chebyshev Filtered Lanczos: Constructing tridiagonal matrix" << std::endl;
-
-    // Allocate arrays for LAPACKE
-    std::vector<double> diag = alpha;    // Copy of diagonal elements
-    std::vector<double> offdiag(m-1);    // Off-diagonal elements
-    
-    for (int i = 0; i < m-1; i++) {
-        offdiag[i] = beta[i+1];
+    std::vector<double> diag = alpha;
+    std::vector<double> offdiag(m - 1);
+    for (int i = 0; i < m - 1; i++) {
+        offdiag[i] = beta[i + 1];
     }
-
-    std::cout << "Chebyshev Filtered Lanczos: Solving tridiagonal matrix" << std::endl;
     
-    // Save only the first exct eigenvalues, or all of them if m < exct
-    int n_eigenvalues = std::min(exct, m);
-    std::vector<double> evals(m);        // For eigenvalues    
-    std::vector<double> evecs;           // For eigenvectors
+    std::vector<double> all_ritz_values(m);
+    std::vector<double> ritz_vectors;
     
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
     int info;
-    
-    if (eigenvectors) {
-        evecs.resize(m*m);
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), evecs.data(), m);
+    if (compute_eigenvectors) {
+        ritz_vectors.resize(m * m);
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m,
+                             diag.data(), offdiag.data(), ritz_vectors.data(), m);
     } else {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m,
+                             diag.data(), offdiag.data(), nullptr, m);
     }
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-        // Clean up temporary files before returning
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
     
-    // Copy eigenvalues
-    eigenvalues.resize(n_eigenvalues);
-    std::copy(diag.begin(), diag.begin() + n_eigenvalues, eigenvalues.begin());
+    // Step 6: Extract eigenvalues in target range
+    eigenvalues.clear();
+    std::vector<int> selected_indices;
     
-    // Transform eigenvectors if requested
-    if (eigenvectors) {
-        eigenvectors->resize(n_eigenvalues, ComplexVector(N));
-        
-        for (int i = 0; i < n_eigenvalues; i++) {
-            for (int j = 0; j < N; j++) {
-                (*eigenvectors)[i][j] = Complex(0.0, 0.0);
-            }
+    for (int i = 0; i < m; i++) {
+        if (diag[i] >= target_lower && diag[i] <= target_upper) {
+            eigenvalues.push_back(diag[i]);
+            selected_indices.push_back(i);
             
-            for (int j = 0; j < m; j++) {
-                // Load j-th Lanczos basis vector
-                ComplexVector basis_j = read_basis_vector(j, N);
-                
-                // Add contribution to eigenvector
-                Complex coef(evecs[j*m + i], 0.0);
-                cblas_zaxpy(N, &coef, basis_j.data(), 1, (*eigenvectors)[i].data(), 1);
+            if (eigenvalues.size() >= static_cast<size_t>(num_eigs)) {
+                break;
             }
-            
-            // Normalize the eigenvector
-            double norm = cblas_dznrm2(N, (*eigenvectors)[i].data(), 1);
-            Complex scale = Complex(1.0/norm, 0.0);
-            cblas_zscal(N, &scale, (*eigenvectors)[i].data(), 1);
-        }
-        
-        // Optionally, refine the eigenvectors
-        for (int i = 0; i < n_eigenvalues; i++) {
-            refine_eigenvector_with_cg(H, (*eigenvectors)[i], eigenvalues[i], N, tol);
         }
     }
     
-    // Clean up temporary files
+    std::cout << "Found " << eigenvalues.size() << " eigenvalues in target range" << std::endl;
+    
+    // Step 7: Compute eigenvectors if requested
+    if (compute_eigenvectors && !selected_indices.empty()) {
+        std::cout << "Computing eigenvectors..." << std::endl;
+        
+        #pragma omp parallel for
+        for (size_t idx = 0; idx < selected_indices.size(); idx++) {
+            int i = selected_indices[idx];
+            ComplexVector eigenvector(N, Complex(0.0, 0.0));
+            
+            // Transform from Lanczos basis
+            for (int j = 0; j < m; j++) {
+                ComplexVector v_j = read_basis_vector(temp_dir, j, N);
+                Complex coef(ritz_vectors[j * m + i], 0.0);
+                cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
+            }
+            
+            // Normalize
+            double vec_norm = cblas_dznrm2(N, eigenvector.data(), 1);
+            Complex scale(1.0/vec_norm, 0.0);
+            cblas_zscal(N, &scale, eigenvector.data(), 1);
+            
+            // Save eigenvector
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(idx) + ".dat";
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            evec_outfile.close();
+        }
+        
+        // Save eigenvalues
+        std::string eval_file = evec_dir + "/eigenvalues.dat";
+        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        size_t n_evals = eigenvalues.size();
+        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+        eval_outfile.close();
+    }
+    
+    // Cleanup
     system(("rm -rf " + temp_dir).c_str());
+    
+    std::cout << "Chebyshev Filtered Lanczos completed successfully" << std::endl;
 }
-
 
 // Shift-Invert Lanczos algorithm - state-of-the-art implementation
 // Finds eigenvalues near a target shift σ by solving (H - σI)^{-1} eigenproblem
@@ -1504,8 +1618,8 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Seeking " << num_eigs << " eigenvalues closest to σ" << std::endl;
     
     // Create directories for output
-    std::string temp_dir = dir + "/shift_invert_temp";
-    std::string result_dir = dir + "/shift_invert_lanczos_results";
+    std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
+    std::string result_dir = dir + "/eigenvectors";
     
     system(("mkdir -p " + temp_dir).c_str());
     system(("mkdir -p " + result_dir).c_str());
@@ -1952,24 +2066,23 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // Allocate arrays for eigenvalues and eigenvectors
         std::vector<double> evals(N);
         std::vector<Complex> evecs;
-        if (compute_eigenvectors) {
-            evecs.resize(static_cast<size_t>(N) * N);
-            // Initialize evecs with the full matrix for LAPACK in-place computation
-            evecs = dense_matrix;
-        }
         
         // Call LAPACKE to perform eigendecomposition
         int info;
         if (compute_eigenvectors) {
+            evecs.resize(N*N);
+            // Call LAPACKE_zheev to compute eigenvalues and eigenvectors
             info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', N,
-                             reinterpret_cast<lapack_complex_double*>(evecs.data()),
-                             N, evals.data());
+                                reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
+                                N, evals.data());
         } else {
+            // Only compute eigenvalues
             info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N,
-                             reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
-                             N, evals.data());
+                                reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
+                                N, evals.data());
         }
-        
+
+
         if (info != 0) {
             std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
             return;
@@ -2167,7 +2280,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     
     // Create directories for temporary files and output
     std::string temp_dir = dir + "/krylov_schur_temp";
-    std::string evec_dir = dir + "/krylov_schur_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -2459,7 +2572,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     
     // Create directories for output
     std::string temp_dir = dir + "/irl_temp";
-    std::string evec_dir = dir + "/irl_eigenvectors";
+    std::string evec_dir = dir + "/eigenvectors";
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -2938,6 +3051,12 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     std::vector<std::pair<double, int>> all_eigenvalues; // (eigenvalue, slice_index)
     std::mutex eigenvalue_mutex;
     
+    // Create all slice directories before parallel processing
+    for (int i = 0; i < num_slices; i++) {
+        std::string slice_dir = temp_dir + "/slice_" + std::to_string(i);
+        system(("mkdir -p " + slice_dir).c_str());
+    }
+    
     // Use OpenMP for parallel processing of slices
     #pragma omp parallel for schedule(dynamic)
     for (int slice_idx = 0; slice_idx < num_slices; slice_idx++) {
@@ -2946,9 +3065,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
         std::cout << "Processing slice " << slice_idx + 1 << "/" << num_slices 
                   << " [" << slice.lower_bound << ", " << slice.upper_bound << "]" << std::endl;
         
-        // Create slice-specific temporary directory
+        // Get slice-specific temporary directory
         std::string slice_dir = temp_dir + "/slice_" + std::to_string(slice_idx);
-        system(("mkdir -p " + slice_dir).c_str());
         
         // Choose method based on slice characteristics
         if (num_slices == 1) {
