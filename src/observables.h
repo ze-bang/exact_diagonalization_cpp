@@ -127,44 +127,6 @@ ThermodynamicData calculate_thermodynamics_from_spectrum(
     return results;
 }
 
-// Calculate the expectation value <ψ_a|A|ψ_a> for the a-th eigenstate of H
-Complex calculate_expectation_value(
-    std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
-    std::function<void(const Complex*, Complex*, int)> A,  // Observable operator
-    int N,                                                // Dimension of Hilbert space
-    int a = 0,                                           // Index of eigenstate (default: ground state)
-    int max_iter = 100,                                  // Maximum iterations for eigenstate calculation
-    double tol = 1e-10                                   // Tolerance
-) {
-    // First, calculate the a-th eigenstate of H
-    std::vector<double> eigenvalues;
-    std::vector<ComplexVector> eigenvectors;
-    
-    // Use Chebyshev filtered Lanczos for better accuracy
-    chebyshev_filtered_lanczos(H, N, max_iter, max_iter, tol, eigenvalues, &eigenvectors);
-    
-    // Check if we have enough eigenstates
-    if (a >= eigenvectors.size()) {
-        std::cerr << "Error: Requested eigenstate index " << a 
-                  << " but only " << eigenvectors.size() << " states computed." << std::endl;
-        return Complex(0.0, 0.0);
-    }
-    
-    // Get the a-th eigenstate
-    const ComplexVector& psi = eigenvectors[a];
-    ComplexVector A_psi(N);
-    
-    // Apply operator A to the eigenstate
-    A(psi.data(), A_psi.data(), N);
-    
-    // Calculate <ψ_a|A|ψ_a>
-    Complex expectation_value;
-    cblas_zdotc_sub(N, psi.data(), 1, A_psi.data(), 1, &expectation_value);
-    
-    return expectation_value;
-}
-
-
 // Calculate thermal expectation value of operator A using eigenvalues and eigenvectors
 // <A> = (1/Z) * ∑_i exp(-β*E_i) * <ψ_i|A|ψ_i>
 Complex calculate_thermal_expectation(
