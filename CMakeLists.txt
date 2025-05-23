@@ -26,7 +26,48 @@ include_directories(${SRC_DIR})
 # Find required packages
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
+option(WITH_MKL "Build with Intel MKL support" ON)
+option(USE_ONEMKL "Use Intel oneMKL instead of traditional MKL" ON)
 
+if(WITH_MKL)
+    if(USE_ONEMKL)
+        # Use oneMKL from oneAPI
+        if(NOT DEFINED MKLROOT)
+            set(MKLROOT "/opt/intel/oneapi/mkl/latest")
+        endif()
+        list(APPEND CMAKE_PREFIX_PATH "${MKLROOT}/lib/cmake/mkl")
+        find_package(MKL CONFIG REQUIRED)
+        message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
+    else()
+        # Use traditional MKL
+        set(MKL_DIR "/usr/include/mkl")
+        message(STATUS "Using traditional Intel MKL from: ${MKL_DIR}")
+    endif()
+    
+    add_definitions(-DWITH_MKL)
+endif()
+
+# Print MKL vendor information
+# message(STATUS "MKL library: ${MKL_LIBRARIES}")
+
+# Print BLAS and LAPACK vendor information
+message(STATUS "BLAS library: ${BLAS_LIBRARIES}")
+message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
+
+# Try to detect vendors
+if(BLAS_LIBRARIES MATCHES "mkl")
+    message(STATUS "BLAS/LAPACK vendor: Intel MKL")
+elseif(BLAS_LIBRARIES MATCHES "openblas")
+    message(STATUS "BLAS vendor: OpenBLAS")
+elseif(BLAS_LIBRARIES MATCHES "atlas")
+    message(STATUS "BLAS vendor: ATLAS")
+elseif(BLAS_LIBRARIES MATCHES "Accelerate")
+    message(STATUS "BLAS/LAPACK vendor: Apple Accelerate Framework")
+elseif(BLAS_LIBRARIES MATCHES "FlexiBLAS")
+    message(STATUS "BLAS vendor: FlexiBLAS")
+else()
+    message(STATUS "BLAS/LAPACK vendor: Unknown/Generic")
+endif()
 # Try to find LAPACKE
 find_package(LAPACKE QUIET)
 if(NOT LAPACKE_FOUND)
@@ -95,6 +136,16 @@ set(SOURCES
 # Define executable
 add_executable(ED ${SOURCES})
 
+if(WITH_MKL)
+    if(USE_ONEMKL)
+        # Link oneMKL using its modern CMake targets
+        target_link_libraries(ED MKL::MKL)
+    else()
+        # Link traditional MKL
+        target_link_libraries(ED ${MKL_LIBRARIES})
+    endif()
+endif()
+
 # Link libraries
 target_link_libraries(ED
     ${BLAS_LIBRARIES}
@@ -102,6 +153,10 @@ target_link_libraries(ED
     ${LAPACKE_LIBRARIES}
     ${ARPACK_LIBRARY}
 )
+
+if (WITH_MKL)
+    target_link_libraries(ED ${MKL_LIBRARIES})
+endif()
 
 # Add MPI if enabled
 if(WITH_MPI)

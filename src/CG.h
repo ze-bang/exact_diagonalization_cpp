@@ -11,8 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
-#include <cblas.h>
-#include <lapacke.h>
+#include <mkl.h>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
 #include <string>

@@ -7,8 +7,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <cblas.h>
-#include <lapacke.h>
+#include <mkl.h>
 #include "construct_ham.h"
 #include <iomanip>
 #include <algorithm>
@@ -1058,14 +1057,22 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
         std::vector<Complex> Sm_psi = Sm_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
         std::vector<Complex> Sz_psi = Sz_ops[site].apply(std::vector<Complex>(eigenstate.begin(), eigenstate.end()));
         
+        std::vector<Complex> Sx_psi(N);
+        std::vector<Complex> Sy_psi(N);
+
+        for (int i = 0; i < N; i++) {
+            Sx_psi[i] = 0.5 * (Sp_psi[i] + Sm_psi[i]);
+            Sy_psi[i] = Complex(0.0, -0.5) * (Sp_psi[i] - Sm_psi[i]);
+        }
+
         // Calculate expectation values
         Complex Sp_exp = Complex(0.0, 0.0);
         Complex Sm_exp = Complex(0.0, 0.0);
         Complex Sz_exp = Complex(0.0, 0.0);
-        
+
         for (int i = 0; i < N; i++) {
-            Sp_exp += std::conj(eigenstate[i]) * Sp_psi[i];
-            Sm_exp += std::conj(eigenstate[i]) * Sm_psi[i];
+            Sp_exp += std::conj(eigenstate[i]) * Sx_psi[i];
+            Sm_exp += std::conj(eigenstate[i]) * Sy_psi[i];
             Sz_exp += std::conj(eigenstate[i]) * Sz_psi[i];
         }
         
@@ -1078,10 +1085,10 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     if (print_output) {
         std::cout << "\nSpin Expectation Values for eigenstate:" << std::endl;
         std::cout << std::setw(5) << "Site" 
-                << std::setw(20) << "S^+ (real)" 
-                << std::setw(20) << "S^+ (imag)" 
-                << std::setw(20) << "S^- (real)"
-                << std::setw(20) << "S^- (imag)"
+                << std::setw(20) << "S^x (real)" 
+                << std::setw(20) << "S^x (imag)" 
+                << std::setw(20) << "S^y (real)"
+                << std::setw(20) << "S^y (imag)"
                 << std::setw(20) << "S^z (real)"
                 << std::setw(20) << "S^z (imag)" << std::endl;
         
@@ -1100,7 +1107,7 @@ std::vector<std::vector<Complex>> compute_eigenstate_spin_expectations(
     if (!output_file.empty()) {
         std::ofstream out(output_file);
         if (out.is_open()) {
-            out << "# Site S+_real S+_imag S-_real S-_imag Sz_real Sz_imag" << std::endl;
+            out << "# Site Sx_real Sx_imag Sy_real Sy_imag Sz_real Sz_imag" << std::endl;
             for (int site = 0; site < num_sites; site++) {
                 out << site << " "
                     << std::setprecision(10) << expectations[0][site].real() << " "

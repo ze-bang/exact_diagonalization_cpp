@@ -10,8 +10,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <cblas.h>
-#include <lapacke.h>
+#include <mkl.h>
 #include <fstream>
 #include <iomanip>
 #include <algorithm>

@@ -8,8 +8,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <cblas.h>
-#include <lapacke.h>
+#include <mkl.h>
 #include <iomanip>
 #include <algorithm>
 #include <stack>

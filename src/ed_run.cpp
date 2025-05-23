@@ -157,8 +157,8 @@ int main(int argc, char* argv[]) {
             }
             else{
                 params.num_eigenvalues = std::stoi(arg.substr(14));
+                num_eigenvalues_override = true;
             }
-            num_eigenvalues_override = true;
         }
         else if (arg == "--skip_ED") {
             skip_ED = true;
@@ -620,8 +620,7 @@ int main(int argc, char* argv[]) {
                         params.spin_length,
                         obs_output_dir + "/spin_expectations_T0.dat",
                         true,
-                        true,
-                        1
+                        false
                     );
                     
                     compute_eigenstate_spin_correlations_from_file(
