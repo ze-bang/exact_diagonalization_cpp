@@ -13,7 +13,7 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
         std::cout << "Options:" << std::endl;
-        std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, etc.)" << std::endl;
+        std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, FTLM, LTLM, etc.)" << std::endl;
         std::cout << "  --eigenvalues=<n>    : Number of eigenvalues to compute" << std::endl;
         std::cout << "  --eigenvectors       : Compute eigenvectors" << std::endl;
         std::cout << "  --output=<dir>       : Output directory" << std::endl;
@@ -149,6 +149,8 @@ int main(int argc, char* argv[]) {
             else if (method_str == "LANCZOS_CUDA_SELECTIVE") method = DiagonalizationMethod::LANCZOS_CUDA_SELECTIVE;
             else if (method_str == "LANCZOS_CUDA_NO_ORTHO") method = DiagonalizationMethod::LANCZOS_CUDA_NO_ORTHO;
             else if (method_str == "FULL_CUDA") method = DiagonalizationMethod::FULL_CUDA;
+            else if (method_str == "FTLM") method = DiagonalizationMethod::FTLM;
+            else if (method_str == "LTLM") method = DiagonalizationMethod::LTLM;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {
@@ -256,7 +258,7 @@ int main(int argc, char* argv[]) {
         else if (arg == "--help") {
             std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
             std::cout << "Options:" << std::endl;
-            std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, etc.)" << std::endl;
+            std::cout << "  --method=<method>    : Diagonalization method (LANCZOS, FULL, ARPACK, FTLM, LTLM, etc.)" << std::endl;
             std::cout << "  --eigenvalues=<n>    : Number of eigenvalues to compute" << std::endl;
             std::cout << "  --eigenvectors       : Compute eigenvectors" << std::endl;
             std::cout << "  --output=<dir>       : Output directory" << std::endl;
@@ -392,6 +394,7 @@ int main(int argc, char* argv[]) {
             // If thermodynamic data computed, save it
             if (compute_thermo) {
                 if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                    // TPQ method handles thermodynamics internally
                 }
                 // Check if full spectrum is calculated
                 else {

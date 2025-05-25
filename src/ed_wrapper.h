@@ -7,6 +7,7 @@
 #include "lanczos.h"
 #include "construct_ham.h"
 #include "observables.h"
+#include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
 
 #ifdef ENABLE_CUDA
@@ -80,11 +81,13 @@ enum class DiagonalizationMethod {
     mTPQ,                  // Thermal Pure Quantum states
     cTPQ,
     OSS,                   
-    ARPACK,                   // ARPACK
+    ARPACK,                // ARPACK
     LANCZOS_CUDA,
     LANCZOS_CUDA_SELECTIVE,
     LANCZOS_CUDA_NO_ORTHO,
-    FULL_CUDA
+    FULL_CUDA,
+    FTLM,                  // Finite Temperature Lanczos Method
+    LTLM                   // Low Temperature Lanczos Method
 };
 
 // Structure to hold exact diagonalization results
@@ -119,6 +122,7 @@ struct EDParameters {
     int num_measure_freq = 100; // frequency of measurements
     int delta_tau = 1e-4; // time step for imaginary time evolution for cTPQ
     double large_value = 1e5; // Large value for TPQ
+
     mutable std::vector<Operator> observables = {}; // Observables to calculate for TPQ
     mutable std::vector<std::string> observable_names = {}; // Names of observables to calculate for TPQ
     double omega_min = -10.0; // Minimum frequency for spectral function
@@ -256,7 +260,7 @@ EDResults exact_diagonalization_core(
         case DiagonalizationMethod::OSS:
             std::cout << "Spectrum slicing for full diagonalization" << std::endl;
             optimal_spectrum_solver(
-                H, hilbert_space_dim,
+                H, hilbert_space_dim, params.max_iterations,
                 results.eigenvalues, params.output_dir, 
                 params.compute_eigenvectors
             );
@@ -459,6 +463,7 @@ EDResults exact_diagonalization_core(
         //                             results.eigenvalues, params.output_dir, 
         //                             params.compute_eigenvectors);
         //     break;
+
 
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;

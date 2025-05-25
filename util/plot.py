@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-directory = './small_Jpm=0.03/output/'
+directory = './CZO_16_sites/output/'
 
 # Load data from file
 data_file = directory + '/eigenvalues.txt'
@@ -65,7 +65,7 @@ def calculate_thermodynamic_quantities(temperatures, eigenvalues, SI=False):
     return results
 
 
-temperature = np.logspace(-3, 2, 100)  # Temperature range from 1e-5 to 100
+temperature = np.logspace(-4, 2, 100)  # Temperature range from 1e-5 to 100
 
 results = calculate_thermodynamic_quantities(temperature, data)
 
@@ -79,7 +79,7 @@ plt.plot(temperature, results['specific_heat'], '-', color='blue', linewidth=2, 
 exp_data = np.loadtxt('./specific_heat_Pr2Zr2O7.txt', comments='#')
 # Plot experimental data
 # plt.plot(exp_data[:, 0], exp_data[:, 1], 'o', color='red', markersize=5, label='Experimental Data')
-plt.plot(temperature, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')
+# plt.plot(temperature, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')
 
 
 # Set x-axis to log scale since temperature values span several orders of magnitude
