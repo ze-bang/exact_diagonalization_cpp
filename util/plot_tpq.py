@@ -15,9 +15,9 @@ def extract_step(filename):
 
 def determine_beta(step):
     """Determine beta based on step number."""
-    if step in [1623, 1624]:
+    if step in range(1620, 1630):
         return 10
-    elif step in [16246, 16247]:
+    elif step in range(16200, 16300):
         return 100
     else:
         return 1000
@@ -30,7 +30,7 @@ def get_file_key(filename):
     return None
 
 # Path to the directory containing the data files
-data_dir = '/home/pc_linux/exact_diagonalization_cpp/ED_16_sites_QFI_test/output/'
+data_dir = '/home/pc_linux/exact_diagonalization_cpp/ED_16_sites/output/'
 
 # List all relevant files matching the pattern
 files = glob.glob(os.path.join(data_dir, 'time_corr_rand*_*.dat'))
@@ -88,7 +88,7 @@ for base_key, file_list in grouped_files.items():
     std_error = np.std(all_real_values, axis=0) / np.sqrt(len(all_data))
 
     # Apply Lorentzian filter to the time-domain data
-    gamma = 0.02  # Broadening parameter: larger values -> more smoothing
+    gamma = 0.03  # Broadening parameter: larger values -> more smoothing
     lorentzian_filter = np.exp(-gamma * np.abs(reference_time))
     mean_real = mean_real * lorentzian_filter
 
@@ -98,16 +98,19 @@ for base_key, file_list in grouped_files.items():
     mean_fft[1:len(mean_real)//2] = mean_real[0:len(mean_real)//2-1]
     mean_fft[len(mean_real)//2+1:] = mean_real[len(mean_real)//2+1:]
 
+
+    reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0])/(2*np.pi))
+
     mean_fft = np.abs(np.real(np.fft.fft(mean_fft, norm="ortho")))
+    mean_fft *= 1/(2*np.pi)  # Apply the factor (1 - exp(-ω*β))/
 
-    reference_freq = -np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0])/(2*np.pi))
+    to_int = mean_fft* np.tanh(beta*reference_freq / 2) * 4/np.pi * (1 - np.exp(-reference_freq * beta)) *np.pi
 
-
-    qfi = np.trapz(mean_fft * np.tanh(beta*reference_freq / 2) * 4 / np.pi, -reference_freq)
+    qfi = np.trapz(to_int[:len(mean_fft)//2], reference_freq[:len(mean_fft)//2])
 
     # Store the results
     results[base_key] = {
-        'freq': reference_freq,
+        'freq': -reference_freq,
         'mean': mean_fft,
         'error': std_error,
         'beta': beta,
@@ -123,7 +126,7 @@ for base_key, data in results.items():
 
     plt.xlabel('Frequency')
     plt.xlim(-2,5)
-    plt.ylabel('Spectral Function * (1-exp(-ω*β))/2')
+    plt.ylabel(r'$\langle S \rangle$')
     plt.title(f'Average Spectral Function for {base_key}')
     plt.grid(True)
     plt.legend()
@@ -133,9 +136,9 @@ for base_key, data in results.items():
     plt.savefig(plot_filename, dpi=300)
     
     # Save the data
-    data_out = np.column_stack((data['freq'], data['mean'], data['error']))
+    data_out = np.column_stack((data['freq'], data['mean']))
     data_filename = os.path.join(data_dir, f'processed_{base_key}.dat')
-    np.savetxt(data_filename, data_out, header='freq mean error qfi')
+    np.savetxt(data_filename, data_out, header='freq mean')
 
     plt.close()
 

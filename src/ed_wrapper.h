@@ -435,36 +435,6 @@ EDResults exact_diagonalization_core(
                         params.output_dir, params.compute_eigenvectors);
             break;
         
-        // case DiagonalizationMethod::LANCZOS_CUDA:
-        //     std::cout << "Using CUDA Lanczos method" << std::endl;
-        //     lanczos_cuda(H, hilbert_space_dim, 
-        //                 params.max_iterations, params.num_eigenvalues, 
-        //                 params.tolerance, results.eigenvalues, 
-        //                 params.output_dir, params.compute_eigenvectors);
-        //     break;
-        // case DiagonalizationMethod::LANCZOS_CUDA_SELECTIVE:
-        //     std::cout << "Using CUDA Lanczos with selective reorthogonalization" << std::endl;
-        //     lanczos_selective_reorth_cuda(H, hilbert_space_dim, 
-        //                         params.max_iterations, params.num_eigenvalues, 
-        //                         params.tolerance, results.eigenvalues, 
-        //                         params.output_dir, params.compute_eigenvectors);
-        //     break;
-        // case DiagonalizationMethod::LANCZOS_CUDA_NO_ORTHO:
-        //     std::cout << "Using CUDA Lanczos without reorthogonalization" << std::endl;
-        //     lanczos_no_ortho_cuda(H, hilbert_space_dim, 
-        //                         params.max_iterations, params.num_eigenvalues, 
-        //                         params.tolerance, results.eigenvalues, 
-        //                         params.output_dir, params.compute_eigenvectors);
-        //     break;
-
-        // case DiagonalizationMethod::FULL_CUDA:
-        //     std::cout << "Using CUDA full diagonalization" << std::endl;
-        //     full_diagonalization_cuda(H, hilbert_space_dim, params.num_eigenvalues, 
-        //                             results.eigenvalues, params.output_dir, 
-        //                             params.compute_eigenvectors);
-        //     break;
-
-
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;
             break;
@@ -904,6 +874,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Build and save symmetrized blocks if needed
     // if (!sym_blocks_exists) {
     hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+    // hamiltonian.printEntireSymmetrizedMatrix(directory);
     block_sizes = hamiltonian.symmetrized_block_ham_sizes;
     std::cout << "Found " << block_sizes.size() << " symmetrized blocks." << std::endl;
     std::cout << "With sizes: ";

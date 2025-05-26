@@ -444,10 +444,45 @@ class NLCExpansion:
                     
                 sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
             
-            if not euler_resum:
-                # Regular summation
-                for order, contribution in sum_by_order.items():
-                    results[prop] += contribution
+            # Regular summation or Wynn's resummation
+            if not euler_resum:  # Use a different flag or modify to support Wynn's
+                # Calculate partial sums for Wynn's algorithm
+                max_order = max(sum_by_order.keys()) if sum_by_order else 0
+                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
+                
+                # Build partial sums
+                for order in range(max_order + 1):
+                    if order > 0:
+                        partial_sums[order] = partial_sums[order-1]
+                    if order in sum_by_order:
+                        partial_sums[order] += sum_by_order[order]
+                
+                # Apply Wynn's epsilon algorithm
+                epsilon_table = np.zeros((max_order + 1, max_order + 1, len(self.temp_values)))
+                
+                # Initialize first column with partial sums
+                for n in range(max_order + 1):
+                    epsilon_table[n, 0] = partial_sums[n]
+                
+                # Fill epsilon table
+                for n in range(1, max_order + 1):
+                    for k in range(1, n + 1):
+                        if k % 2 == 1:  # Odd columns are auxiliary
+                            # Avoid division by zero
+                            denominator = epsilon_table[n, k-1] - epsilon_table[n-1, k-1]
+                            mask = np.abs(denominator) > 1e-15
+                            epsilon_table[n, k][mask] = epsilon_table[n-1, k-1][mask] + 1.0 / denominator[mask]
+                            epsilon_table[n, k][~mask] = epsilon_table[n-1, k-1][~mask]
+                        else:  # Even columns are approximants
+                            epsilon_table[n, k] = epsilon_table[n-1, k-1] + epsilon_table[n, k-1] - epsilon_table[n-1, k-1]
+                
+                # Use the best approximant (highest even column in last row)
+                best_k = 0
+                for k in range(0, max_order + 1, 2):  # Only even columns
+                    if k <= max_order:
+                        best_k = k
+                
+                results[prop] = epsilon_table[max_order, best_k]
             else:
                 # Euler resummation
                 max_order = max(sum_by_order.keys()) if sum_by_order else 0

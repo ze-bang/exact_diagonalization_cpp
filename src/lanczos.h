@@ -661,75 +661,75 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         }
         
         // Periodic full reorthogonalization or selective reorthogonalization. Currently suppressed
-        // if (j % periodic_full_reorth == 0) {
-        //     // Full reorthogonalization
-        //     std::cout << "Performing full reorthogonalization at step " << j + 1 << std::endl;
-        //     for (int k = 0; k <= j; k++) {
-        //         // Skip recent vectors that were already orthogonalized
-        //         bool is_recent = false;
-        //         for (const auto& vec : recent_vectors) {
-        //             ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
-        //             double diff = 0.0;
-        //             for (int i = 0; i < N; i++) {
-        //                 diff += std::norm(vec[i] - recent_v[i]);
-        //             }
-        //             if (diff < 1e-12) {
-        //                 is_recent = true;
-        //                 break;
-        //             }
-        //         }
-        //         if (is_recent) continue;
+        if (j % periodic_full_reorth == 0) {
+            // Full reorthogonalization
+            std::cout << "Performing full reorthogonalization at step " << j + 1 << std::endl;
+            for (int k = 0; k <= j; k++) {
+                // Skip recent vectors that were already orthogonalized
+                bool is_recent = false;
+                for (const auto& vec : recent_vectors) {
+                    ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
+                    double diff = 0.0;
+                    for (int i = 0; i < N; i++) {
+                        diff += std::norm(vec[i] - recent_v[i]);
+                    }
+                    if (diff < 1e-12) {
+                        is_recent = true;
+                        break;
+                    }
+                }
+                if (is_recent) continue;
                 
-        //         // Read basis vector k from file
-        //         ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
+                // Read basis vector k from file
+                ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
                 
-        //         Complex overlap;
-        //         cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
                 
-        //         if (std::abs(overlap) > orth_threshold) {
-        //             Complex neg_overlap = -overlap;
-        //             cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-        //         }
-        //     }
-        // } else {
-        //     // Selective reorthogonalization against vectors with significant overlap
-        //     for (int k = 0; k <= j - 2; k++) {  // Skip v_{j-1} as it's already handled
-        //         // Skip recent vectors that were already orthogonalized
-        //         bool is_recent = false;
-        //         for (const auto& vec : recent_vectors) {
-        //             ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
-        //             double diff = 0.0;
-        //             for (int i = 0; i < N; i++) {
-        //                 diff += std::norm(vec[i] - recent_v[i]);
-        //             }
-        //             if (diff < 1e-12) {
-        //                 is_recent = true;
-        //                 break;
-        //             }
-        //         }
-        //         if (is_recent) continue;
+                if (std::abs(overlap) > orth_threshold) {
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+                }
+            }
+        } else {
+            // Selective reorthogonalization against vectors with significant overlap
+            for (int k = 0; k <= j - 2; k++) {  // Skip v_{j-1} as it's already handled
+                // Skip recent vectors that were already orthogonalized
+                bool is_recent = false;
+                for (const auto& vec : recent_vectors) {
+                    ComplexVector recent_v = read_basis_vector(temp_dir, k, N);
+                    double diff = 0.0;
+                    for (int i = 0; i < N; i++) {
+                        diff += std::norm(vec[i] - recent_v[i]);
+                    }
+                    if (diff < 1e-12) {
+                        is_recent = true;
+                        break;
+                    }
+                }
+                if (is_recent) continue;
                 
-        //         // Read basis vector k from file
-        //         ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
+                // Read basis vector k from file
+                ComplexVector basis_k = read_basis_vector(temp_dir, k, N);
                 
-        //         // Check if orthogonalization against this vector is needed
-        //         Complex overlap;
-        //         cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                // Check if orthogonalization against this vector is needed
+                Complex overlap;
+                cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
                 
-        //         if (std::abs(overlap) > orth_threshold) {
-        //             Complex neg_overlap = -overlap;
-        //             cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+                if (std::abs(overlap) > orth_threshold) {
+                    Complex neg_overlap = -overlap;
+                    cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
                     
-        //             // Double-check orthogonality
-        //             cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
-        //             if (std::abs(overlap) > orth_threshold) {
-        //                 // If still not orthogonal, apply one more time
-        //                 neg_overlap = -overlap;
-        //                 cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
-        //             }
-        //         }
-        //     }
-        // }
+                    // Double-check orthogonality
+                    cblas_zdotc_sub(N, basis_k.data(), 1, w.data(), 1, &overlap);
+                    if (std::abs(overlap) > orth_threshold) {
+                        // If still not orthogonal, apply one more time
+                        neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, basis_k.data(), 1, w.data(), 1);
+                    }
+                }
+            }
+        }
         
         // beta_{j+1} = ||w||
         norm = cblas_dznrm2(N, w.data(), 1);

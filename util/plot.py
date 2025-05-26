@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-directory = './CZO_16_sites/output/'
+directory = './XYX/Jpm=-0.05/output/'
 
 # Load data from file
 data_file = directory + '/eigenvalues.txt'
@@ -76,7 +76,7 @@ plt.figure(figsize=(10, 6))
 # Plot the data
 plt.plot(temperature, results['specific_heat'], '-', color='blue', linewidth=2, label='Specific Heat')
 
-exp_data = np.loadtxt('./specific_heat_Pr2Zr2O7.txt', comments='#')
+# exp_data = np.loadtxt('./specific_heat_Pr2Zr2O7.txt', comments='#')
 # Plot experimental data
 # plt.plot(exp_data[:, 0], exp_data[:, 1], 'o', color='red', markersize=5, label='Experimental Data')
 # plt.plot(temperature, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')

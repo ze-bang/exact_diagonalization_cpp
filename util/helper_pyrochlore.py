@@ -302,8 +302,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         field_dir: Field direction (3-vector)
     """
     # Prepare Hamiltonian parameters
-    Jpm = Jxx
-    Jpmpm = Jyy
+    Jpm = -(Jxx+Jyy)/4
+    Jpmpm = (Jxx-Jyy)/4
     
     # Define local z-axes for pyrochlore lattice
     z_local = np.array([

@@ -372,6 +372,7 @@ int main(int argc, char* argv[]) {
                 // Save eigenvalues to file
                 std::ofstream standard_file(standard_output + "/eigenvalues.txt");
                 if (standard_file.is_open()) {
+                    standard_file << std::setprecision(16);
                     for (const auto& val : standard_results.eigenvalues) {
                         standard_file << val << std::endl;
                     }
@@ -678,6 +679,7 @@ int main(int argc, char* argv[]) {
             // Save eigenvalues to file
             std::ofstream sym_file(symmetrized_output + "/eigenvalues.txt");
             if (sym_file.is_open()) {
+                sym_file << std::setprecision(16);
                 for (const auto& val : sym_results.eigenvalues) {
                     sym_file << val << std::endl;
                 }

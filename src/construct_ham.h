@@ -914,10 +914,31 @@ public:
 
 int applyPermutation(int basis, const std::vector<int>& perm) {
     int result = 0;
+    // Get the binary representation of the basis state
     for (size_t i = 0; i < perm.size(); ++i) {
-        result |= ((basis >> perm[i]) & 1) << i;
+        // Get the bit at position i in the basis state
+        int bit = (basis >> i) & 1;
+        // Set the bit at the permuted position
+        result |= (bit << perm[i]);
     }
-    return result;
+
+    // Print the result for debugging
+    // Print in binary representation for debugging
+    // std::cout << "applyPermutation: basis = ";
+    // for (int i = perm.size() - 1; i >= 0; i--) {
+    //     std::cout << ((basis >> i) & 1);
+    // }
+    // std::cout << " (" << basis << "), perm = [";
+    // for (size_t i = 0; i < perm.size(); i++) {
+    //     std::cout << perm[i];
+    //     if (i < perm.size() - 1) std::cout << " ";
+    // }
+    // std::cout << "] -> result = ";
+    // for (int i = perm.size() - 1; i >= 0; i--) {
+    //     std::cout << ((result >> i) & 1);
+    // }
+    // std::cout << " (" << result << ")" << std::endl;
+    // return result;
 }
 
 
@@ -1182,9 +1203,6 @@ public:
             AutomorphismPowerRepresentation automorphism_power_representation;
             std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
             std::cout << "Power representation generated.\n";
-            std::cout << "Symmetrized Hamiltonian generated.\n";
-
-        
 
             std::vector<std::vector<int>> all_quantum_numbers;
             std::vector<int> current_qnums(minimal_generators.first.size(), 0);
@@ -1425,13 +1443,10 @@ public:
                 phase += 2.0*M_PI*power_representation[i][j]*e_i[j]/minimal_generators[j];
             }
             phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
-        }
-
-        // Apply permutations and add with phase factors
-        for(size_t i=0; i<max_clique.size(); i++) {
             int permuted_state = applyPermutation(basis, max_clique[i]);
             sym_basis[permuted_state] += phase_factors[i];
         }
+
 
         // Normalize the sym_basis
         double norm = 0.0;
@@ -1843,6 +1858,126 @@ public:
         
         sparseMatrix_->setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
+    }
+
+    void printEntireSymmetrizedMatrix(const std::string& dir) {
+        // First, get the total dimension by summing all block sizes
+        if (symmetrized_block_ham_sizes.empty()) {
+            // Load symmetrized block sizes from file if not already loaded
+            std::ifstream file(dir + "/sym_basis/sym_block_sizes.txt");
+            if (!file.is_open()) {
+                throw std::runtime_error("Symmetrized basis must be generated first with generateSymmetrizedBasis()");
+            }
+            std::string line;
+            while (std::getline(file, line)) {
+                std::istringstream iss(line);
+                int block_size;
+                if (iss >> block_size) {
+                    symmetrized_block_ham_sizes.push_back(block_size);
+                }
+            }
+            file.close();
+        }
+        
+        int total_sym_dim = 0;
+        for (int size : symmetrized_block_ham_sizes) {
+            total_sym_dim += size;
+        }
+        
+        std::cout << "Total symmetrized dimension: " << total_sym_dim << std::endl;
+        
+        // Create the full symmetrized matrix
+        Matrix sym_matrix(total_sym_dim, std::vector<Complex>(total_sym_dim, 0.0));
+        
+        // Calculate matrix elements <sym_basis_i|H|sym_basis_j>
+        std::cout << "Computing symmetrized matrix elements..." << std::endl;
+        
+        for (int i = 0; i < total_sym_dim; ++i) {
+            // Load basis vector i
+            std::vector<Complex> basis_i = read_sym_basis(i, dir);
+            
+            // Apply Hamiltonian to basis_i
+            std::vector<Complex> H_basis_i = apply(basis_i);
+            
+            for (int j = 0; j < total_sym_dim; ++j) {
+                // Load basis vector j
+                std::vector<Complex> basis_j = read_sym_basis(j, dir);
+                
+                // Calculate <basis_j|H|basis_i>
+                Complex matrix_element(0.0, 0.0);
+                for (int k = 0; k < (1 << n_bits_); ++k) {
+                    matrix_element += std::conj(basis_j[k]) * H_basis_i[k];
+                }
+                
+                sym_matrix[i][j] = matrix_element;
+            }
+            
+            // Progress indicator
+            if ((i + 1) % 10 == 0 || i == total_sym_dim - 1) {
+                std::cout << "\rProgress: " << (i + 1) << "/" << total_sym_dim << " rows computed" << std::flush;
+            }
+        }
+        std::cout << std::endl;
+        
+        // Print the matrix
+        std::cout << "\nFull Symmetrized Hamiltonian Matrix:" << std::endl;
+        std::cout << "=====================================" << std::endl;
+        
+        // Print with formatting
+        std::cout << std::fixed << std::setprecision(6);
+        
+        // Print column headers
+        std::cout << "      ";
+        for (int j = 0; j < total_sym_dim; ++j) {
+            std::cout << "   sym_" << std::setw(3) << j << "     ";
+        }
+        std::cout << std::endl;
+        
+        // Print separator
+        std::cout << "      ";
+        for (int j = 0; j < total_sym_dim; ++j) {
+            std::cout << "------------";
+        }
+        std::cout << std::endl;
+        
+        // Print matrix elements
+        for (int i = 0; i < total_sym_dim; ++i) {
+            std::cout << "sym_" << std::setw(3) << i << " |";
+            for (int j = 0; j < total_sym_dim; ++j) {
+                if (std::abs(sym_matrix[i][j]) < 1e-10) {
+                    std::cout << "     0      ";
+                } else {
+                    // Print real part
+                    if (sym_matrix[i][j].imag() == 0) {
+                        std::cout << std::setw(11) << sym_matrix[i][j].real() << " ";
+                    } else {
+                        // Print complex number
+                        std::cout << std::setw(6) << sym_matrix[i][j].real();
+                        if (sym_matrix[i][j].imag() >= 0) {
+                            std::cout << "+";
+                        }
+                        std::cout << std::setw(5) << sym_matrix[i][j].imag() << "i";
+                    }
+                }
+            }
+            std::cout << std::endl;
+        }
+        
+        // Also save to file for later use
+        std::string output_file = dir + "/full_symmetrized_hamiltonian.txt";
+        std::ofstream out_file(output_file);
+        if (out_file.is_open()) {
+            out_file << std::fixed << std::setprecision(10);
+            out_file << total_sym_dim << " " << total_sym_dim << std::endl;
+            for (int i = 0; i < total_sym_dim; ++i) {
+                for (int j = 0; j < total_sym_dim; ++j) {
+                    out_file << sym_matrix[i][j].real() << " " << sym_matrix[i][j].imag() << " ";
+                }
+                out_file << std::endl;
+            }
+            out_file.close();
+            std::cout << "\nMatrix saved to: " << output_file << std::endl;
+        }
     }
 private:
     std::vector<TransformFunction> transforms_;

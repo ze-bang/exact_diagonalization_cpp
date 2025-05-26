@@ -1,244 +1,126 @@
 import numpy as np
-import networkx as nx
-from itertools import permutations
+from pynauty import Graph, autgrp
+from collections import defaultdict
+import argparse
 import os
 import subprocess
-from collections import deque
 import json
-import argparse
-from networkx.algorithms import isomorphism
-
-#!/usr/bin/env python3
-# automorphism_finder.py
-# A Python implementation of Hamiltonian symmetry analysis tools
-
-import matplotlib.pyplot as plt
+import networkx as nx
+from itertools import combinations
 
 
-class HamiltonianAutomorphismFinder:
-    """Class to find automorphisms of a Hamiltonian represented as a graph"""
-    
-    def __init__(self, n_sites):
-        """Initialize with the number of sites"""
-        self.n_sites = n_sites
-        self.edges = []
-        self.vertices = []
-        self.hamiltonian_graph = nx.Graph()
-        
-    def load_edges_from_file(self, filename):
-        """Load edge data from InterAll.dat file"""
-        with open(filename, 'r') as file:
-            lines = file.readlines()
-            
-            # Parse number of interactions
-            num_line = lines[1].strip()
-            num_interactions = int(num_line.split()[1])
-            
-            # Skip header lines
-            start_idx = 5
-            
-            # Read each interaction
-            for i in range(start_idx, start_idx + num_interactions):
-                if i >= len(lines):
-                    break
-                    
-                parts = lines[i].strip().split()
-                if len(parts) >= 6:
-                    op1 = int(parts[0])
-                    site1 = int(parts[1])
-                    op2 = int(parts[2])
-                    site2 = int(parts[3])
-                    real_weight = float(parts[4])
-                    imag_weight = float(parts[5])
-                    
-                    self.edges.append({
-                        'site1': site1,
-                        'site2': site2,
-                        'op1': op1,
-                        'op2': op2,
-                        'weight': complex(real_weight, imag_weight)
-                    })
-                    
-    def load_vertices_from_file(self, filename):
-        """Load vertex data from Trans.dat file"""
-        with open(filename, 'r') as file:
-            lines = file.readlines()
-            
-            # Parse number of vertices
-            num_line = lines[1].strip()
-            num_vertices = int(num_line.split()[1])
-            
-            # Skip header lines
-            start_idx = 5
-            
-            # Read each vertex
-            for i in range(start_idx, start_idx + num_vertices):
-                if i >= len(lines):
-                    break
-                    
-                parts = lines[i].strip().split()
+def read_trans_file(filename):
+    """Read vertex weights from Trans.dat file."""
+    vertex_weights = {}
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+        # Skip header lines
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('=') and not line.startswith('num'):
+                parts = line.split()
                 if len(parts) >= 4:
-                    op = int(parts[0])
-                    site = int(parts[1])
-                    real_weight = float(parts[2])
-                    imag_weight = float(parts[3])
-                    
-                    self.vertices.append({
-                        'site': site,
-                        'op': op,
-                        'weight': complex(real_weight, imag_weight)
+                    vertex_type = int(parts[0])
+                    vertex_id = int(parts[1])
+                    weight_real = float(parts[2])
+                    weight_imag = float(parts[3])
+                    vertex_weights[vertex_id] = (vertex_type, weight_real, weight_imag)
+    return vertex_weights
+
+def read_interall_file(filename):
+    """Read edge information from InterAll.dat file."""
+    edges = []
+    with open(filename, 'r') as f:
+        lines = f.readlines()
+        # Skip header lines
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('=') and not line.startswith('num'):
+                parts = line.split()
+                if len(parts) >= 6:
+                    type1 = int(parts[0])
+                    vertex1 = int(parts[1])
+                    type2 = int(parts[2])
+                    vertex2 = int(parts[3])
+                    weight_real = float(parts[4])
+                    weight_imag = float(parts[5])
+                    edges.append({
+                        'vertex1': vertex1,
+                        'vertex2': vertex2,
+                        'type1': type1,
+                        'type2': type2,
+                        'weight': (weight_real, weight_imag)
                     })
+    return edges
+
+def compute_vertex_colors(vertex_weights, edges):
+    """Compute vertex colors based on local environment."""
+    # Create adjacency list with edge weights
+    adj_list = defaultdict(list)
+    for edge in edges:
+        v1, v2 = edge['vertex1'], edge['vertex2']
+        weight = edge['weight']
+        adj_list[v1].append((v2, weight))
+        adj_list[v2].append((v1, weight))
     
-    def build_hamiltonian_graph(self):
-        """Build a colored graph representing the Hamiltonian structure"""
-        # Create a new graph
-        G = nx.Graph()
+    # Compute color for each vertex based on its local environment
+    vertex_environments = {}
+    for vertex in vertex_weights:
+        # Get vertex's own properties
+        own_props = vertex_weights[vertex]
         
-        # Add nodes for each site with attributes
-        for i in range(self.n_sites):
-            G.add_node(i, type='site')
-            
-        # Add vertex attributes (on-site terms)
-        for vertex in self.vertices:
-            site = vertex['site']
-            op = vertex['op']
-            weight = vertex['weight']
-            
-            # Store on-site operation as node attribute
-            if 'ops' not in G.nodes[site]:
-                G.nodes[site]['ops'] = {}
-            
-            G.nodes[site]['ops'][op] = weight
-            
-        # Add edges with attributes
-        for edge in self.edges:
-            site1 = edge['site1']
-            site2 = edge['site2']
-            op1 = edge['op1']
-            op2 = edge['op2']
-            weight = edge['weight']
-            
-            # Only add edge if sites are different
-            if site1 != site2:
-                # Create unique edge key for this interaction
-                edge_key = f"{op1}_{op2}"
-                
-                if not G.has_edge(site1, site2):
-                    G.add_edge(site1, site2, interactions={})
-                
-                G[site1][site2]['interactions'][edge_key] = weight
+        # Get properties of neighbors
+        neighbor_props = []
+        for neighbor, edge_weight in sorted(adj_list[vertex]):
+            if neighbor in vertex_weights:
+                neighbor_props.append((vertex_weights[neighbor], edge_weight))
         
-        self.hamiltonian_graph = G
-        return G
+        # Create a hashable representation of the local environment
+        env = (own_props, tuple(sorted(neighbor_props)))
+        vertex_environments[vertex] = env
     
-    def is_automorphism(self, permutation):
-        """Check if a permutation is an automorphism of the Hamiltonian"""
-        # Create mapping dictionary from the permutation
-        mapping = {i: permutation[i] for i in range(self.n_sites)}
-        
-        # Create a copy of the Hamiltonian graph
-        H = self.hamiltonian_graph.copy()
-        
-        # Relabel the nodes according to the permutation
-        H = nx.relabel_nodes(H, mapping)
-        
-        # Use graph isomorphism with custom comparison for node and edge attributes
-        return self._graph_isomorphic_with_attributes(self.hamiltonian_graph, H)
+    # Assign colors to unique environments
+    unique_envs = list(set(vertex_environments.values()))
+    env_to_color = {env: i for i, env in enumerate(unique_envs)}
     
-    def _graph_isomorphic_with_attributes(self, G1, G2):
-        """Custom isomorphism checker that accounts for our specific node and edge attributes"""
-        # Check basic graph structure
-        if not nx.is_isomorphic(G1, G2, node_match=lambda n1, n2: n1.get('type') == n2.get('type')):
-            return False
-        
-        # Check node attributes (on-site operations)
-        for node in G1.nodes():
-            # Find corresponding node in G2
-            for node2 in G2.nodes():
-                if G1.nodes[node].get('type') == G2.nodes[node2].get('type'):
-                    # Compare on-site operations
-                    ops1 = G1.nodes[node].get('ops', {})
-                    ops2 = G2.nodes[node2].get('ops', {})
-                    if ops1 != ops2:
-                        return False
-        
-        # Check edge attributes (interactions)
-        for u, v in G1.edges():
-            # Find corresponding edge in G2
-            found_match = False
-            for u2, v2 in G2.edges():
-                interactions1 = G1[u][v].get('interactions', {})
-                interactions2 = G2[u2][v2].get('interactions', {})
-                if interactions1 == interactions2:
-                    found_match = True
-                    break
-            
-            if not found_match:
-                return False
-                
-        return True
+    vertex_colors = {}
+    for vertex, env in vertex_environments.items():
+        vertex_colors[vertex] = env_to_color[env]
     
-    def find_all_automorphisms(self):
-        """Find all automorphisms of the Hamiltonian using NetworkX"""
-        # First build the Hamiltonian graph if not already built
-        if not self.hamiltonian_graph.nodes():
-            self.build_hamiltonian_graph()
-        
-        # Define custom node and edge match functions for our specific attributes
-        def node_match(n1, n2):
-            # Check node type and operations
-            if n1.get('type') != n2.get('type'):
-                return False
-            # Compare on-site operations
-            return n1.get('ops', {}) == n2.get('ops', {})
-        
-        def edge_match(e1, e2):
-            # Compare interaction attributes
-            return e1.get('interactions', {}) == e2.get('interactions', {})
-        
-        # Use NetworkX's isomorphism utilities
-        GM = isomorphism.GraphMatcher(
-            self.hamiltonian_graph, 
-            self.hamiltonian_graph, 
-            node_match=node_match,
-            edge_match=edge_match
-        )
-        
-        # Find all automorphisms
-        automorphisms = []
-        print("Finding automorphisms using NetworkX...")
-        for mapping in GM.isomorphisms_iter():
-            # Convert mapping to permutation form
-            perm = [mapping[i] for i in range(self.n_sites)]
-            automorphisms.append(perm)
-        
-        return automorphisms
+    return vertex_colors
+
+def construct_colored_graph(vertex_weights, edges):
+    """Construct a colored undirected graph for pynauty."""
+    # Get vertex colors
+    vertex_colors = compute_vertex_colors(vertex_weights, edges)
     
-    def permutation_to_cycle_notation(self, permutation):
-        """Convert a permutation to cycle notation"""
-        n = len(permutation)
-        visited = [False] * n
-        cycles = []
-        
-        for i in range(n):
-            if not visited[i]:
-                cycle = []
-                j = i
-                
-                while not visited[j]:
-                    visited[j] = True
-                    cycle.append(j)
-                    j = permutation[j]
-                    
-                if j == i and len(cycle) > 1:
-                    cycles.append(tuple(cycle))
-        
-        # Add fixed points (cycles of length 1)
-        for i in range(n):
-            if permutation[i] == i:
-                cycles.append((i,))
-                
-        return cycles
+    # Find the number of vertices
+    num_vertices = len(vertex_weights)
+    
+    # Create adjacency dictionary
+    adjacency_dict = defaultdict(set)
+    for edge in edges:
+        v1, v2 = edge['vertex1'], edge['vertex2']
+        if v1 != v2:  # Avoid self-loops
+            adjacency_dict[v1].add(v2)
+            adjacency_dict[v2].add(v1)
+    
+    # Convert to pynauty format
+    adjacency_dict = {v: list(neighbors) for v, neighbors in adjacency_dict.items()}
+    
+    # Create coloring list
+    coloring = []
+    color_to_vertices = defaultdict(list)
+    for vertex, color in vertex_colors.items():
+        color_to_vertices[color].append(vertex)
+    
+    for color in sorted(color_to_vertices.keys()):
+        coloring.append(set(color_to_vertices[color]))
+    
+    # Create pynauty graph
+    g = Graph(num_vertices, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
+    
+    return g, vertex_colors
 
 
 class AutomorphismCliqueAnalyzer:
@@ -374,399 +256,255 @@ class AutomorphismCliqueAnalyzer:
         except FileNotFoundError:
             print(f"Graphviz command 'dot' not found. Please install Graphviz.")
 
-
-class MinimalGeneratorFinder:
-    """Class to find minimal generators for a group of automorphisms using an improved algorithm"""
+class AutomorphismFinder:
+    """Class for finding and analyzing automorphisms"""
     
     def __init__(self):
         """Initialize the finder"""
         pass
     
+    def generate_all_automorphisms(self, generators):
+        """Generate all automorphisms from the given generators"""
+        if not generators:
+            return [list(range(len(generators[0]) if generators else 0))]
+        
+        n = len(generators[0])
+        identity = list(range(n))
+        
+        # Start with identity and generators
+        automorphisms = [identity]
+        automorphisms.extend([list(gen) for gen in generators])
+        
+        # Generate all possible combinations
+        queue = list(automorphisms)
+        seen = {tuple(perm) for perm in automorphisms}
+        
+        while queue:
+            perm1 = queue.pop(0)
+            
+            for gen in generators:
+                # Compose perm1 with generator
+                new_perm = [perm1[gen[i]] for i in range(n)]
+                
+                if tuple(new_perm) not in seen:
+                    seen.add(tuple(new_perm))
+                    automorphisms.append(new_perm)
+                    queue.append(new_perm)
+        
+        return automorphisms
+    
+    def permutation_to_cycle_notation(self, perm):
+        """Convert permutation to cycle notation"""
+        n = len(perm)
+        visited = [False] * n
+        cycles = []
+        
+        for i in range(n):
+            if not visited[i] and perm[i] != i:
+                cycle = [i]
+                j = perm[i]
+                visited[i] = True
+                
+                while j != i:
+                    cycle.append(j)
+                    visited[j] = True
+                    j = perm[j]
+                
+                if len(cycle) > 1:
+                    cycles.append(tuple(cycle))
+        
+        return cycles if cycles else [(0,)]
+    
+    def save_automorphisms_json(self, automorphisms, filename):
+        """Save automorphisms to JSON file"""
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        with open(filename, 'w') as f:
+            json.dump(automorphisms, f, indent=2)
+        
+        print(f"Saved {len(automorphisms)} automorphisms to {filename}")
+
+
+class MaximalAbelianSubgroupFinder:
+    """Class for finding minimal generators of abelian subgroups"""
+    
+    def __init__(self):
+        """Initialize the finder"""
+        pass
+    
+    def permutation_order(self, perm):
+        """Calculate the order of a permutation"""
+        n = len(perm)
+        visited = [False] * n
+        lcm = 1
+        
+        for i in range(n):
+            if not visited[i]:
+                cycle_length = 0
+                j = i
+                
+                while not visited[j]:
+                    visited[j] = True
+                    j = perm[j]
+                    cycle_length += 1
+                
+                if cycle_length > 1:
+                    lcm = self._lcm(lcm, cycle_length)
+        
+        return lcm
+    
+    def _gcd(self, a, b):
+        """Calculate greatest common divisor"""
+        while b:
+            a, b = b, a % b
+        return a
+    
+    def _lcm(self, a, b):
+        """Calculate least common multiple"""
+        return abs(a * b) // self._gcd(a, b)
+    
     def compose_permutations(self, perm1, perm2):
-        """Compose two permutations: result(i) = perm1(perm2[i])"""
+        """Compose two permutations: result[i] = perm1[perm2[i]]"""
         return [perm1[perm2[i]] for i in range(len(perm1))]
     
-    def find_order(self, perm):
-        """Find the order of a permutation (how many times to compose to get identity)"""
-        n = len(perm)
-        identity = list(range(n))
-        current = perm.copy()
-        order = 1
-        
-        while current != identity:
-            current = self.compose_permutations(perm, current)
-            order += 1
-            
-        return order
-    
-    def incrementally_add_to_group(self, group, new_element):
-        """Efficiently add a new element and all its combinations to the group"""
-        if tuple(new_element) in group:
-            return False
-
-        # Use BFS to add all new elements generated by the new generator
-        queue = [new_element]
-        added = False
-        
-        while queue:
-            elem = queue.pop(0)
-            elem_tuple = tuple(elem)
-            
-            if elem_tuple in group:
-                continue
-                
-            # Add the new element
-            group.add(elem_tuple)
-            added = True
-            
-            # Generate new elements by combining with existing ones
-            for existing in list(group):
-                # Skip identity and self
-                if existing == tuple(range(len(new_element))):
-                    continue
-                    
-                # Compose in both directions
-                comp1 = self.compose_permutations(elem, list(existing))
-                comp2 = self.compose_permutations(list(existing), elem)
-                
-                if tuple(comp1) not in group:
-                    queue.append(comp1)
-                if tuple(comp2) not in group:
-                    queue.append(comp2)
-                    
-        return added
-    
-    def find_minimal_generators(self, automorphisms):
-        """Find a minimal set of generators for the group of automorphisms using an improved algorithm"""
-        if not automorphisms:
-            return [], []
-            
-        # Initialize
-        n_sites = len(automorphisms[0])
-        identity = list(range(n_sites))
-        
-        # Get unique automorphisms
-        unique_autos = set(map(tuple, automorphisms))
-        unique_autos.add(tuple(identity))
-        
-        # Sort automorphisms by order (smaller orders first)
-        auto_with_orders = [(list(auto), self.find_order(list(auto))) for auto in unique_autos if list(auto) != identity]
-        sorted_autos = sorted(auto_with_orders, key=lambda x: x[1])
-        
-        # Results
-        generators = []
-        orders = []
-        
-        # Generated group (start with identity)
-        generated_group = {tuple(identity)}
-        
-        # Try each automorphism as potential generator
-        for auto, order in sorted_autos:
-            # Try to add the automorphism to the group
-            if self.incrementally_add_to_group(generated_group, auto):
-                generators.append(auto)
-                orders.append(order)
-            
-            # Check if we've generated the entire group
-            if len(generated_group) == len(unique_autos):
-                break
-        
-        return generators, orders
-
-class AutomorphismPowerRepresentation:
-    """Class to represent automorphisms as powers of generators"""
-    
-    @staticmethod
-    def represent_as_generator_powers(generators, automorphism, max_power=5):
-        """Represent an automorphism as powers of generators using BFS"""
+    def is_generated_by(self, element, generators):
+        """Check if element can be generated by the given generators"""
         if not generators:
-            return []
-            
-        num_generators = len(generators)
-        perm_size = len(automorphism)
+            return element == list(range(len(element)))
         
-        # Check if the automorphism is the identity
-        identity = list(range(perm_size))
-        if automorphism == identity:
-            return [0] * num_generators
-            
-        # BFS queue
-        queue = deque()
-        visited = set()
+        n = len(element)
+        identity = list(range(n))
         
-        # Store state as (powers, current_perm)
-        initial_state = ([0] * num_generators, identity)
-        queue.append(initial_state)
-        visited.add(tuple(identity))
-        
-        # Helper for composition
-        def compose(perm1, perm2):
-            return [perm1[perm2[i]] for i in range(len(perm1))]
+        # Start with identity
+        generated = {tuple(identity)}
+        queue = [identity]
         
         while queue:
-            powers, current_perm = queue.popleft()
+            current = queue.pop(0)
             
-            for gen_idx, gen in enumerate(generators):
-                for direction in [-1, 1]:  # Try both positive and negative powers
-                    # Don't exceed max power
-                    new_powers = powers.copy()
-                    new_powers[gen_idx] += direction
-                    
-                    if abs(new_powers[gen_idx]) > max_power:
-                        continue
-                    
-                    # Apply generator
-                    if direction == 1:
-                        new_perm = compose(gen, current_perm)
-                    else:
-                        # Use inverse
-                        inv_gen = [0] * len(gen)
-                        for i, p in enumerate(gen):
-                            inv_gen[p] = i
-                        new_perm = compose(inv_gen, current_perm)
-                    
-                    # Check if this matches the target automorphism
-                    if new_perm == automorphism:
-                        return new_powers
-                    
-                    # Add to queue if not visited
-                    if tuple(new_perm) not in visited:
-                        visited.add(tuple(new_perm))
-                        queue.append((new_powers, new_perm))
-        
-        # No representation found within max_power
-        return []
-    
-    @staticmethod
-    def represent_all_as_generator_powers(generators, automorphisms, max_power=5):
-        """Represent all automorphisms as powers of generators"""
-        results = []
-        
-        for auto in automorphisms:
-            representation = AutomorphismPowerRepresentation.represent_as_generator_powers(
-                generators, auto, max_power
-            )
-            results.append(representation)
-            
-        return results
-
-
-class HamiltonianVisualizer:
-    """Class for visualizing Hamiltonian structure"""
-    
-    def __init__(self, n_sites):
-        """Initialize with number of sites"""
-        self.n_sites = n_sites
-        self.edges = []
-        self.vertices = []
-        
-    def load_edges_from_file(self, filename):
-        """Load edge data from InterAll.dat file"""
-        with open(filename, 'r') as file:
-            lines = file.readlines()
-            
-            # Parse number of interactions
-            num_line = lines[1].strip()
-            num_interactions = int(num_line.split()[1])
-            
-            # Skip header lines
-            start_idx = 5
-            
-            # Read each interaction
-            for i in range(start_idx, start_idx + num_interactions):
-                if i >= len(lines):
-                    break
-                    
-                parts = lines[i].strip().split()
-                if len(parts) >= 6:
-                    op1 = int(parts[0])
-                    site1 = int(parts[1])
-                    op2 = int(parts[2])
-                    site2 = int(parts[3])
-                    real_weight = float(parts[4])
-                    imag_weight = float(parts[5])
-                    
-                    self.edges.append({
-                        'site1': site1,
-                        'site2': site2,
-                        'op1': op1,
-                        'op2': op2,
-                        'weight': complex(real_weight, imag_weight)
-                    })
-                    
-    def load_vertices_from_file(self, filename):
-        """Load vertex data from Trans.dat file"""
-        with open(filename, 'r') as file:
-            lines = file.readlines()
-            
-            # Parse number of vertices
-            num_line = lines[1].strip()
-            num_vertices = int(num_line.split()[1])
-            
-            # Skip header lines
-            start_idx = 5
-            
-            # Read each vertex
-            for i in range(start_idx, start_idx + num_vertices):
-                if i >= len(lines):
-                    break
-                    
-                parts = lines[i].strip().split()
-                if len(parts) >= 4:
-                    op = int(parts[0])
-                    site = int(parts[1])
-                    real_weight = float(parts[2])
-                    imag_weight = float(parts[3])
-                    
-                    self.vertices.append({
-                        'site': site,
-                        'op': op,
-                        'weight': complex(real_weight, imag_weight)
-                    })
-    
-    def get_operator_name(self, op):
-        """Get the name of an operator based on its index"""
-        operators = {0: "X", 1: "Y", 2: "Z"}
-        return operators.get(op, "?")
-        
-    def generate_dot_file(self, filename):
-        """Generate DOT file for visualizing the Hamiltonian"""
-        with open(filename, 'w') as file:
-            file.write("graph Hamiltonian {\n")
-            file.write("  node [shape=circle];\n")
-            
-            # Add nodes for sites
-            for i in range(self.n_sites):
-                file.write(f"  {i} [label=\"{i}\"];\n")
-            
-            # Add edges for interactions
-            edge_id = 0
-            for edge in self.edges:
-                site1 = edge['site1']
-                site2 = edge['site2']
-                op1 = self.get_operator_name(edge['op1'])
-                op2 = self.get_operator_name(edge['op2'])
-                weight = edge['weight']
+            for gen in generators:
+                # Compose with generator
+                new_perm = self.compose_permutations(current, gen)
                 
-                # Only add edge if sites are different
-                if site1 != site2:
-                    label = f"{op1}{site1}⊗{op2}{site2}: {weight.real:.4f}"
-                    if weight.imag != 0:
-                        label += f" + {weight.imag:.4f}i"
-                    
-                    file.write(f"  {site1} -- {site2} [label=\"{label}\", id=\"edge_{edge_id}\"];\n")
-                    edge_id += 1
-            
-            # Add vertex labels
-            for vertex in self.vertices:
-                site = vertex['site']
-                op = self.get_operator_name(vertex['op'])
-                weight = vertex['weight']
+                if tuple(new_perm) == tuple(element):
+                    return True
                 
-                if weight.real != 0 or weight.imag != 0:
-                    label = f"{op}{site}: {weight.real:.4f}"
-                    if weight.imag != 0:
-                        label += f" + {weight.imag:.4f}i"
-                    
-                    file.write(f"  site_{site}_op_{op} [label=\"{label}\", shape=box];\n")
-                    file.write(f"  {site} -- site_{site}_op_{op} [style=dashed];\n")
-            
-            file.write("}\n")
+                if tuple(new_perm) not in generated:
+                    generated.add(tuple(new_perm))
+                    queue.append(new_perm)
         
-        print(f"Generated DOT file: {filename}")
-        print(f"Visualize with: dot -Tpng {filename} -o graph.png")
+        return False
+    
+    def find_minimal_generators(self, permutations):
+        """Find a minimal set of generators for the given abelian group"""
+        if not permutations:
+            return []
         
-    def save_graph_image(self, output_file, dot_file="temp_hamiltonian.dot"):
-        """Generate PNG image from DOT file using Graphviz"""
-        self.generate_dot_file(dot_file)
+        n = len(permutations[0])
+        identity = list(range(n))
         
-        try:
-            subprocess.run(['dot', '-Tpng', dot_file, '-o', output_file], check=True)
-            print(f"Generated graph image: {output_file}")
-        except subprocess.CalledProcessError:
-            print(f"Failed to generate image. Make sure Graphviz is installed.")
-        except FileNotFoundError:
-            print(f"Graphviz command 'dot' not found. Please install Graphviz.")
+        # Remove identity if present
+        non_identity_perms = [p for p in permutations if p != identity]
+        
+        if not non_identity_perms:
+            return []
+        
+        # Sort by order (smallest first) to prefer simpler generators
+        sorted_perms = sorted(non_identity_perms, key=lambda p: self.permutation_order(p))
+        
+        generators = []
+        
+        for perm in sorted_perms:
+            # Check if this permutation is already generated by current generators
+            if not self.is_generated_by(perm, generators):
+                generators.append(perm)
+        
+        # Compute orders of generators
+        generator_info = []
+        for gen in generators:
+            order = self.permutation_order(gen)
+            generator_info.append({
+                'permutation': gen,
+                'order': order,
+                'cycles': AutomorphismFinder().permutation_to_cycle_notation(gen)
+            })
+        
+        return generator_info
 
 
 def main():
-    # Set paths to data files
     parser = argparse.ArgumentParser(description='Hamiltonian Automorphism Finder')
-
     parser.add_argument('--data_dir', type=str, default='.', help='Directory containing data files')
     args = parser.parse_args()
 
-
     inter_all_file = os.path.join(args.data_dir, "InterAll.dat")
     trans_file = os.path.join(args.data_dir, "Trans.dat")
+
+    # Read data files
+    vertex_weights = read_trans_file(trans_file)
+    edges = read_interall_file(inter_all_file)
+
+    # Construct colored graph
+    graph, vertex_colors = construct_colored_graph(vertex_weights, edges)
     
-    # Determine number of sites from Trans.dat file
-    with open(trans_file, 'r') as file:
-        max_site_index = -1
-        for line in file:
-            parts = line.strip().split()
-            if len(parts) >= 4 and parts[0].isdigit() and parts[1].isdigit():
-                site_index = int(parts[1])
-                max_site_index = max(max_site_index, site_index)
-        
-        n_sites = max_site_index + 1 if max_site_index >= 0 else 0
-    print(f"Number of sites: {n_sites}")
+    # Find automorphism group
+    aut_group = autgrp(graph)
     
-    # Create output directory
+    # Print results
+    print("Number of vertices:", len(vertex_weights))
+    print("Number of edges:", len(edges))
+    print("\nVertex colors:")
+    for vertex in sorted(vertex_colors.keys()):
+        print(f"  Vertex {vertex}: Color {vertex_colors[vertex]}")
+    
+    print("\nAutomorphism group information:")
+    print(f"  Number of generators: {len(aut_group[0])}")
+    print(f"  Order of automorphism group: {aut_group[1]}")
+    print(f"  Orbit partition: {aut_group[2]}")
     output_dir = os.path.join(args.data_dir, "automorphism_results")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Initialize Hamiltonian finder and load data
-    ham_finder = HamiltonianAutomorphismFinder(n_sites)
-    ham_finder.load_edges_from_file(inter_all_file)
-    ham_finder.load_vertices_from_file(trans_file)
-    ham_finder.build_hamiltonian_graph()
+    finder = AutomorphismFinder()
+    automorphisms_file = os.path.join(output_dir, "automorphisms.json")
+    # Generate all automorphisms from generators
+    all_automorphisms = finder.generate_all_automorphisms(aut_group[0])
     
-    # Find automorphisms
-    print("Finding Hamiltonian automorphisms...")
-    automorphisms = ham_finder.find_all_automorphisms()
-    print(f"Found {len(automorphisms)} automorphisms")
-    
-    # Save automorphisms to file
-    with open(os.path.join(output_dir, "automorphisms.json"), 'w') as f:
-        json.dump(automorphisms, f, indent=2)
-    
-    # Find maximal commuting set
-    clique_analyzer = AutomorphismCliqueAnalyzer()
-    print("Finding maximal commuting set...")
-    max_clique = clique_analyzer.find_maximum_clique(automorphisms)
-    print(f"Maximal commuting set has {len(max_clique)} elements")
-    
-    # Save maximal commuting set
-    with open(os.path.join(output_dir, "max_clique.json"), 'w') as f:
-        json.dump([automorphisms[i] for i in max_clique], f, indent=2)
-    
-    # max_clique_autos = [automorphisms[i] for i in max_clique]    
-    # # Find minimal generators
-    # generator_finder = MinimalGeneratorFinder()
-    # print("Finding minimal generators...")
-    # generators, orders = generator_finder.find_minimal_generators(max_clique_autos)
-    # print(f"Found {len(generators)} minimal generators with orders: {orders}")
-    
-    # # Save generators to file
-    # with open(os.path.join(output_dir, "generators.json"), 'w') as f:
-    #     json.dump({
-    #         "generators": generators,
-    #         "orders": orders
-    #     }, f, indent=2)
-    
-    # # Represent automorphisms as powers of generators
-    # print("Representing automorphisms as powers of generators...")
-    # power_representations = AutomorphismPowerRepresentation.represent_all_as_generator_powers(
-    #     generators, max_clique_autos
-    # )
-    
-    # # Save power representations
-    # with open(os.path.join(output_dir, "power_representations.json"), 'w') as f:
-    #     json.dump(power_representations, f, indent=2)
-    
-    # print(f"All results saved to {output_dir} directory")
+    # Save all automorphisms to JSON
+    finder.save_automorphisms_json(all_automorphisms, automorphisms_file)
 
+    # Initialize the automorphism finder and analyzer
+    analyzer = AutomorphismCliqueAnalyzer()
+
+    # Find maximum clique of commuting automorphisms
+    max_clique_indices = analyzer.find_maximum_clique(all_automorphisms)
+    
+    # Save maximum clique to JSON
+    max_clique_file = os.path.join(output_dir, "max_clique.json")
+    with open(max_clique_file, 'w') as f:
+        json.dump([all_automorphisms[i] for i in max_clique_indices], f, indent=2)
+
+    print(f"\nSaved maximum clique of {len(max_clique_indices)} commuting automorphisms to {max_clique_file}")
+
+    # Generate visualization of the automorphism graph
+    analyzer.generate_automorphism_graph(all_automorphisms, output_dir, finder)
+    
+    # Generate visualization highlighting the maximum clique
+    clique_dot_file = os.path.join(output_dir, "max_clique_visualization.dot")
+    analyzer.visualize_clique(all_automorphisms, max_clique_indices, clique_dot_file, finder)
+
+    max_clique = [all_automorphisms[i] for i in max_clique_indices]
+
+    MaximalAbelianSubgroupFinder().find_minimal_generators(max_clique)
+    print("Maximal abelian subgroup generators (if any):")
+    generators = MaximalAbelianSubgroupFinder().find_minimal_generators(max_clique)
+    for gen in generators:
+        print(f"  Generator: {gen}")
+    
+    # Save generators to JSON
+    generators_file = os.path.join(output_dir, "minimal_generators.json")
+    with open(generators_file, 'w') as f:
+        json.dump(generators, f, indent=2)
+    print(f"Saved minimal generators to {generators_file}")
 
 if __name__ == "__main__":
     main()
