@@ -3,7 +3,7 @@ import scipy as sp
 import matplotlib.pyplot as plt
 
 # Read the data from the file
-filename = './ED_16_sites_QFI_test/output/time_corr_rand0_Sz_Gamma_step16246.dat'
+filename = './ED_16_sites/output/time_corr_rand0_Sz_Gamma_step1622.dat'
 
 beta=10
 

@@ -850,9 +850,9 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     hamiltonian.loadFromInterAllFile(interaction_file);
 
 
-    if (method != DiagonalizationMethod::FULL){
-        hamiltonian.buildSparseMatrix();
-    }
+    // if (method != DiagonalizationMethod::FULL){
+    //     hamiltonian.buildSparseMatrix();
+    // }
     
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";

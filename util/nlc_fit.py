@@ -52,7 +52,6 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
             '--SI_units',
-            '--euler_resum',
             '--symmetrized'
         ]
     elif fixed_params["ED_method"] == 'mTPQ':

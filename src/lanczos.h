@@ -2014,7 +2014,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     }
 
     // Detect if matrix is small enough for dense approach or needs sparse optimization
-    const int DENSE_THRESHOLD = 16538;  // Example threshold for dense vs sparse
+    const int DENSE_THRESHOLD = 20000;  // Example threshold for dense vs sparse
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance

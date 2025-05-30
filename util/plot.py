@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-directory = './XYX/Jpm=-0.05/output/'
+directory = './XYX_pbc/Jpm=0.045/output/'
 
 # Load data from file
 data_file = directory + '/eigenvalues.txt'

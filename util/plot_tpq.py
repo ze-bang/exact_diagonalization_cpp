@@ -16,11 +16,11 @@ def extract_step(filename):
 def determine_beta(step):
     """Determine beta based on step number."""
     if step in range(1620, 1630):
-        return 10
+        return 100000000000000
     elif step in range(16200, 16300):
-        return 100
+        return 100000000000
     else:
-        return 1000
+        return 100000000000000
 
 def get_file_key(filename):
     """Extract key for grouping files (ignoring rand number)."""
@@ -105,6 +105,17 @@ for base_key, file_list in grouped_files.items():
     mean_fft *= 1/(2*np.pi)  # Apply the factor (1 - exp(-ω*β))/
 
     to_int = mean_fft* np.tanh(beta*reference_freq / 2) * 4/np.pi * (1 - np.exp(-reference_freq * beta)) *np.pi
+
+    # to_int = mean_fft
+
+    # domega = np.abs(reference_freq[1] - reference_freq[0])
+
+    # qfi = np.sum(to_int[:len(mean_fft)//2]) * domega  # Convert to integral form
+    # Calculate Quantum Fisher Information (QFI)
+    # QFI = ∫ S(ω) dω
+    # where S(ω) is the spectral function
+    # and ω is the frequency
+    # We integrate only over the positive frequencies
 
     qfi = np.trapz(to_int[:len(mean_fft)//2], reference_freq[:len(mean_fft)//2])
 

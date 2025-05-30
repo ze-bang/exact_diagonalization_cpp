@@ -3,7 +3,7 @@ import re
 import matplotlib.pyplot as plt
 
 # Load the data
-data_file = "/home/pc_linux/exact_diagonalization_cpp/ED_test_16_sites/output/spin_corr_rand0.dat"
+data_file = "/home/pc_linux/exact_diagonalization_cpp/ED_16_sites/output/spin_corr_rand0.dat"
 
 # Read header and get column names
 with open(data_file, 'r') as f:
