@@ -16,11 +16,11 @@ def extract_step(filename):
 def determine_beta(step):
     """Determine beta based on step number."""
     if step in range(1620, 1630):
-        return 100000000000000
+        return 10
     elif step in range(16200, 16300):
-        return 100000000000
+        return 100
     else:
-        return 100000000000000
+        return 1000
 
 def get_file_key(filename):
     """Extract key for grouping files (ignoring rand number)."""
@@ -30,7 +30,7 @@ def get_file_key(filename):
     return None
 
 # Path to the directory containing the data files
-data_dir = '/home/pc_linux/exact_diagonalization_cpp/ED_16_sites/output/'
+data_dir = '/home/pc_linux/exact_diagonalization_cpp/ED_16_sites_QFI_corrected/output/'
 
 # List all relevant files matching the pattern
 files = glob.glob(os.path.join(data_dir, 'time_corr_rand*_*.dat'))
@@ -104,36 +104,40 @@ for base_key, file_list in grouped_files.items():
     mean_fft = np.abs(np.real(np.fft.fft(mean_fft, norm="ortho")))
     mean_fft *= 1/(2*np.pi)  # Apply the factor (1 - exp(-ω*β))/
 
-    to_int = mean_fft* np.tanh(beta*reference_freq / 2) * 4/np.pi * (1 - np.exp(-reference_freq * beta)) *np.pi
-
-    # to_int = mean_fft
-
-    # domega = np.abs(reference_freq[1] - reference_freq[0])
-
-    # qfi = np.sum(to_int[:len(mean_fft)//2]) * domega  # Convert to integral form
-    # Calculate Quantum Fisher Information (QFI)
-    # QFI = ∫ S(ω) dω
-    # where S(ω) is the spectral function
-    # and ω is the frequency
-    # We integrate only over the positive frequencies
-
-    qfi = np.trapz(to_int[:len(mean_fft)//2], reference_freq[:len(mean_fft)//2])
-
     # Store the results
     results[base_key] = {
         'freq': -reference_freq,
         'mean': mean_fft,
         'error': std_error,
         'beta': beta,
-        'qfi': qfi
     }
 
 # Plotting
 for base_key, data in results.items():
+
+    # Save the data
+    data_out = np.column_stack((data['freq'], data['mean']))
+    data_filename = os.path.join(data_dir, f'processed_{base_key}.dat')
+    np.savetxt(data_filename, data_out, header='freq mean')
+
+    freq = data['freq']
+    mean = data['mean']
+
+    reference_freq = freq[len(freq)//2+1:]
+    beta = data['beta']
+    mean_fft = mean[len(mean)//2+1:]
+
+    to_int = mean_fft* np.tanh(beta*reference_freq / 2) * 4/np.pi * (1 - np.exp(-reference_freq * beta)) *np.pi
+
+    domega = np.abs(reference_freq[1] - reference_freq[0])
+
+    qfi = np.sum(to_int) * domega  # Convert to integral form
+
+
     plt.figure(figsize=(10, 6))
 
     plt.plot(data['freq'], data['mean'],
-                 label=f'β={data["beta"]}, QFI={data["qfi"]:.2f}')
+                 label=f'β={data["beta"]}, QFI={qfi:.2f}')
 
     plt.xlabel('Frequency')
     plt.xlim(-2,5)
@@ -146,11 +150,6 @@ for base_key, data in results.items():
     plot_filename = os.path.join(data_dir, f'plot_{base_key}.png')
     plt.savefig(plot_filename, dpi=300)
     
-    # Save the data
-    data_out = np.column_stack((data['freq'], data['mean']))
-    data_filename = os.path.join(data_dir, f'processed_{base_key}.dat')
-    np.savetxt(data_filename, data_out, header='freq mean')
-
     plt.close()
 
 print("Processing complete!")

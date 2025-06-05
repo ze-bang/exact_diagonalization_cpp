@@ -653,36 +653,42 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
 }
 
 
-std::vector<Complex> calculate_spectral_function_from_tpq_U_t(
+std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
-    std::function<void(const Complex*, Complex*, int)> O,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators,
     const ComplexVector& tpq_state,
     int N,
     const int num_steps
 ) {
+    int num_operators = operators.size();
+    
     // Pre-allocate all buffers needed for calculation
-    ComplexVector O_psi(N);        // O|ψ>
-    ComplexVector O_psi_next(N);   // For time evolution of O|ψ>
+    std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));        // O|ψ> for each operator
+    std::vector<ComplexVector> O_psi_next_vec(num_operators, ComplexVector(N));   // For time evolution of O|ψ>
     ComplexVector state(N);        // |ψ(t)>
     ComplexVector state_next(N);   // For time evolution of |ψ>
-    ComplexVector O_dag_state(N);  // O†|ψ(t)>
+    std::vector<ComplexVector> O_dag_state_vec(num_operators, ComplexVector(N));  // O†|ψ(t)> for each operator
     
     // Initialize state to tpq_state
     std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
     
-    // Calculate O|ψ> once
-    O(state.data(), O_psi.data(), N);
+    // Calculate O|ψ> once for each operator
+    for (int op = 0; op < num_operators; op++) {
+        operators[op](state.data(), O_psi_vec[op].data(), N);
+    }
     
     // Prepare time evolution
-    std::vector<Complex> time_correlation(num_steps);
+    std::vector<std::vector<Complex>> time_correlations(num_operators, std::vector<Complex>(num_steps));
     
-    // Calculate initial O†|ψ>
-    O(state.data(), O_dag_state.data(), N);
-    
-    // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-    time_correlation[0] = Complex(0.0, 0.0);
-    for (int i = 0; i < N; i++) {
-        time_correlation[0] += std::conj(O_dag_state[i]) * O_psi[i];
+    // Calculate initial O†|ψ> for each operator
+    for (int op = 0; op < num_operators; op++) {
+        operators[op](state.data(), O_dag_state_vec[op].data(), N);
+        
+        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
+        time_correlations[op][0] = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            time_correlations[op][0] += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
+        }
     }
     
     std::cout << "Starting real-time evolution for correlation function..." << std::endl;
@@ -692,21 +698,26 @@ std::vector<Complex> calculate_spectral_function_from_tpq_U_t(
         // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
         U_t(state.data(), state_next.data(), N);
         
-        // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
-        U_t(O_psi.data(), O_psi_next.data(), N);
-        
-        // Calculate O†|ψ(t)>
-        O(state_next.data(), O_dag_state.data(), N);
-        
-        // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
-        time_correlation[step] = Complex(0.0, 0.0);
-        for (int i = 0; i < N; i++) {
-            time_correlation[step] += std::conj(O_dag_state[i]) * O_psi_next[i];
+        // For each operator
+        for (int op = 0; op < num_operators; op++) {
+            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
+            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
+            
+            // Calculate O†|ψ(t)>
+            operators[op](state_next.data(), O_dag_state_vec[op].data(), N);
+            
+            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
+            time_correlations[op][step] = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                time_correlations[op][step] += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
+            }
+            
+            // Update O_psi for next iteration
+            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
         }
         
-        // Update states for next iteration
+        // Update state for next iteration
         std::swap(state, state_next);
-        std::swap(O_psi, O_psi_next);
         
         if (step % 100 == 0) {
             std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
@@ -715,7 +726,7 @@ std::vector<Complex> calculate_spectral_function_from_tpq_U_t(
     
     std::cout << "Calculating spectral function via Fourier transform..." << std::endl;
     
-    return time_correlation;
+    return time_correlations;
 }
 
 
@@ -1128,56 +1139,57 @@ void computeObservableDynamics_U_t(
     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
     save_tpq_state(tpq_state, state_file);
 
+    std::cout << "Computing dynamical susceptibility for sample " << sample 
+              << ", step " << step << ", for " << observables.size() << " observables" << std::endl;
+    
+    // Create array of operator functions
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
+    operatorFuncs.reserve(observables.size());
+    
     for (size_t i = 0; i < observables.size(); i++) {
-        std::cout << "Computing dynamical susceptibility for sample " << sample 
-                  << ", step " << step << ", observable: " << observable_names[i] << std::endl;
-                  
-        std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
-
-        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
-                             
-        // Create a lambda to adapt Operator to the required function signature
-        auto operatorFunc = [&observables, i](const Complex* in, Complex* out, int size) {
+        operatorFuncs.emplace_back([&observables, i](const Complex* in, Complex* out, int size) {
             // Convert input to vector
             std::vector<Complex> input(in, in + size);
             // Apply operator
             std::vector<Complex> result = observables[i].apply(input);
             // Copy result to output
             std::copy(result.begin(), result.end(), out);
-        };
+        });
+    }
+    
+    // Calculate spectral function for all operators at once
+    auto time_correlations = calculate_spectral_function_from_tpq_U_t(
+        U_t, operatorFuncs, tpq_state, N, int(t_end/dt+1));
+    
+    auto negative_time_correlations = calculate_spectral_function_from_tpq_U_t(
+        U_nt, operatorFuncs, tpq_state, N, int(t_end/dt+1));
+
+    // Process and save results for each observable
+    for (size_t i = 0; i < observables.size(); i++) {
+        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
         
-        // Calculate spectral function with current parameters
-        auto time_correlation = calculate_spectral_function_from_tpq_U_t(
-            U_t, operatorFunc, tpq_state, N, int(t_end/dt+1));
-        
-        std::vector<double> time_points(time_correlation.size());
-        for (size_t j = 0; j < time_correlation.size(); j++) {
+        std::vector<double> time_points(time_correlations[i].size());
+        for (size_t j = 0; j < time_correlations[i].size(); j++) {
             time_points[j] = j * dt;
         }
 
-        auto negative_time_correlation = calculate_spectral_function_from_tpq_U_t(
-            U_nt, operatorFunc, tpq_state, N, int(t_end/dt+1));
-
-
         // Combine negative and positive time correlations into one vector
-        // The negative time correlations (except t=0) go first in reverse order,
-        // followed by all positive time correlations
         std::vector<Complex> combined_time_correlation;
         std::vector<double> combined_time_points;
-        combined_time_correlation.reserve(time_correlation.size() + negative_time_correlation.size() - 1);
-        combined_time_points.reserve(time_correlation.size() + negative_time_correlation.size() - 1);
+        combined_time_correlation.reserve(time_correlations[i].size() + negative_time_correlations[i].size() - 1);
+        combined_time_points.reserve(time_correlations[i].size() + negative_time_correlations[i].size() - 1);
+        
         // Add negative time correlations first (in reverse order, skipping t=0)
-        for (int j = negative_time_correlation.size() - 1; j > 0; j--) {
-            combined_time_correlation.push_back(negative_time_correlation[j]);
+        for (int j = negative_time_correlations[i].size() - 1; j > 0; j--) {
+            combined_time_correlation.push_back(negative_time_correlations[i][j]);
             combined_time_points.push_back(-j * dt);
         }
 
         // Add positive time correlations
         combined_time_correlation.insert(combined_time_correlation.end(), 
-                                        time_correlation.begin(), 
-                                        time_correlation.end());
+                                        time_correlations[i].begin(), 
+                                        time_correlations[i].end());
                                         
         combined_time_points.insert(combined_time_points.end(), 
                                     time_points.begin(), 
@@ -1195,33 +1207,6 @@ void computeObservableDynamics_U_t(
             }
             time_corr_out.close();
             std::cout << "Time correlation saved to " << time_corr_file << std::endl;
-        }
-
-        // Calculate spectral function by fourier transforming combined time correlation
-        std::vector<double> frequencies(num_points);
-        std::vector<Complex> spectral_function(num_points);
-        double omega_step = (omega_max - omega_min) / num_points;
-        for (int j = 0; j < num_points; j++) {
-            frequencies[j] = omega_min + j * omega_step;
-            spectral_function[j] = Complex(0.0, 0.0);
-            for (int k = 0; k < combined_time_correlation.size(); k++) {
-                Complex phase = std::exp(Complex(0.0, -frequencies[j] * combined_time_points[k]));
-                spectral_function[j] += combined_time_correlation[k] * phase * dt;
-            }
-        }
-
-        // Write spectral function to file
-        std::ofstream dyn_out(dyn_file);
-        if (dyn_out.is_open()) {
-            dyn_out << "# omega spectral_function" << std::endl;
-            for (size_t j = 0; j < frequencies.size(); j++) {
-                dyn_out << std::setprecision(16) 
-                      << frequencies[j] << " " 
-                      << spectral_function[j].real() << " "
-                      << spectral_function[j].imag() << std::endl;
-            }
-            dyn_out.close();
-            std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
         }
     }
 }
