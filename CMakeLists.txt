@@ -14,6 +14,9 @@ endif()
 # Options
 option(WITH_CUDA "Build with CUDA support" OFF)
 option(WITH_MPI "Build with MPI support" ON)
+option(ENABLE_AGGRESSIVE_OPTS "Enable aggressive optimizations (may reduce numerical stability)" OFF)
+option(ENABLE_PROFILE_GUIDED_OPTS "Enable profile-guided optimization" OFF)
+option(ENABLE_NATIVE_ARCH "Use -march=native (disable for portable builds)" ON)
 
 if (WITH_CUDA)
     set(CMAKE_CUDA_ARCHITECTURES "native")
@@ -150,10 +153,6 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
 )
 
-if (WITH_MKL)
-    target_link_libraries(ED ${MKL_LIBRARIES})
-endif()
-
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
@@ -169,8 +168,32 @@ if(WITH_CUDA)
     )
 endif()
 
+# Suppress warnings that might be triggered by aggressive optimizations
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+    target_compile_options(ED PRIVATE
+        -Wno-maybe-uninitialized      # May trigger false positives with -O3
+        -Wno-aggressive-loop-optimizations # Suppress aggressive loop optimization warnings
+    )
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(ED PRIVATE
+        -Wno-pass-failed              # Suppress optimization pass failure warnings
+    )
+endif()
+
+# Fortran interface flags for BLAS/LAPACK compatibility
+if(CMAKE_Fortran_COMPILER)
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -march=native")
+endif()
+
 # Install targets
 install(TARGETS ED DESTINATION bin)
+
+# Runtime performance optimization hints
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/performance_config.h.in"
+    "${CMAKE_BINARY_DIR}/performance_config.h"
+)
+target_include_directories(ED PRIVATE ${CMAKE_BINARY_DIR})
 
 # Print configuration summary
 message(STATUS "Configuration Summary:")
@@ -179,21 +202,78 @@ message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA Support: ${WITH_CUDA}")
 message(STATUS "  MPI Support: ${WITH_MPI}")
 
-# Platform-specific optimizations
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(ED PRIVATE -O3 -march=native)
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(ED PRIVATE -g)
+# Build configuration summary and performance options
+message(STATUS "")
+message(STATUS "=== Performance Configuration Summary ===")
+message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "  Aggressive Optimizations: ${ENABLE_AGGRESSIVE_OPTS}")
+message(STATUS "  Profile-Guided Optimization: ${ENABLE_PROFILE_GUIDED_OPTS}")
+message(STATUS "  Native Architecture: ${ENABLE_NATIVE_ARCH}")
+message(STATUS "  CUDA Support: ${WITH_CUDA}")
+message(STATUS "  MPI Support: ${WITH_MPI}")
+message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
+
+# CPU information
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+    execute_process(COMMAND grep -c "^processor" /proc/cpuinfo OUTPUT_VARIABLE CPU_COUNT OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND grep "model name" /proc/cpuinfo COMMAND head -1 COMMAND sed "s/.*: //" OUTPUT_VARIABLE CPU_MODEL OUTPUT_STRIP_TRAILING_WHITESPACE)
+    message(STATUS "  CPU: ${CPU_MODEL} (${CPU_COUNT} cores)")
+    
+    # Check for specific CPU features
+    execute_process(COMMAND grep -q "avx2" /proc/cpuinfo RESULT_VARIABLE AVX2_RESULT OUTPUT_QUIET ERROR_QUIET)
+    if(AVX2_RESULT EQUAL 0)
+        message(STATUS "  AVX2: Available")
     endif()
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
-    target_compile_options(ED PRIVATE -O3 -xHost)
+    
+    execute_process(COMMAND grep -q "fma" /proc/cpuinfo RESULT_VARIABLE FMA_RESULT OUTPUT_QUIET ERROR_QUIET)
+    if(FMA_RESULT EQUAL 0)
+        message(STATUS "  FMA: Available")
+    endif()
 endif()
 
-# Add OpenMP support if available
-find_package(OpenMP)
-if(OpenMP_CXX_FOUND)
-    target_link_libraries(ED OpenMP::OpenMP_CXX)
-    message(STATUS "  OpenMP Support: YES")
-else()
-    message(STATUS "  OpenMP Support: NO")
+# Memory information
+if(UNIX AND NOT APPLE)
+    execute_process(COMMAND grep "MemTotal" /proc/meminfo COMMAND awk "{print $2}" OUTPUT_VARIABLE MEM_KB OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(MEM_KB)
+        math(EXPR MEM_GB "${MEM_KB} / 1024 / 1024")
+        message(STATUS "  System Memory: ${MEM_GB} GB")
+    endif()
+endif()
+
+# Performance recommendations
+message(STATUS "")
+message(STATUS "=== Performance Recommendations ===")
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(STATUS "  WARNING: Debug build detected. Use Release for production runs.")
+endif()
+
+if(NOT WITH_MKL)
+    message(STATUS "  TIP: Enable Intel MKL for optimal BLAS/LAPACK performance")
+    message(STATUS "       Use: -DWITH_MKL=ON")
+endif()
+
+if(NOT OpenMP_CXX_FOUND)
+    message(STATUS "  TIP: Install OpenMP for parallel computation support")
+endif()
+
+if(NOT WITH_CUDA)
+    message(STATUS "  TIP: Enable CUDA for GPU acceleration")
+    message(STATUS "       Use: -DWITH_CUDA=ON")
+endif()
+
+if(NOT ENABLE_AGGRESSIVE_OPTS)
+    message(STATUS "  TIP: For maximum performance (with potential numerical risks):")
+    message(STATUS "       Use: -DENABLE_AGGRESSIVE_OPTS=ON")
+endif()
+
+message(STATUS "===============================================")
+message(STATUS "")
+
+# Optional: Add compile-time feature detection
+try_compile(HAVE_BUILTIN_PREFETCH 
+    ${CMAKE_BINARY_DIR} 
+    ${CMAKE_SOURCE_DIR}/cmake/test_prefetch.cpp)
+if(HAVE_BUILTIN_PREFETCH)
+    target_compile_definitions(ED PRIVATE HAVE_BUILTIN_PREFETCH)
 endif()
