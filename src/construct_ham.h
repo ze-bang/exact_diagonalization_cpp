@@ -1026,22 +1026,39 @@ public:
         return *sparseMatrix_;
     }
 
-    // Print the operator as a matrix
+    // Print the operator as a matrix - optimized for memory
     Matrix returnSymmetrizedMatrix(const std::string& dir){
         int dim = 1 << n_bits_;
         Matrix matrix(dim, std::vector<Complex>(dim, 0.0));
+        
+        // Process one basis vector at a time to reduce memory footprint
+        std::vector<Complex> temp_vec_i;
+        std::vector<Complex> temp_vec_j;
+        std::vector<Complex> temp_vec_i_F;
+        
         for (int i = 0; i < dim; ++i) {
-            std::vector<Complex> temp_vec_i = read_sym_basis(i, dir);
+            temp_vec_i = read_sym_basis(i, dir);
+            temp_vec_i_F = apply(temp_vec_i);
+            
             for (int j = 0; j < dim; ++j) {
-                std::vector<Complex> temp_vec_j = read_sym_basis(j, dir);
-                // Apply the operator to the i-th basis vector
-                std::vector<Complex> temp_vec_i_F = apply(temp_vec_i);
-                Complex res;
+                temp_vec_j = read_sym_basis(j, dir);
+                
+                Complex res(0.0, 0.0);
                 for (int k = 0; k < dim; ++k) {
                     res += temp_vec_i_F[k] * std::conj(temp_vec_j[k]);
                 }
                 matrix[i][j] = res;
+                
+                // Clear temp_vec_j after use
+                temp_vec_j.clear();
+                temp_vec_j.shrink_to_fit();
             }
+            
+            // Clear vectors after processing each row
+            temp_vec_i.clear();
+            temp_vec_i.shrink_to_fit();
+            temp_vec_i_F.clear();
+            temp_vec_i_F.shrink_to_fit();
         }
         return matrix;
     }
@@ -1059,6 +1076,7 @@ public:
         }
         return matrix;
     }
+
     void generateSymmetrizedBasis(const std::string& dir) {
         std::ifstream trans_file(dir + "/Trans.dat");
         if (!trans_file.is_open()) {
@@ -1619,6 +1637,29 @@ public:
         return sym_basis;
     }
 
+    // Optimized read function for sparse basis vectors
+    void read_sym_basis_sparse(int index, const std::string& dir, 
+                              std::map<int, Complex>& sparse_vec) {
+        sparse_vec.clear();
+        std::ifstream file(dir+"/sym_basis/sym_basis"+std::to_string(index)+".dat");
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + dir +"/sym_basis/sym_basis"+std::to_string(index)+".dat");
+        }
+        
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            int idx;
+            double real, imag;
+            if (iss >> idx >> real >> imag) {
+                Complex val(real, imag);
+                if (std::abs(val) > 1e-10) {
+                    sparse_vec[idx] = val;
+                }
+            }
+        }
+    }
+
     std::vector<Complex> sym_basis_e_(int basis, std::vector<std::vector<int>> max_clique, std::vector<std::vector<int>> power_representation, std::vector<int> minimal_generators, std::vector<int> e_i){
         
         std::vector<Complex> sym_basis(1 << n_bits_, 0.0);
@@ -1896,50 +1937,29 @@ public:
             std::vector<Eigen::Triplet<Complex>> triplets;
             triplets.reserve(block_size * 10); // Estimate average 10 non-zeros per row
             
-            // Cache for basis vectors to reduce disk I/O
-            std::vector<SparseVector> basis_cache(block_size);
+            // Process basis vectors in smaller chunks to reduce memory usage
+            const int CHUNK_SIZE = std::min(100, block_size);
             
-            // Load all basis vectors into sparse representation
-            #pragma omp parallel for schedule(dynamic)
-            for (int i = 0; i < block_size; i++) {
-                std::string filename = dir + "/sym_basis/sym_basis" + std::to_string(block_start + i) + ".dat";
-                std::ifstream file(filename);
-                if (!file.is_open()) {
-                    #pragma omp critical
-                    {
-                        std::cerr << "Failed to open: " << filename << std::endl;
-                    }
-                    continue;
-                }
+            for (int chunk_start = 0; chunk_start < block_size; chunk_start += CHUNK_SIZE) {
+                int chunk_end = std::min(chunk_start + CHUNK_SIZE, block_size);
                 
-                std::string line;
-                while (std::getline(file, line)) {
-                    std::istringstream iss(line);
-                    int idx;
-                    double real, imag;
-                    if (iss >> idx >> real >> imag) {
-                        Complex val(real, imag);
-                        if (std::abs(val) > 1e-10) {
-                            basis_cache[i][idx] = val;
-                        }
-                    }
-                }
-            }
-            
-            // Process basis vectors in batches to improve cache locality
-            const int BATCH_SIZE = std::min(50, block_size);
-            
-            for (int batch_start = 0; batch_start < block_size; batch_start += BATCH_SIZE) {
-                int batch_end = std::min(batch_start + BATCH_SIZE, block_size);
+                // Cache for this chunk only
+                std::vector<SparseVector> chunk_cache(chunk_end - chunk_start);
                 
+                // Load chunk basis vectors
                 #pragma omp parallel for schedule(dynamic)
-                for (int i = batch_start; i < batch_end; i++) {
-                    // Skip if basis vector was not loaded successfully
-                    if (basis_cache[i].empty()) continue;
+                for (int i = chunk_start; i < chunk_end; i++) {
+                    read_sym_basis_sparse(block_start + i, dir, chunk_cache[i - chunk_start]);
+                }
+                
+                // Process this chunk
+                #pragma omp parallel for schedule(dynamic)
+                for (int i = chunk_start; i < chunk_end; i++) {
+                    if (chunk_cache[i - chunk_start].empty()) continue;
                     
                     // Apply operator to basis vector i
                     SparseVector transformed_i;
-                    for (const auto& [idx, val] : basis_cache[i]) {
+                    for (const auto& [idx, val] : chunk_cache[i - chunk_start]) {
                         for (const auto& transform : transforms_) {
                             auto [new_idx, scalar] = transform(idx);
                             if (new_idx >= 0 && new_idx < dim && std::abs(scalar) > 1e-10) {
@@ -1948,26 +1968,47 @@ public:
                         }
                     }
                     
-                    // Calculate matrix elements with each basis vector j
+                    // Calculate matrix elements with all basis vectors
                     std::vector<std::pair<int, Complex>> row_elements;
                     
-                    for (int j = 0; j < block_size; j++) {
-                        // Skip if basis vector was not loaded successfully
-                        if (basis_cache[j].empty()) continue;
+                    // Process against all basis vectors in smaller batches
+                    const int BATCH_SIZE = 1000;
+                    for (int batch_start = 0; batch_start < block_size; batch_start += BATCH_SIZE) {
+                        int batch_end = std::min(batch_start + BATCH_SIZE, block_size);
                         
-                        // Calculate <j|H|i> = sum_k conj(basis_j[k]) * transformed_i[k]
-                        Complex element(0.0, 0.0);
-                        
-                        // Only iterate over non-zero elements of transformed_i
-                        for (const auto& [idx, val] : transformed_i) {
-                            auto it = basis_cache[j].find(idx);
-                            if (it != basis_cache[j].end()) {
-                                element += std::conj(it->second) * val;
+                        // Load batch if not in current chunk
+                        std::vector<SparseVector> batch_cache;
+                        if (batch_start < chunk_start || batch_end > chunk_end) {
+                            batch_cache.resize(batch_end - batch_start);
+                            for (int j = batch_start; j < batch_end; j++) {
+                                read_sym_basis_sparse(block_start + j, dir, batch_cache[j - batch_start]);
                             }
                         }
                         
-                        if (std::abs(element) > 1e-10) {
-                            row_elements.emplace_back(j, element);
+                        // Process batch
+                        for (int j = batch_start; j < batch_end; j++) {
+                            const SparseVector* basis_j = nullptr;
+                            
+                            if (j >= chunk_start && j < chunk_end) {
+                                basis_j = &chunk_cache[j - chunk_start];
+                            } else {
+                                basis_j = &batch_cache[j - batch_start];
+                            }
+                            
+                            if (basis_j->empty()) continue;
+                            
+                            // Calculate <j|H|i>
+                            Complex element(0.0, 0.0);
+                            for (const auto& [idx, val] : transformed_i) {
+                                auto it = basis_j->find(idx);
+                                if (it != basis_j->end()) {
+                                    element += std::conj(it->second) * val;
+                                }
+                            }
+                            
+                            if (std::abs(element) > 1e-10) {
+                                row_elements.emplace_back(j, element);
+                            }
                         }
                     }
                     
@@ -1979,6 +2020,10 @@ public:
                         }
                     }
                 }
+                
+                // Clear chunk cache to free memory
+                chunk_cache.clear();
+                chunk_cache.shrink_to_fit();
             }
             
             // Create and save the sparse matrix
@@ -2072,27 +2117,57 @@ public:
         
         std::cout << "Total symmetrized dimension: " << total_sym_dim << std::endl;
         
+        // For large matrices, warn the user
+        if (total_sym_dim > 1000) {
+            std::cout << "Warning: Matrix dimension is " << total_sym_dim 
+                      << ". This may require significant memory." << std::endl;
+            std::cout << "Continue? (y/n): ";
+            char response;
+            std::cin >> response;
+            if (response != 'y' && response != 'Y') {
+                std::cout << "Operation cancelled." << std::endl;
+                return;
+            }
+        }
+        
         // Create the full symmetrized matrix
         Matrix sym_matrix(total_sym_dim, std::vector<Complex>(total_sym_dim, 0.0));
         
         // Calculate matrix elements <sym_basis_i|H|sym_basis_j>
         std::cout << "Computing symmetrized matrix elements..." << std::endl;
         
+        // Use sparse representation for basis vectors
+        using SparseVector = std::map<int, Complex>;
+        
         for (int i = 0; i < total_sym_dim; ++i) {
-            // Load basis vector i
-            std::vector<Complex> basis_i = read_sym_basis(i, dir);
+            // Load basis vector i as sparse
+            SparseVector basis_i_sparse;
+            read_sym_basis_sparse(i, dir, basis_i_sparse);
             
             // Apply Hamiltonian to basis_i
-            std::vector<Complex> H_basis_i = apply(basis_i);
+            SparseVector H_basis_i_sparse;
+            for (const auto& [idx, val] : basis_i_sparse) {
+                for (const auto& transform : transforms_) {
+                    auto [new_idx, scalar] = transform(idx);
+                    if (new_idx >= 0 && new_idx < (1 << n_bits_) && std::abs(scalar) > 1e-10) {
+                        H_basis_i_sparse[new_idx] += val * scalar;
+                    }
+                }
+            }
             
+            // Calculate matrix elements with all j
             for (int j = 0; j < total_sym_dim; ++j) {
-                // Load basis vector j
-                std::vector<Complex> basis_j = read_sym_basis(j, dir);
+                // Load basis vector j as sparse
+                SparseVector basis_j_sparse;
+                read_sym_basis_sparse(j, dir, basis_j_sparse);
                 
                 // Calculate <basis_j|H|basis_i>
                 Complex matrix_element(0.0, 0.0);
-                for (int k = 0; k < (1 << n_bits_); ++k) {
-                    matrix_element += std::conj(basis_j[k]) * H_basis_i[k];
+                for (const auto& [idx, val] : H_basis_i_sparse) {
+                    auto it = basis_j_sparse.find(idx);
+                    if (it != basis_j_sparse.end()) {
+                        matrix_element += std::conj(it->second) * val;
+                    }
                 }
                 
                 sym_matrix[i][j] = matrix_element;
