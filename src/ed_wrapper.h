@@ -9,7 +9,6 @@
 #include "observables.h"
 #include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
-
 #ifdef ENABLE_CUDA
 #include "lanczos_cuda.h"
 #endif

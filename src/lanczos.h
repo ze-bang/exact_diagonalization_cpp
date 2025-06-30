@@ -12,6 +12,7 @@
 #include <cmath>
 #include <mkl.h>
 #include "construct_ham.h"
+#include "optimized_full_diag.h"  // Include advanced optimization framework
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>
@@ -1175,14 +1176,16 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             
             // Save eigenvector
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(evec_file, std::ios::binary);
-            if (outfile) {
-                outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
-                outfile.close();
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            if (!evec_outfile) {
+                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                continue;
             }
+            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            evec_outfile.close();
         }
         
-        // Save eigenvalues
+        // Save eigenvalues if requested
         std::string eval_file = evec_dir + "/eigenvalues.dat";
         std::ofstream eval_outfile(eval_file, std::ios::binary);
         if (eval_outfile) {
@@ -1875,7 +1878,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
                           << " eigenvalues converged" << std::endl;
                 
                 if (converged_count >= num_eigs) {
-                    std::cout << "Early termination: sufficient eigenvalues converged" << std::endl;
+                    std::cout << "  Early termination: sufficient eigenvalues converged" << std::endl;
                     break;
                 }
             }
@@ -1962,7 +1965,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
             int idx = eigenvalue_pairs[i].second;
             ComplexVector eigenvector(N, Complex(0.0, 0.0));
             
-            // Transform from Lanczos basis: v = V * y
+            // Transform from Lanczos basis to original basis
             for (int j = 0; j < m; j++) {
                 ComplexVector v_j = read_basis_vector(temp_dir, j, N);
                 Complex coef(T_eigenvectors[j * m + idx], 0.0);
@@ -2299,6 +2302,15 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     
     std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
     
+    // Algorithm parameters
+    int k = num_eigs;  // Number of desired eigenvalues
+    int m = std::min(std::max(2 * k, 20), N);  // Krylov subspace dimension
+    
+    // Lanczos vectors for tridiagonal matrix construction
+    std::vector<double> alpha;  // Diagonal elements
+    std::vector<double> beta;   // Off-diagonal elements
+    std::vector<double> ritz_values;  // Ritz values
+    
     // Create directories for temporary files and output
     std::string temp_dir = dir + "/krylov_schur_temp";
     std::string evec_dir = dir + "/eigenvectors";
@@ -2327,11 +2339,6 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     double norm = cblas_dznrm2(N, v_current.data(), 1);
     Complex scale = Complex(1.0/norm, 0.0);
     cblas_zscal(N, &scale, v_current.data(), 1);
-    
-    // Krylov-Schur parameters
-    int m = std::min(2*num_eigs + 20, max_iter);  // Maximum Krylov subspace size
-    int k = num_eigs;                              // Number of desired eigenvalues
-    int p = std::min(num_eigs + 5, m - k);        // Number of shifts to apply
     
     // Store the first basis vector
     write_basis_vector(temp_dir, 0, v_current, N);
@@ -2457,7 +2464,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
             }
         }
         
-        std::cout << "  " << num_converged << " eigenvalues converged out of " << k << std::endl;
+        std::cout << "  " << num_converged << "/" << k << " eigenvalues converged" << std::endl;
         
         if (num_converged >= k || iter == max_outer_iter - 1) {
             converged = true;
@@ -2513,8 +2520,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         // Reorder Schur form so wanted eigenvalues come first
         // (For Hermitian case with sorted eigenvalues, this is already done)
         
-        // Update the Krylov basis: V_new = V_old * Q
-        std::vector<ComplexVector> new_basis(k+1, ComplexVector(N));
+        // Update the Krylov basis: V_k = V_m * Q_k where Q_k are the first k columns of evecs
+        std::vector<ComplexVector> new_basis(k + 1, ComplexVector(N));
         
         #pragma omp parallel for
         for (int i = 0; i <= k; i++) {
@@ -2558,281 +2565,6 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
         
         // Update H_m for next iteration
         H_m = H_new;
-        
-        iter++;
-    }
-    
-    // Clean up temporary files
-    system(("rm -rf " + temp_dir).c_str());
-    
-    if (!converged) {
-        std::cout << "Krylov-Schur: Maximum iterations reached without full convergence" << std::endl;
-    } else {
-        std::cout << "Krylov-Schur: Successfully computed " << eigenvalues.size() << " eigenvalues" << std::endl;
-    }
-}
-
-// Implicitly Restarted Lanczos algorithm implementation
-void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
-                                 int max_iter, int num_eigs, double tol, 
-                                 std::vector<double>& eigenvalues, std::string dir = "",
-                                 bool compute_eigenvectors = false) {
-    
-    std::cout << "Starting Implicitly Restarted Lanczos for " << num_eigs << " eigenvalues" << std::endl;
-    
-    // IRL parameters
-    int k = num_eigs;           // Number of desired eigenvalues
-    int p = std::min(k + 10, 2*k); // Number of Arnoldi vectors to maintain
-    int m = p + k;              // Maximum Krylov subspace size before restart
-    
-    // Ensure we don't exceed matrix dimension
-    m = std::min(m, N);
-    p = m - k;
-    
-    std::cout << "IRL parameters: k=" << k << ", p=" << p << ", m=" << m << std::endl;
-    
-    // Create directories for output
-    std::string temp_dir = dir + "/irl_temp";
-    std::string evec_dir = dir + "/eigenvectors";
-    
-    if (compute_eigenvectors) {
-        system(("mkdir -p " + evec_dir).c_str());
-    }
-    system(("mkdir -p " + temp_dir).c_str());
-    
-    // Initialize random starting vector
-    std::mt19937 gen(std::random_device{}());
-    std::uniform_real_distribution<double> dist(-1.0, 1.0);
-    ComplexVector v_current(N);
-    
-    #pragma omp parallel for
-    for (int i = 0; i < N; i++) {
-        double real = dist(gen);
-        double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
-    }
-    
-    // Normalize starting vector
-    double norm = cblas_dznrm2(N, v_current.data(), 1);
-    Complex scale = Complex(1.0/norm, 0.0);
-    cblas_zscal(N, &scale, v_current.data(), 1);
-    
-    // Store the first basis vector
-    write_basis_vector(temp_dir, 0, v_current, N);
-    
-    // Initialize variables for the algorithm
-    ComplexVector v_prev(N, Complex(0.0, 0.0));
-    ComplexVector v_next(N);
-    ComplexVector w(N);
-    
-    // Tridiagonal matrix elements
-    std::vector<double> alpha;
-    std::vector<double> beta;
-    beta.push_back(0.0); // β_0 is not used
-    
-    int iter = 0;
-    int max_outer_iter = 100;
-    bool converged = false;
-    
-    std::vector<double> ritz_values;
-    std::vector<bool> converged_flags;
-    
-    while (!converged && iter < max_outer_iter) {
-        std::cout << "IRL: Outer iteration " << iter + 1 << std::endl;
-        
-        int j_start = (iter == 0) ? 0 : k;
-        int current_size = alpha.size();
-        
-        // Extend the Arnoldi factorization from j_start to m
-        for (int j = j_start; j < m; j++) {
-            if (j < current_size) {
-                // Load existing vector
-                v_current = read_basis_vector(temp_dir, j, N);
-            }
-            
-            // Apply operator: w = H*v_j
-            H(v_current.data(), w.data(), N);
-            
-            // w = w - beta_j * v_{j-1}
-            if (j > 0) {
-                Complex neg_beta = Complex(-beta[j], 0.0);
-                cblas_zaxpy(N, &neg_beta, v_prev.data(), 1, w.data(), 1);
-            }
-            
-            // alpha_j = <v_j, w>
-            Complex dot_product;
-            cblas_zdotc_sub(N, v_current.data(), 1, w.data(), 1, &dot_product);
-            
-            if (j < alpha.size()) {
-                alpha[j] = std::real(dot_product);
-            } else {
-                alpha.push_back(std::real(dot_product));
-            }
-            
-            // w = w - alpha_j * v_j
-            Complex neg_alpha = Complex(-alpha[j], 0.0);
-            cblas_zaxpy(N, &neg_alpha, v_current.data(), 1, w.data(), 1);
-            
-            // Full reorthogonalization for stability
-            for (int i = 0; i <= j; i++) {
-                ComplexVector v_i = read_basis_vector(temp_dir, i, N);
-                Complex overlap;
-                cblas_zdotc_sub(N, v_i.data(), 1, w.data(), 1, &overlap);
-                
-                if (std::abs(overlap) > tol) {
-                    Complex neg_overlap = -overlap;
-                    cblas_zaxpy(N, &neg_overlap, v_i.data(), 1, w.data(), 1);
-                }
-            }
-            
-            // beta_{j+1} = ||w||
-            norm = cblas_dznrm2(N, w.data(), 1);
-            
-            if (j + 1 < beta.size()) {
-                beta[j + 1] = norm;
-            } else {
-                beta.push_back(norm);
-            }
-            
-            // Check for breakdown
-            if (norm < tol) {
-                std::cout << "  IRL: Invariant subspace found at dimension " << j + 1 << std::endl;
-                m = j + 1;
-                break;
-            }
-            
-            // v_{j+1} = w / beta_{j+1}
-            for (int i = 0; i < N; i++) {
-                v_next[i] = w[i] / norm;
-            }
-            
-            // Store basis vector
-            if (j < m - 1) {
-                write_basis_vector(temp_dir, j + 1, v_next, N);
-            }
-            
-            // Update for next iteration
-            v_prev = v_current;
-            v_current = v_next;
-        }
-        
-        // Compute eigenvalues of the tridiagonal matrix
-        int current_m = std::min(m, static_cast<int>(alpha.size()));
-        std::vector<double> diag = alpha;
-        diag.resize(current_m);
-        std::vector<double> offdiag(current_m - 1);
-        
-        for (int i = 0; i < current_m - 1; i++) {
-            offdiag[i] = beta[i + 1];
-        }
-        
-        // Workspace for eigenvectors
-        std::vector<double> evecs(current_m * current_m);
-        
-        // Compute eigenvalues and eigenvectors of tridiagonal matrix
-        int info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', current_m, 
-                                 diag.data(), offdiag.data(), evecs.data(), current_m);
-        
-        if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
-            break;
-        }
-        
-        // The eigenvalues are now in diag (sorted in ascending order)
-        ritz_values.assign(diag.begin(), diag.begin() + current_m);
-        
-        // Check convergence of Ritz values
-        converged_flags.assign(k, false);
-        int num_converged = 0;
-        
-        for (int i = 0; i < k && i < current_m; i++) {
-            // Compute residual norm for Ritz pair i
-            // residual = |beta_m * y_{m,i}| where y_{m,i} is the last component of eigenvector i
-            double residual = std::abs(beta[current_m] * evecs[(current_m - 1) * current_m + i]);
-            
-            if (residual < tol * std::abs(ritz_values[i])) {
-                converged_flags[i] = true;
-                num_converged++;
-            }
-        }
-        
-        std::cout << "  IRL: " << num_converged << " eigenvalues converged out of " << k << std::endl;
-        
-        // Check if we have enough converged eigenvalues
-        if (num_converged >= k) {
-            converged = true;
-            std::cout << "  IRL: Convergence achieved!" << std::endl;
-            break;
-        }
-        
-        // Perform implicit restart if not converged
-        if (current_m >= m && !converged) {
-            std::cout << "  IRL: Performing implicit restart..." << std::endl;
-            
-            // Select shifts for implicit restart
-            // Use the p unwanted Ritz values as shifts
-            std::vector<double> shifts;
-            for (int i = k; i < std::min(current_m, k + p); i++) {
-                shifts.push_back(ritz_values[i]);
-            }
-            
-            // Apply QR iteration with shifts to compress the Krylov subspace
-            // This is done implicitly through the eigenvector matrix
-            
-            // Form the new basis V_k = V_m * Q_k where Q_k are the first k columns of evecs
-            std::vector<ComplexVector> new_basis(k + 1, ComplexVector(N));
-            
-            #pragma omp parallel for
-            for (int i = 0; i <= k; i++) {
-                ComplexVector new_v(N, Complex(0.0, 0.0));
-                
-                for (int j = 0; j < current_m; j++) {
-                    ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                    Complex coef = Complex(evecs[j * current_m + i], 0.0);
-                    cblas_zaxpy(N, &coef, v_j.data(), 1, new_v.data(), 1);
-                }
-                
-                // Normalize (should already be normalized, but for safety)
-                double vec_norm = cblas_dznrm2(N, new_v.data(), 1);
-                if (vec_norm > tol) {
-                    Complex scale = Complex(1.0/vec_norm, 0.0);
-                    cblas_zscal(N, &scale, new_v.data(), 1);
-                }
-                
-                new_basis[i] = new_v;
-            }
-            
-            // Save the new basis vectors
-            for (int i = 0; i <= k; i++) {
-                write_basis_vector(temp_dir, i, new_basis[i], N);
-            }
-            
-            // Update the tridiagonal matrix
-            // The new T_k is the leading k×k submatrix of T_m transformed by Q
-            std::vector<double> new_alpha(k);
-            std::vector<double> new_beta(k + 1);
-            new_beta[0] = 0.0;
-            
-            // The diagonal of the new tridiagonal matrix contains the first k Ritz values
-            for (int i = 0; i < k; i++) {
-                new_alpha[i] = ritz_values[i];
-            }
-            
-            // Compute the residual vector and its norm
-            // r = beta_m * v_{m+1} * e_m^T * Q * e_k
-            double residual_norm = std::abs(beta[current_m] * evecs[(current_m - 1) * current_m + k]);
-            new_beta[k] = residual_norm;
-            
-            // Update alpha and beta for the next iteration
-            alpha = new_alpha;
-            beta = new_beta;
-            
-            // Load the k-th basis vector for the next extension
-            v_current = new_basis[k];
-        }
         
         iter++;
     }
@@ -2898,7 +2630,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
         }
     }
     
-    // Cleanup temporary files
+    // Clean up temporary files
     system(("rm -rf " + temp_dir).c_str());
     
     if (converged) {
@@ -3338,6 +3070,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             std::string final_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ofstream outfile(final_evec_file, std::ios::binary);
             outfile.write(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+            outfile.close();
         }
         
         // Clean up temporary slice directories
