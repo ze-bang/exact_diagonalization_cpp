@@ -157,7 +157,7 @@ endif()
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
-endif()
+            endif()
 
 # Add CUDA if enabled
 if(WITH_CUDA)
@@ -181,12 +181,22 @@ message(STATUS "  MPI Support: ${WITH_MPI}")
 
 # Platform-specific optimizations
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(ED PRIVATE -O3 -march=native)
+    target_compile_options(ED PRIVATE -O3 -march=native -funroll-loops -ffast-math)
+    # Enable link-time optimization (LTO) if supported
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+    if(ipo_supported)
+        set_target_properties(ED PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
+        message(STATUS "  LTO (IPO) Support: YES")
+    else()
+        message(STATUS "  LTO (IPO) Support: NO: ${ipo_error}")
+    endif()
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         target_compile_options(ED PRIVATE -g)
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
-    target_compile_options(ED PRIVATE -O3 -xHost)
+    target_compile_options(ED PRIVATE -O3 -xHost -ipo)
+    set_target_properties(ED PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # Add OpenMP support if available

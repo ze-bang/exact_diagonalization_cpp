@@ -2002,11 +2002,11 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Shift-Invert Lanczos completed successfully" << std::endl;
 }
 
-// Full diagonalization algorithm optimized for sparse matrices
+// Full diagonalization algorithm optimized for sparse Hermitian matrices
 void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, int N, int num_eigs, 
                        std::vector<double>& eigenvalues, std::string dir = "",
                        bool compute_eigenvectors = true) {
-    std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
+    std::cout << "Starting full diagonalization for Hermitian matrix of dimension " << N << std::endl;
     
     // Create output directory if needed
     if (!dir.empty() && compute_eigenvectors) {
@@ -2018,7 +2018,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     
     if (N <= DENSE_THRESHOLD) {
         // For smaller matrices, use dense approach with MKL for best performance
-        std::cout << "Using dense diagonalization with MKL" << std::endl;
+        std::cout << "Using dense diagonalization with MKL (Hermitian optimization)" << std::endl;
         
         // Check memory requirements
         size_t matrix_size = static_cast<size_t>(N) * N;
@@ -2034,9 +2034,9 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             throw;
         }
         
-        std::cout << "Constructing dense matrix..." << std::endl;
+        std::cout << "Constructing dense Hermitian matrix (upper triangular)..." << std::endl;
 
-        // Construct full matrix from operator function with progress reporting
+        // Construct only upper triangular part of matrix (exploiting Hermitian property)
         const int chunk_size = std::max(1, N / 100);  // Report progress every 1%
         
         #pragma omp parallel for schedule(dynamic, chunk_size) shared(dense_matrix, H, N)
@@ -2049,41 +2049,40 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             std::vector<Complex> col_j(N);
             H(unit_vec.data(), col_j.data(), N);
             
-            // Store column in dense matrix (use column-major order for LAPACK)
-            for (int i = 0; i < N; i++) {
-            dense_matrix[static_cast<size_t>(j)*N + i] = col_j[i];
+            // Store only upper triangular part (i <= j) in column-major order
+            for (int i = 0; i <= j; i++) {
+                dense_matrix[static_cast<size_t>(j)*N + i] = col_j[i];
             }
             
             // Progress reporting with ASCII progress bar
             #pragma omp critical
             {
-            if (j % chunk_size == 0 || j == N-1) {
-                double percentage = 100.0 * j / N;
-                int barWidth = 50;
-                int pos = barWidth * j / N;
-                
-                std::cout << "\rProgress: [";
-                for (int i = 0; i < barWidth; ++i) {
-                if (i < pos) std::cout << "=";
-                else if (i == pos) std::cout << ">";
-                else std::cout << " ";
+                if (j % chunk_size == 0 || j == N-1) {
+                    double percentage = 100.0 * j / N;
+                    int barWidth = 50;
+                    int pos = barWidth * j / N;
+                    
+                    std::cout << "\rProgress: [";
+                    for (int i = 0; i < barWidth; ++i) {
+                        if (i < pos) std::cout << "=";
+                        else if (i == pos) std::cout << ">";
+                        else std::cout << " ";
+                    }
+                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                    
+                    if (j == N-1) std::cout << std::endl;
                 }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                
-                if (j == N-1) std::cout << std::endl;
-            }
             }
         }
-        std::cout << "Dense matrix constructed" << std::endl;
-        // Allocate arrays for eigenvalues and eigenvectors
+        std::cout << "Dense Hermitian matrix constructed" << std::endl;
+        
+        // Allocate arrays for eigenvalues
         std::vector<double> evals(N);
-        std::vector<Complex> evecs;
         
         // Call LAPACKE to perform eigendecomposition
         int info;
         if (compute_eigenvectors) {
-            evecs.resize(N*N);
-            // Call LAPACKE_zheev to compute eigenvalues and eigenvectors
+            // zheev overwrites the input matrix with eigenvectors
             info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', N,
                                 reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
                                 N, evals.data());
@@ -2093,7 +2092,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                                 reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
                                 N, evals.data());
         }
-
 
         if (info != 0) {
             std::cerr << "LAPACKE_zheev failed with error code " << info << std::endl;
@@ -2113,18 +2111,22 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         if (compute_eigenvectors && !dir.empty()) {
             std::cout << "Saving " << actual_num_eigs << " eigenvectors to disk..." << std::endl;
             
+            #pragma omp parallel for
             for (int i = 0; i < actual_num_eigs; i++) {
                 std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
                 std::ofstream evec_outfile(evec_file, std::ios::binary);
                 if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    #pragma omp critical
+                    {
+                        std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                    }
                     continue;
                 }
                 
-                // Extract column i (eigenvector) from evecs matrix
+                // Extract column i (eigenvector) from dense_matrix (now contains eigenvectors)
                 std::vector<Complex> eigenvector(N);
                 for (int j = 0; j < N; j++) {
-                    eigenvector[j] = evecs[i*N + j];
+                    eigenvector[j] = dense_matrix[static_cast<size_t>(i)*N + j];
                 }
                 
                 evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
@@ -2145,7 +2147,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     } 
     else {
         // For larger matrices, use sparse approach with Eigen
-        std::cout << "Using sparse diagonalization with Eigen3" << std::endl;
+        std::cout << "Using sparse diagonalization with Eigen3 (Hermitian optimization)" << std::endl;
         
         // Enable Eigen multithreading
         Eigen::setNbThreads(std::thread::hardware_concurrency());
@@ -2159,7 +2161,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // Mutex for thread-safe triplet insertion
         std::mutex triplet_mutex;
         
-        // Estimate the sparsity pattern
+        // Only compute upper triangular part for Hermitian matrix
         #pragma omp parallel for schedule(dynamic)
         for (int j = 0; j < N; j++) {
             if (j % 1000 == 0) {
@@ -2174,13 +2176,18 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             std::vector<Complex> col_j(N);
             H(unit_vec.data(), col_j.data(), N);
             
-            // Identify non-zero elements (with threshold)
+            // Identify non-zero elements (with threshold) - only upper triangular
             const double threshold = 1e-12;
             std::vector<Triplet> local_triplets;
             
-            for (int i = 0; i < N; i++) {
+            // Add upper triangular elements (i <= j)
+            for (int i = 0; i <= j; i++) {
                 if (std::abs(col_j[i]) > threshold) {
                     local_triplets.push_back(Triplet(i, j, col_j[i]));
+                    // For Hermitian matrix, also add the conjugate transpose element if i != j
+                    if (i != j) {
+                        local_triplets.push_back(Triplet(j, i, std::conj(col_j[i])));
+                    }
                 }
             }
             
@@ -2194,7 +2201,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         sparse_H.setFromTriplets(triplets.begin(), triplets.end());
         sparse_H.makeCompressed();
         
-        std::cout << "Sparse matrix constructed with " << sparse_H.nonZeros() 
+        std::cout << "Sparse Hermitian matrix constructed with " << sparse_H.nonZeros() 
                   << " non-zero elements (" 
                   << (static_cast<double>(sparse_H.nonZeros()) / (N * N) * 100.0) 
                   << "% fill)" << std::endl;
@@ -2202,9 +2209,6 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // Use Spectra for partial eigendecomposition if available, otherwise fall back to full diagonalization
         if (num_eigs < N / 2) {
             std::cout << "Using sparse iterative eigensolver for partial eigendecomposition" << std::endl;
-            
-            // For partial eigendecomposition, we can use Eigen's iterative solvers
-            // or implement our own Lanczos on the sparse matrix
             
             // Define matrix-vector operation for the sparse matrix
             auto sparse_mv = [&sparse_H, N](const Complex* v, Complex* result, int size) {
@@ -2223,9 +2227,14 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         } else {
             std::cout << "Using full sparse eigendecomposition" << std::endl;
             
-            // For full or nearly-full spectrum, use direct sparse solver
-            Eigen::SelfAdjointEigenSolver<Eigen::SparseMatrix<Complex>> eigensolver;
-            eigensolver.compute(sparse_H, compute_eigenvectors ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
+            // For Hermitian matrices, use specialized solver
+            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXcd> eigensolver;
+            
+            // Convert sparse to dense for Eigen's SelfAdjointEigenSolver
+            // (Eigen doesn't have direct sparse Hermitian eigensolver)
+            Eigen::MatrixXcd dense_H = Eigen::MatrixXcd(sparse_H);
+            
+            eigensolver.compute(dense_H, compute_eigenvectors ? Eigen::ComputeEigenvectors : Eigen::EigenvaluesOnly);
             
             if (eigensolver.info() != Eigen::Success) {
                 std::cerr << "Eigen sparse eigenvalue decomposition failed" << std::endl;
