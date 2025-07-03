@@ -202,7 +202,6 @@ message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA Support: ${WITH_CUDA}")
 message(STATUS "  MPI Support: ${WITH_MPI}")
 
-<<<<<<< HEAD
 # Platform-specific optimizations
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(ED PRIVATE -O3 -march=native -funroll-loops -ffast-math)
@@ -221,36 +220,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
     target_compile_options(ED PRIVATE -O3 -xHost -ipo)
     set_target_properties(ED PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-=======
-# Build configuration summary and performance options
-message(STATUS "")
-message(STATUS "=== Performance Configuration Summary ===")
-message(STATUS "  Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
-message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  Aggressive Optimizations: ${ENABLE_AGGRESSIVE_OPTS}")
-message(STATUS "  Profile-Guided Optimization: ${ENABLE_PROFILE_GUIDED_OPTS}")
-message(STATUS "  Native Architecture: ${ENABLE_NATIVE_ARCH}")
-message(STATUS "  CUDA Support: ${WITH_CUDA}")
-message(STATUS "  MPI Support: ${WITH_MPI}")
-message(STATUS "  OpenMP Support: ${OpenMP_CXX_FOUND}")
-
-# CPU information
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
-    execute_process(COMMAND grep -c "^processor" /proc/cpuinfo OUTPUT_VARIABLE CPU_COUNT OUTPUT_STRIP_TRAILING_WHITESPACE)
-    execute_process(COMMAND grep "model name" /proc/cpuinfo COMMAND head -1 COMMAND sed "s/.*: //" OUTPUT_VARIABLE CPU_MODEL OUTPUT_STRIP_TRAILING_WHITESPACE)
-    message(STATUS "  CPU: ${CPU_MODEL} (${CPU_COUNT} cores)")
-    
-    # Check for specific CPU features
-    execute_process(COMMAND grep -q "avx2" /proc/cpuinfo RESULT_VARIABLE AVX2_RESULT OUTPUT_QUIET ERROR_QUIET)
-    if(AVX2_RESULT EQUAL 0)
-        message(STATUS "  AVX2: Available")
-    endif()
-    
-    execute_process(COMMAND grep -q "fma" /proc/cpuinfo RESULT_VARIABLE FMA_RESULT OUTPUT_QUIET ERROR_QUIET)
-    if(FMA_RESULT EQUAL 0)
-        message(STATUS "  FMA: Available")
-    endif()
->>>>>>> 7cc0fbf6652ae5e272aef0befeee98151a5f959e
 endif()
 
 # Memory information
