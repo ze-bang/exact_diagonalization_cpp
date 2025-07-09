@@ -239,6 +239,25 @@ def main():
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
 
+    # Log the configuration
+    logging.info("Starting NLCE fitting with the following configuration:")
+    logging.info(f"  Experimental data: {args.exp_data}")
+    logging.info(f"  Output directory: {args.output_dir}")
+    logging.info(f"  Working directory: {work_dir}")
+    logging.info(f"  ED executable: {args.ed_executable}")
+    logging.info(f"  Initial guess (Jxx, Jyy, Jzz): ({args.initial_Jxx}, {args.initial_Jyy}, {args.initial_Jzz})")
+    logging.info(f"  Parameter bounds: [{args.bound_min}, {args.bound_max}]")
+    logging.info(f"  NLCE max order: {args.max_order}")
+    logging.info(f"  Magnetic field (h): {args.h}")
+    logging.info(f"  Field direction: {args.field_dir}")
+    logging.info(f"  Temperature range: [{args.temp_min}, {args.temp_max}] with {args.temp_bins} bins")
+    logging.info(f"  Optimization method: {args.method}")
+    logging.info(f"  ED method: {args.ED_method}")
+    logging.info(f"  Max iterations: {args.max_iter}")
+    logging.info(f"  Tolerance: {args.tolerance}")
+    logging.info(f"  Skip cluster generation: {args.skip_cluster_gen}")
+    logging.info(f"  Skip Hamiltonian preparation: {args.skip_ham_prep}")
+    logging.info(f"  Measure spin: {args.measure_spin}")
 
     # Generate clusters once before optimization starts to avoid redundant generation
     if not args.skip_cluster_gen:

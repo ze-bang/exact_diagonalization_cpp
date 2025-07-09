@@ -250,7 +250,7 @@ def main():
             # Run helper_cluster.py
             cmd = [
                 'python3',
-                'util/helper_cluster.py',
+                '/home/zhouzb79/projects/def-ybkim/zhouzb79/exact_diagonalization_cpp/util/helper_cluster.py',
                 str(args.Jxx),
                 str(args.Jyy),
                 str(args.Jzz),
