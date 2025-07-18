@@ -295,7 +295,7 @@ int main(int argc, char* argv[]) {
         run_standard = true; // Default to running standard diagonalization
     }
     
-    if (full_spectrum && !num_eigenvalues_override) {
+    if (full_spectrum) {
         params.num_eigenvalues = (1ULL << params.num_sites);
     }
 

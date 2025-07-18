@@ -947,6 +947,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
         
         // Modify diagonalization parameters for the block
         EDParameters block_params = params;
+        block_params.num_eigenvalues = std::min(params.num_eigenvalues - block_start_dim, block_dim);
+
         if (params.compute_eigenvectors) {
             block_params.output_dir = params.output_dir + "/block_" + std::to_string(block_idx);
             std::string cmd = "mkdir -p " + block_params.output_dir;

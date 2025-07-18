@@ -214,7 +214,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
         i = site_id
         
         # Zeeman term
-        local_field = h * 0.6717 * 4.05625 * np.dot(field_dir, z_local[site_id % 4])
+        local_field = h * 0.6717 * 5.5 * np.dot(field_dir, z_local[site_id % 4])
         transfer.append([2, node_mapping[i], -local_field, 0])
         
         # Exchange interactions
