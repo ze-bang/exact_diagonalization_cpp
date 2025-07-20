@@ -1,22 +1,32 @@
 cmake_minimum_required(VERSION 3.18)
-project(ExactDiagonalization LANGUAGES CXX)
+
+# Options (define before project)
+option(WITH_CUDA "Build with CUDA support" ON)
+option(WITH_MPI "Build with MPI support" ON)
+
+# Set languages based on options
+if(WITH_CUDA)
+    project(ExactDiagonalization LANGUAGES CXX CUDA)
+    enable_language(CUDA)
+else()
+    project(ExactDiagonalization LANGUAGES CXX)
+endif()
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED OFF)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Set CUDA standard if CUDA is enabled
+if(WITH_CUDA)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_ARCHITECTURES "native")
+endif()
+
 # Build type
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
-endif()
-
-# Options
-option(WITH_CUDA "Build with CUDA support" OFF)
-option(WITH_MPI "Build with MPI support" ON)
-
-if (WITH_CUDA)
-    set(CMAKE_CUDA_ARCHITECTURES "native")
 endif()
 
 # Source directories
@@ -32,15 +42,38 @@ option(USE_ONEMKL "Use Intel oneMKL instead of traditional MKL" ON)
 if(WITH_MKL)
     if(USE_ONEMKL)
         # Use oneMKL from oneAPI
-        find_package(MKL CONFIG REQUIRED)
-        message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
-    else()
-        # Use traditional MKL
-        set(MKL_DIR "/usr/include/mkl")
-        message(STATUS "Using traditional Intel MKL from: ${MKL_DIR}")
+        find_package(MKL CONFIG QUIET)
+        if(MKL_FOUND)
+            message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
+        else()
+            message(STATUS "Intel oneMKL not found, falling back to traditional MKL detection")
+            set(USE_ONEMKL OFF)
+        endif()
     endif()
     
-    add_definitions(-DWITH_MKL)
+    if(NOT USE_ONEMKL)
+        # Use traditional MKL - add include directories
+        find_path(MKL_INCLUDE_DIR mkl.h
+            HINTS
+                /usr/include/mkl
+                /opt/intel/mkl/include
+                /opt/intel/oneapi/mkl/latest/include
+                /opt/intel/compilers_and_libraries/linux/mkl/include
+            PATH_SUFFIXES mkl
+        )
+        
+        if(MKL_INCLUDE_DIR)
+            include_directories(SYSTEM ${MKL_INCLUDE_DIR})
+            message(STATUS "Found MKL headers at: ${MKL_INCLUDE_DIR}")
+        else()
+            message(WARNING "MKL headers not found, disabling MKL support")
+            set(WITH_MKL OFF)
+        endif()
+    endif()
+    
+    if(WITH_MKL)
+        add_definitions(-DWITH_MKL)
+    endif()
 endif()
 
 # Print MKL vendor information
@@ -80,6 +113,14 @@ endif()
 find_package(Eigen3 REQUIRED)
 include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
 
+# CUDA setup
+if(WITH_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    add_definitions(-DWITH_CUDA)
+    message(STATUS "CUDA Toolkit found: ${CUDAToolkit_VERSION}")
+    message(STATUS "CUDA Toolkit include directories: ${CUDAToolkit_INCLUDE_DIRS}")
+endif()
+
 # Find ARPACK
 find_library(ARPACK_LIBRARY NAMES arpack arpack-ng)
 if(NOT ARPACK_LIBRARY)
@@ -93,52 +134,32 @@ if(WITH_MPI)
     add_definitions(-DWITH_MPI)
 endif()
 
-# CUDA setup
-if(WITH_CUDA)
-    find_package(CUDA REQUIRED)
-    include_directories(SYSTEM ${CUDA_INCLUDE_DIRS})
-    
-    # CUDA compilation flags
-    set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -std=c++17 -O3")
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        set(CUDA_NVCC_FLAGS "${CUDA_NVCC_FLAGS} -G -g")
-    endif()
-    
-    # Find cuBLAS and cuSOLVER
-    find_library(CUBLAS_LIBRARY cublas)
-    find_library(CUSOLVER_LIBRARY cusolver)
-    
-    if(NOT CUBLAS_LIBRARY OR NOT CUSOLVER_LIBRARY)
-        message(FATAL_ERROR "cuBLAS or cuSOLVER library not found")
-    endif()
-    
-    # Create CUDA wrapper file for lanczos_cuda.h
-    file(WRITE ${CMAKE_BINARY_DIR}/lanczos_cuda_wrapper.cu 
-         "#include \"${SRC_DIR}/lanczos_cuda.h\"\n")
-    
-    # Compile CUDA wrapper
-    cuda_add_library(lanczos_cuda STATIC ${CMAKE_BINARY_DIR}/lanczos_cuda_wrapper.cu)
-    target_link_libraries(lanczos_cuda ${CUBLAS_LIBRARY} ${CUSOLVER_LIBRARY})
-    
-    # Enable CUDA in code
-    add_definitions(-DWITH_CUDA)
-endif()
-
 # Source files
 set(SOURCES
     ${SRC_DIR}/ed_run.cpp
 )
 
+# Add CUDA sources if available and CUDA is enabled
+if(WITH_CUDA)
+    file(GLOB CUDA_SOURCES ${SRC_DIR}/*.cu)
+    if(CUDA_SOURCES)
+        list(APPEND SOURCES ${CUDA_SOURCES})
+        message(STATUS "Found CUDA source files: ${CUDA_SOURCES}")
+    else()
+        message(STATUS "No CUDA source files found in ${SRC_DIR}")
+    endif()
+endif()
+
 # Define executable
 add_executable(ED ${SOURCES})
 
 if(WITH_MKL)
-    if(USE_ONEMKL)
+    if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
         target_link_libraries(ED MKL::MKL)
     else()
-        # Link traditional MKL
-        target_link_libraries(ED ${MKL_LIBRARIES})
+        # Link traditional MKL (already linked via BLAS_LIBRARIES)
+        # No additional linking needed since MKL is detected as BLAS/LAPACK
     endif()
 endif()
 
@@ -150,8 +171,24 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
 )
 
-if (WITH_MKL)
-    target_link_libraries(ED ${MKL_LIBRARIES})
+if(WITH_MKL)
+    if(USE_ONEMKL AND MKL_FOUND)
+        # Link oneMKL using its modern CMake targets
+        target_link_libraries(ED MKL::MKL)
+    else()
+        # Link traditional MKL (already linked via BLAS_LIBRARIES)
+        # No additional linking needed since MKL is detected as BLAS/LAPACK
+    endif()
+endif()
+
+# Add CUDA libraries if enabled
+if(WITH_CUDA)
+    target_link_libraries(ED
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+    )
 endif()
 
 # Add MPI if enabled
@@ -159,24 +196,30 @@ if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
 endif()
 
-# Add CUDA if enabled
-if(WITH_CUDA)
-    target_link_libraries(ED 
-        lanczos_cuda
-        ${CUDA_LIBRARIES}
-        ${CUBLAS_LIBRARY}
-        ${CUSOLVER_LIBRARY}
-    )
-endif()
-
 # Install targets
 install(TARGETS ED DESTINATION bin)
+
+# Optional: Build CUDA test executable if CUDA is enabled
+if(WITH_CUDA)
+    add_executable(test_cuda_basic test_cuda_basic.cu)
+    target_link_libraries(test_cuda_basic CUDA::cudart)
+    set_target_properties(test_cuda_basic PROPERTIES CUDA_STANDARD 17)
+    message(STATUS "Building CUDA test executable: test_cuda_basic")
+endif()
 
 # Print configuration summary
 message(STATUS "Configuration Summary:")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  CUDA Support: ${WITH_CUDA}")
+if(WITH_CUDA)
+    message(STATUS "  CUDA Support: YES")
+    message(STATUS "  CUDA Version: ${CUDAToolkit_VERSION}")
+    if(CMAKE_CUDA_ARCHITECTURES)
+        message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    endif()
+else()
+    message(STATUS "  CUDA Support: NO")
+endif()
 message(STATUS "  MPI Support: ${WITH_MPI}")
 
 # Platform-specific optimizations
@@ -187,6 +230,16 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
     target_compile_options(ED PRIVATE -O3 -xHost)
+endif()
+
+# CUDA-specific compile options
+if(WITH_CUDA)
+    set_property(TARGET ED PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(ED PRIVATE 
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
 endif()
 
 # Add OpenMP support if available

@@ -1,18 +1,17 @@
-
 #ifndef ED_WRAPPER_H
 #define ED_WRAPPER_H
 
 #include "TPQ.h"
 #include "CG.h"
+#include "arpack.h"
 #include "lanczos.h"
 #include "construct_ham.h"
 #include "observables.h"
 #include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
 
-#ifdef ENABLE_CUDA
-#include "lanczos_cuda.h"
-#endif
+#include "TPQ_cuda.cuh"
+#include "lanczos_cuda.cuh"
 
 std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
@@ -82,10 +81,12 @@ enum class DiagonalizationMethod {
     cTPQ,
     OSS,                   
     ARPACK,                // ARPACK
-    LANCZOS_CUDA,
-    LANCZOS_CUDA_SELECTIVE,
-    LANCZOS_CUDA_NO_ORTHO,
-    FULL_CUDA,
+    ARPACK_SHIFT_INVERT,   // ARPACK Shift-Invert
+    ARPACK_SPECTRUM_SLICE, // ARPACK Spectrum Slicing
+    ARPACK_LOWEST,         // ARPACK Lowest Eigenvalues
+    ARPACK_HIGHEST,        // ARPACK Highest Eigenvalues
+    ARPACK_NEAR_VALUE,     // ARPACK Eigenvalues Near Target
+    mTPQ_CUDA,             // CUDA microcanonical Thermal Pure Quantum states
     FTLM,                  // Finite Temperature Lanczos Method
     LTLM                   // Low Temperature Lanczos Method
 };
@@ -426,7 +427,98 @@ EDResults exact_diagonalization_core(
                         params.omega_min, params.omega_max,
                         params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); // n_max order for Taylor expansion
             break;
-        
+
+        case DiagonalizationMethod::mTPQ_CUDA:
+            std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
+            
+            // Search for observable files and load them as operators
+            if (params.calc_observables) {
+                std::string base_dir;
+                if (!params.output_dir.empty()) {
+                    size_t pos = params.output_dir.find_last_of("/\\");
+                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+                } else {
+                    base_dir = ".";
+                }
+                
+                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+                
+                // Create a temporary file to store the list of observable files
+                std::string temp_list_file = params.output_dir + "/observable_files.txt";
+                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
+                
+                // Read the list of observable files
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string observable_file;
+                    int loaded_count = 0;
+                    
+                    while (std::getline(file_list, observable_file)) {
+                        if (observable_file.empty()) continue;
+                        
+                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+                        
+                        try {
+                            Operator obs_op(params.num_sites, params.spin_length);
+                            
+                            // Extract observable name from the filename
+                            std::string obs_name = "observable";
+                            size_t name_pos = observable_file.find("observables_");
+                            if (name_pos != std::string::npos) {
+                                size_t start = name_pos + 12; // Length of "observables_"
+                                size_t end = observable_file.find(".dat", start);
+                                if (end != std::string::npos) {
+                                    obs_name = observable_file.substr(start, end - start);
+                                }
+                            } else {
+                                // Get the filename without path
+                                size_t last_slash = observable_file.find_last_of("/\\");
+                                if (last_slash != std::string::npos) {
+                                    obs_name = observable_file.substr(last_slash + 11);
+                                    // Remove .dat extension if present
+                                    size_t dot_pos = obs_name.find(".dat");
+                                    if (dot_pos != std::string::npos) {
+                                        obs_name = obs_name.substr(0, dot_pos);
+                                    }
+                                }
+                            }
+                            
+                            // Determine file type and load accordingly
+                            if (observable_file.find("InterAll") != std::string::npos) {
+                                obs_op.loadFromInterAllFile(observable_file);
+                            } else {
+                                obs_op.loadFromFile(observable_file);
+                            }
+                            
+                            params.observables.push_back(obs_op);
+                            params.observable_names.push_back(obs_name);
+                            loaded_count++;
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+                        }
+                    }
+                    
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
+                    
+                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+                }
+            }
+
+            microcanonical_tpq_cuda_wrapper(H, hilbert_space_dim,
+                             params.max_iterations, params.num_samples,
+                             params.num_measure_freq,
+                             results.eigenvalues,
+                             params.output_dir,
+                             params.compute_eigenvectors,
+                             params.large_value,
+                             params.calc_observables, params.observables, params.observable_names,
+                            params.omega_min, params.omega_max,
+                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
+            break;
+
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;
             block_lanczos(H, hilbert_space_dim, 
@@ -434,7 +526,61 @@ EDResults exact_diagonalization_core(
                         params.tolerance, results.eigenvalues, 
                         params.output_dir, params.compute_eigenvectors);
             break;
-        
+            
+        case DiagonalizationMethod::ARPACK:
+            std::cout << "Using ARPACK method" << std::endl;
+            if (params.shift != 0.0) {
+                // Use shift-invert mode for eigenvalues near the shift
+                arpack_shift_invert(H, hilbert_space_dim, params.num_eigenvalues,
+                                   params.shift, params.tolerance, results.eigenvalues,
+                                   params.output_dir, params.compute_eigenvectors);
+            } else {
+                // Use standard mode for smallest algebraic eigenvalues
+                arpack_standard(H, hilbert_space_dim, params.num_eigenvalues, "SA", 
+                               params.tolerance, results.eigenvalues, params.output_dir, 
+                               params.compute_eigenvectors);
+            }
+            break;
+            
+        case DiagonalizationMethod::ARPACK_SHIFT_INVERT:
+            std::cout << "Using ARPACK Shift-Invert method with shift = " << params.shift << std::endl;
+            arpack_shift_invert(H, hilbert_space_dim, params.num_eigenvalues,
+                               params.shift, params.tolerance, results.eigenvalues,
+                               params.output_dir, params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::ARPACK_SPECTRUM_SLICE:
+            {
+                std::cout << "Using ARPACK Spectrum Slicing method" << std::endl;
+                double lower_bound = params.shift - 1.0;  // Use shift as center
+                double upper_bound = params.shift + 1.0;
+                arpack_spectrum_slicing(H, hilbert_space_dim, lower_bound, upper_bound,
+                                       params.tolerance, results.eigenvalues,
+                                       params.output_dir, params.compute_eigenvectors);
+            }
+            break;
+            
+        case DiagonalizationMethod::ARPACK_LOWEST:
+            std::cout << "Using ARPACK for lowest eigenvalues" << std::endl;
+            arpack_lowest_eigenvalues(H, hilbert_space_dim, params.num_eigenvalues,
+                                     params.tolerance, results.eigenvalues,
+                                     params.output_dir, params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::ARPACK_HIGHEST:
+            std::cout << "Using ARPACK for highest eigenvalues" << std::endl;
+            arpack_highest_eigenvalues(H, hilbert_space_dim, params.num_eigenvalues,
+                                      params.tolerance, results.eigenvalues,
+                                      params.output_dir, params.compute_eigenvectors);
+            break;
+            
+        case DiagonalizationMethod::ARPACK_NEAR_VALUE:
+            std::cout << "Using ARPACK for eigenvalues near " << params.shift << std::endl;
+            arpack_eigenvalues_near(H, hilbert_space_dim, params.num_eigenvalues,
+                                   params.shift, params.tolerance, results.eigenvalues,
+                                   params.output_dir, params.compute_eigenvectors);
+            break;
+
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;
             break;
@@ -724,70 +870,6 @@ EDResults exact_diagonalization_from_directory(
     EDResults results = exact_diagonalization_from_files(
         interaction_file, single_site_file, method, params, format
     );
-
-    // Check if we need to convert binary eigenvectors to sparse text format
-    if (params.compute_eigenvectors && !params.output_dir.empty()) {
-        std::string eigenvectors_dir = params.output_dir + "/eigenvectors";
-        std::string sparse_dir = params.output_dir + "/eigenvectors";
-        
-        // Create directory for sparse format eigenvectors
-        std::string cmd = "mkdir -p " + sparse_dir;
-        system(cmd.c_str());
-        
-        std::cout << "Converting binary eigenvectors to sparse text format..." << std::endl;
-        
-        // Find all eigenvector binary files
-        for (size_t i = 0; i < results.eigenvalues.size(); i++) {
-            std::string binary_file = eigenvectors_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::string sparse_file = sparse_dir + "/eigenvector_" + std::to_string(i) + ".txt";
-            
-            // Check if binary file exists
-            std::ifstream bin_file(binary_file, std::ios::binary);
-            if (!bin_file.is_open()) {
-                std::cerr << "Warning: Could not open binary eigenvector file: " << binary_file << std::endl;
-                continue;
-            }
-            
-            // Get file size to determine vector dimension
-            bin_file.seekg(0, std::ios::end);
-            std::streamsize file_size = bin_file.tellg();
-            int vector_dim = file_size / sizeof(Complex);
-            bin_file.seekg(0, std::ios::beg);
-            
-            // Read binary data
-            std::vector<Complex> eigenvector(vector_dim);
-            bin_file.read(reinterpret_cast<char*>(&eigenvector[0]), file_size);
-            bin_file.close();
-            
-            // Write sparse text format
-            std::ofstream sparse_out(sparse_file);
-            if (!sparse_out.is_open()) {
-                std::cerr << "Error: Could not create sparse eigenvector file: " << sparse_file << std::endl;
-                continue;
-            }
-            
-            sparse_out << vector_dim << std::endl;
-            
-            // Write only non-zero entries
-            for (int j = 0; j < vector_dim; j++) {
-                if (std::abs(eigenvector[j]) > 1e-10) {
-                    sparse_out << j << " " << std::scientific << std::setprecision(15) 
-                              << eigenvector[j].real() << " " << eigenvector[j].imag() << std::endl;
-                }
-            }
-            sparse_out.close();
-            std::cout << "Converted eigenvector " << i << " to sparse format" << std::endl;
-            // Delete binary file after successful conversion to save space
-            if (std::remove(binary_file.c_str()) == 0) {
-                std::cout << "Deleted binary file: " << binary_file << std::endl;
-            } else {
-                std::cerr << "Warning: Failed to delete binary file: " << binary_file << std::endl;
-            }
-        }
-        std::cout << "Conversion complete. Sparse format eigenvectors saved in: " << sparse_dir << std::endl;
-    }
-
-
     return results;
 }
 

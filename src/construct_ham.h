@@ -980,6 +980,25 @@ public:
         return resultVec;
     }
 
+    // Apply the operator to a raw pointer using Eigen sparse matrix operations
+    void apply(const Complex* in, Complex* out, size_t size) const {
+        int dim = 1 << n_bits_;
+        
+        if (size != static_cast<size_t>(dim)) {
+            throw std::invalid_argument("Input/output vector size does not match operator dimension");
+        }
+        
+        // Build the sparse matrix if not already built
+        buildSparseMatrix();
+        
+        // Map the raw pointers to Eigen vectors to avoid copying
+        Eigen::Map<const Eigen::VectorXcd> eigenIn(in, dim);
+        Eigen::Map<Eigen::VectorXcd> eigenOut(out, dim);
+        
+        // Perform sparse matrix-vector multiplication
+        eigenOut = sparseMatrix_ * eigenIn;
+    }
+
     // Print the operator as a matrix
     Matrix returnSymmetrizedMatrix(const std::string& dir){
         int dim = 1 << n_bits_;
@@ -1779,6 +1798,11 @@ public:
         
         sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
+    }
+
+    Eigen::SparseMatrix<Complex> getSparseMatrix() const {
+        buildSparseMatrix();
+        return sparseMatrix_;
     }
 
 private:

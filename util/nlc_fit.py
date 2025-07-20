@@ -58,18 +58,19 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
             'python3', 
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
             '--max_order', str(fixed_params["max_order"]),
-            '--Jxx', str(Jxx),
-            '--Jyy', str(Jyy),
-            '--Jzz', str(Jzz),
-            '--h', str(h_value),
+            '--Jxx', f'{Jxx:.12f}',
+            '--Jyy', f'{Jyy:.12f}',
+            '--Jzz', f'{Jzz:.12f}',
+            '--h', f'{h_value:.12f}',
             '--ed_executable', str(fixed_params["ED_path"]),
-            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
+            '--field_dir', f'{fixed_params["field_dir"][0]:.12f}', f'{fixed_params["field_dir"][1]:.12f}', f'{fixed_params["field_dir"][2]:.12f}',
             '--base_dir', work_dir,
-            '--temp_min', str(fixed_params["temp_min"]),
-            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_min', f'{fixed_params["temp_min"]:.8f}',
+            '--temp_max', f'{fixed_params["temp_max"]:.8f}',
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
-            '--SI_units'
+            '--SI_units',
+            '--symmetrized'
         ]
     elif fixed_params["ED_method"] == 'mTPQ':
         cmd = [

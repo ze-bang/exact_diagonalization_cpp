@@ -214,7 +214,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
         i = site_id
         
         # Zeeman term
-        local_field = h * 0.6717 * 5.5 * np.dot(field_dir, z_local[site_id % 4])
+        local_field = h * 5.5 * np.dot(field_dir, z_local[site_id % 4])
         transfer.append([2, node_mapping[i], -local_field, 0])
         
         # Exchange interactions
@@ -227,8 +227,8 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
                 interALL.append([0, node_mapping[i], 1, node_mapping[j], -Jpm, 0])   # S+-S-
                 interALL.append([1, node_mapping[i], 0, node_mapping[j], -Jpm, 0])   # S--S+
                 Jpmpm_ = Jpmpm * non_kramer_factor[i % 4, j % 4]
-                interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S--S-
-                interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S+-S+
+                interALL.append([0, node_mapping[i], 0, node_mapping[j], np.real(Jpmpm_), -np.imag(Jpmpm_)])  # S--S-
+                interALL.append([1, node_mapping[i], 1, node_mapping[j], np.real(Jpmpm_), np.imag(Jpmpm_)])  # S+-S+
     
     # Convert to arrays
     interALL = np.array(interALL)

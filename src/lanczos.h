@@ -254,7 +254,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
     ComplexVector vec(N);
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ifstream infile(filename, std::ios::binary);
+    std::ifstream infile(filename);
     if (!infile) {
         std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
         return vec;
@@ -266,7 +266,7 @@ ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
 // Helper function to write a basis vector to file
 bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ofstream outfile(filename, std::ios::binary);
+    std::ofstream outfile(filename);
     if (!outfile) {
         std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
         return false;
@@ -288,128 +288,130 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     std::vector<double> diag = alpha;    // Copy of diagonal elements
     std::vector<double> offdiag(m-1);    // Off-diagonal elements
     
-    #pragma omp parallel for
     for (int i = 0; i < m-1; i++) {
         offdiag[i] = beta[i+1];
     }
     
-    // Workspace parameters
-    char jobz = eigenvectors ? 'V' : 'N';  // Compute eigenvectors?
     int info;
     
     if (eigenvectors) {
-        // Need space for eigenvectors but m might be too large for full allocation
-        // Instead of computing all eigenvectors at once, compute them in batches
-        const int batch_size = 1000; // Adjust based on available memory
-        int num_batches = (n_eigenvalues + batch_size - 1) / batch_size; // Ceiling division
+        // Use dstevd for all eigenvectors at once - simpler and more reliable
+        std::vector<double> evecs(m * m);
         
-        // First compute all eigenvalues without eigenvectors
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
+        std::cout << "Computing eigenvalues and eigenvectors for tridiagonal matrix of size " << m << std::endl;
+        
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', m, diag.data(), offdiag.data(), evecs.data(), m);
         
         if (info != 0) {
-            std::cerr << "LAPACKE_dstevd failed with error code " << info 
-                  << " when computing eigenvalues" << std::endl;
+            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
             return info;
         }
         
-        // Then compute eigenvectors in batches using dstevr which allows range selection
-        for (int batch = 0; batch < num_batches; batch++) {
-            int start_idx = batch * batch_size;
-            int end_idx = std::min(start_idx + batch_size, n_eigenvalues) - 1;
-            int batch_n = end_idx - start_idx + 1;
+        std::cout << "Eigendecomposition successful, transforming eigenvectors..." << std::endl;
+        
+        // Transform and save eigenvectors with improved accuracy
+        #pragma omp parallel for
+        for (int i = 0; i < n_eigenvalues; i++) {
+            if (i % 10 == 0) {
+                std::cout << "Transforming eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
+            }
             
-            std::cout << "Computing eigenvectors batch " << batch + 1 << "/" << num_batches 
-                  << " (indices " << start_idx << " to " << end_idx << ")" << std::endl;
+            ComplexVector full_vector(N, Complex(0.0, 0.0));
             
-            // Allocate memory just for this batch
-            std::vector<double> batch_evals(batch_n);
-            std::vector<double> batch_evecs(m * batch_n);
-            std::vector<long long int> isuppz(2 * batch_n);
+            // Transform from Lanczos basis to original basis
+            // Use compensated summation for better accuracy
+            ComplexVector compensation(N, Complex(0.0, 0.0));
             
-            // Make a copy of the tridiagonal matrix data for dstevr
-            std::vector<double> diag_copy = diag;
-            std::vector<double> offdiag_copy(offdiag);
+            for (int j = 0; j < m; j++) {
+                ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
+                double coef = evecs[j + i * m];  // Column i of eigenvector matrix
+                
+                // Kahan summation for improved accuracy
+                for (int k = 0; k < N; k++) {
+                    Complex y = basis_j[k] * coef - compensation[k];
+                    Complex t = full_vector[k] + y;
+                    compensation[k] = (t - full_vector[k]) - y;
+                    full_vector[k] = t;
+                }
+            }
             
-            long long int m_found;
-            // Compute eigenvectors for this batch using index range
-            info = LAPACKE_dstevr(LAPACK_COL_MAJOR, 'V', 'I', m, 
-                     diag_copy.data(), offdiag_copy.data(), 
-                     0.0, 0.0, // vl, vu not used with 'I' range option
-                     start_idx + 1, end_idx + 1, // FORTRAN 1-indexing
-                     1e-6, // abstol
-                     &m_found,
-                     batch_evals.data(), batch_evecs.data(), m, 
-                     isuppz.data());
-            
-            if (info != 0 || m_found != batch_n) {
-                std::cerr << "LAPACKE_dstevr failed with error code " << info 
-                      << " when computing eigenvectors for batch " << batch + 1 
-                      << ". Found " << m_found << " of " << batch_n << " eigenvectors." << std::endl;
+            // Normalize with high precision
+            double norm = cblas_dznrm2(N, full_vector.data(), 1);
+            if (norm < 1e-14) {
+                std::cerr << "Warning: Eigenvector " << i << " has very small norm: " << norm << std::endl;
                 continue;
             }
-
-            std::cout << "  Found " << m_found << " eigenvectors in this batch." << std::endl;
             
-            // Transform and save each eigenvector in this batch
-            for (int i = 0; i < batch_n; i++) {
-                int global_idx = start_idx + i;
-                
-                // Initialize full vector
-                std::cout << "  Transforming eigenvector " << global_idx + 1 << std::endl;
-                ComplexVector full_vector(N, Complex(0.0, 0.0));
-                
-                // Read basis vectors in batches to reduce disk I/O
-                const int basis_batch_size = 100;
-                for (int batch_start = 0; batch_start < m; batch_start += basis_batch_size) {
-                    int batch_end = std::min(batch_start + basis_batch_size, m);
+            Complex scale = Complex(1.0/norm, 0.0);
+            cblas_zscal(N, &scale, full_vector.data(), 1);
+            
+            // Verify orthogonality and refine if needed
+            if (i > 0 && i < 10) {  // Check first few eigenvectors
+                // Read previous eigenvector for orthogonality check
+                std::string prev_file = evec_dir + "/eigenvector_" + std::to_string(i-1) + ".dat";
+                std::ifstream prev_infile(prev_file, std::ios::binary);
+                if (prev_infile) {
+                    ComplexVector prev_vec(N);
+                    prev_infile.read(reinterpret_cast<char*>(prev_vec.data()), N * sizeof(Complex));
+                    prev_infile.close();
                     
-                    // Read this batch of basis vectors
-                    std::vector<ComplexVector> basis_batch;
-                    basis_batch.reserve(batch_end - batch_start);
-                    for (int j = batch_start; j < batch_end; j++) {
-                        basis_batch.push_back(read_basis_vector(temp_dir, j, N));
-                    }
+                    Complex overlap;
+                    cblas_zdotc_sub(N, prev_vec.data(), 1, full_vector.data(), 1, &overlap);
                     
-                    // Compute contribution from this batch
-                    for (int j = 0; j < batch_end - batch_start; j++) {
-                        int j_global = batch_start + j;
-                        Complex coef(batch_evecs[j_global*batch_n + i], 0.0);
-                        cblas_zaxpy(N, &coef, basis_batch[j].data(), 1, full_vector.data(), 1);
+                    if (std::abs(overlap) > 1e-10) {
+                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i 
+                                  << " have overlap " << std::abs(overlap) << std::endl;
+                        
+                        // Orthogonalize
+                        Complex neg_overlap = -overlap;
+                        cblas_zaxpy(N, &neg_overlap, prev_vec.data(), 1, full_vector.data(), 1);
+                        
+                        // Re-normalize
+                        norm = cblas_dznrm2(N, full_vector.data(), 1);
+                        scale = Complex(1.0/norm, 0.0);
+                        cblas_zscal(N, &scale, full_vector.data(), 1);
                     }
-                }
-                
-                std::cout << "  Normalizing eigenvector " << global_idx + 1 << std::endl;
-                // Normalize
-                double norm = cblas_dznrm2(N, full_vector.data(), 1);
-                if (norm > 1e-12) {
-                    Complex scale = Complex(1.0/norm, 0.0);
-                    cblas_zscal(N, &scale, full_vector.data(), 1);
-                }
-                
-                // Save to file
-                std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(global_idx) + ".dat";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
-                if (!evec_outfile) {
-                    std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
-                    continue;
-                }
-                evec_outfile.write(reinterpret_cast<char*>(full_vector.data()), N * sizeof(Complex));
-                evec_outfile.close();
-                
-                // Print progress occasionally
-                if (global_idx % 10 == 0 || global_idx == n_eigenvalues - 1) {
-                    std::cout << "  Saved eigenvector " << global_idx + 1 << " of " << n_eigenvalues << std::endl;
                 }
             }
             
-            // Clear memory by reassigning vectors to empty ones
-            std::vector<double>().swap(batch_evals);
-            std::vector<double>().swap(batch_evecs);
-            std::vector<long long int>().swap(isuppz);
+            
+            // Save to file in binary format for accuracy
+            std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            if (!evec_outfile) {
+                std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
+                continue;
+            }
+            
+            // Write in binary format for full precision
+            evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
+            evec_outfile.close();
+            
+            // Also save in text format for debugging
+            std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
+            std::ofstream evec_text_outfile(evec_text_file);
+            if (evec_text_outfile) {
+                evec_text_outfile << std::scientific << std::setprecision(15);
+                for (int j = 0; j < N; j++) {
+                    evec_text_outfile << std::real(full_vector[j]) << " " 
+                                     << std::imag(full_vector[j]) << std::endl;
+                }
+                evec_text_outfile.close();
+            }
+            
+            if (i % 10 == 0 || i == n_eigenvalues - 1) {
+                std::cout << "  Saved eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
+            }
         }
+    
     } else {
         // Just compute eigenvalues
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, jobz, m, diag.data(), offdiag.data(), nullptr, m);
+        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
+        
+        if (info != 0) {
+            std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+            return info;
+        }
     }
     
     // Copy eigenvalues
@@ -424,11 +426,23 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
     } else {
         // Write the number of eigenvalues first
         size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
+        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
         // Write all eigenvalues
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
+        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_eigenvalues * sizeof(double));
         eval_outfile.close();
         std::cout << "Saved " << n_eigenvalues << " eigenvalues to " << eigenvalue_file << std::endl;
+    }
+    
+    // Also save eigenvalues in text format for verification
+    std::string eigenvalue_text_file = evec_dir + "/eigenvalues.txt";
+    std::ofstream eval_text_outfile(eigenvalue_text_file);
+    if (eval_text_outfile) {
+        eval_text_outfile << std::scientific << std::setprecision(15);
+        eval_text_outfile << eigenvalues.size() << std::endl;
+        for (size_t i = 0; i < eigenvalues.size(); i++) {
+            eval_text_outfile << eigenvalues[i] << std::endl;
+        }
+        eval_text_outfile.close();
     }
     
     return info;
@@ -1175,7 +1189,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             
             // Save eigenvector
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(evec_file, std::ios::binary);
+            std::ofstream outfile(evec_file);
             if (outfile) {
                 outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                 outfile.close();
@@ -1184,7 +1198,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
         
         // Save eigenvalues
         std::string eval_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        std::ofstream eval_outfile(eval_file);
         if (eval_outfile) {
             size_t n_evals = eigenvalues.size();
             eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -1587,14 +1601,14 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
             
             // Save eigenvector
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(idx) + ".dat";
-            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            std::ofstream evec_outfile(evec_file);
             evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
             evec_outfile.close();
         }
         
         // Save eigenvalues
         std::string eval_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eval_file, std::ios::binary);
+        std::ofstream eval_outfile(eval_file);
         size_t n_evals = eigenvalues.size();
         eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
         eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
@@ -1979,7 +1993,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Save eigenvector
             std::string evec_file = result_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            std::ofstream evec_outfile(evec_file);
             evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
             evec_outfile.close();
         }
@@ -1987,7 +2001,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     // Save eigenvalues
     std::string eval_file = result_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file, std::ios::binary);
+    std::ofstream eval_outfile(eval_file);
     if (eval_outfile) {
         size_t n_evals = eigenvalues.size();
         eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -2039,7 +2053,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
         // Construct full matrix from operator function with progress reporting
         const int chunk_size = std::max(1, N / 100);  // Report progress every 1%
         
-        #pragma omp parallel for schedule(dynamic, chunk_size) shared(dense_matrix, H, N)
+        #pragma omp parallel for schedule(dynamic, chunk_size)
         for (int j = 0; j < N; j++) {
             // Create unit vector e_j (thread-local)
             std::vector<Complex> unit_vec(N, Complex(0.0, 0.0));
@@ -2051,27 +2065,27 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Store column in dense matrix (use column-major order for LAPACK)
             for (int i = 0; i < N; i++) {
-            dense_matrix[static_cast<size_t>(j)*N + i] = col_j[i];
+                dense_matrix[static_cast<size_t>(j)*N + i] = col_j[i];
             }
             
             // Progress reporting with ASCII progress bar
-            #pragma omp critical
-            {
             if (j % chunk_size == 0 || j == N-1) {
-                double percentage = 100.0 * j / N;
-                int barWidth = 50;
-                int pos = barWidth * j / N;
-                
-                std::cout << "\rProgress: [";
-                for (int i = 0; i < barWidth; ++i) {
-                if (i < pos) std::cout << "=";
-                else if (i == pos) std::cout << ">";
-                else std::cout << " ";
+                #pragma omp critical
+                {
+                    double percentage = 100.0 * j / N;
+                    int barWidth = 50;
+                    int pos = barWidth * j / N;
+                    
+                    std::cout << "\rProgress: [";
+                    for (int k = 0; k < barWidth; ++k) {
+                        if (k < pos) std::cout << "=";
+                        else if (k == pos) std::cout << ">";
+                        else std::cout << " ";
+                    }
+                    std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
+                    
+                    if (j == N-1) std::cout << std::endl;
                 }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                
-                if (j == N-1) std::cout << std::endl;
-            }
             }
         }
         std::cout << "Dense matrix constructed" << std::endl;
@@ -2087,6 +2101,9 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'V', 'U', N,
                                 reinterpret_cast<lapack_complex_double*>(dense_matrix.data()),
                                 N, evals.data());
+                                
+            // Copy eigenvectors from dense_matrix to evecs
+            std::copy(dense_matrix.begin(), dense_matrix.end(), evecs.begin());
         } else {
             // Only compute eigenvalues
             info = LAPACKE_zheev(LAPACK_COL_MAJOR, 'N', 'U', N,
@@ -2115,25 +2132,23 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             for (int i = 0; i < actual_num_eigs; i++) {
                 std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                std::ofstream evec_outfile(evec_file);
                 if (!evec_outfile) {
                     std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
                     continue;
                 }
                 
-                // Extract column i (eigenvector) from evecs matrix
-                std::vector<Complex> eigenvector(N);
                 for (int j = 0; j < N; j++) {
-                    eigenvector[j] = evecs[i*N + j];
+                    evec_outfile << std::real(evecs[i * N + j]) << " "
+                                 << std::imag(evecs[i * N + j]) << "\n";
                 }
                 
-                evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                 evec_outfile.close();
             }
             
             // Save eigenvalues to file
             std::string eval_file = dir + "/eigenvalues.dat";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::ofstream eval_outfile(eval_file);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -2246,7 +2261,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 #pragma omp parallel for schedule(dynamic)
                 for (int i = 0; i < actual_num_eigs; i++) {
                     std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file, std::ios::binary);
+                    std::ofstream evec_outfile(evec_file);
                     
                     if (!evec_outfile) {
                         #pragma omp critical
@@ -2268,7 +2283,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 
                 // Save eigenvalues to file
                 std::string eval_file = dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file, std::ios::binary);
+                std::ofstream eval_outfile(eval_file);
                 if (eval_outfile) {
                     size_t n_evals = eigenvalues.size();
                     eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
@@ -2481,14 +2496,14 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     
                     // Save eigenvector
                     std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file, std::ios::binary);
+                    std::ofstream evec_outfile(evec_file);
                     evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                     evec_outfile.close();
                 }
                 
                 // Save eigenvalues
                 std::string eval_file = evec_dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file, std::ios::binary);
+                std::ofstream eval_outfile(eval_file);
                 size_t n_evals = eigenvalues.size();
                 eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
                 eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), k * sizeof(double));
@@ -2874,14 +2889,14 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 
                 // Save eigenvector
                 std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                std::ofstream evec_outfile(evec_file);
                 evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
                 evec_outfile.close();
             }
             
             // Save eigenvalues
             std::string eval_file = evec_dir + "/eigenvalues.dat";
-            std::ofstream eval_outfile(eval_file, std::ios::binary);
+            std::ofstream eval_outfile(eval_file);
             size_t n_evals = eigenvalues.size();
             eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
             eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
@@ -3228,7 +3243,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     for (int j = 0; j < multiplicity; j++) {
                         std::string evec_file = slice_dir + "/eigenvectors/eigenvector_" + 
                                               std::to_string(i + j) + ".dat";
-                        std::ifstream infile(evec_file, std::ios::binary);
+                        std::ifstream infile(evec_file);
                         if (infile) {
                             ComplexVector vec(N);
                             infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
@@ -3243,7 +3258,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     for (int j = 0; j < multiplicity; j++) {
                         std::string evec_file = slice_dir + "/eigenvectors/eigenvector_" + 
                                               std::to_string(i + j) + ".dat";
-                        std::ofstream outfile(evec_file, std::ios::binary);
+                        std::ofstream outfile(evec_file);
                         outfile.write(reinterpret_cast<char*>(degenerate_vectors[j].data()), 
                                     N * sizeof(Complex));
                     }
@@ -3318,7 +3333,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             size_t orig_idx = sort_indices[i];
             
             // Read original eigenvector
-            std::ifstream infile(eigenvector_info[orig_idx].second, std::ios::binary);
+            std::ifstream infile(eigenvector_info[orig_idx].second);
             if (!infile) continue;
             
             ComplexVector vec(N);
@@ -3327,7 +3342,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             
             // Save to final location
             std::string final_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(final_evec_file, std::ios::binary);
+            std::ofstream outfile(final_evec_file);
             outfile.write(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
         }
         
@@ -3340,7 +3355,7 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     
     // Save eigenvalues
     std::string eval_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file, std::ios::binary);
+    std::ofstream eval_outfile(eval_file);
     if (eval_outfile) {
         size_t n_evals = eigenvalues.size();
         eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
