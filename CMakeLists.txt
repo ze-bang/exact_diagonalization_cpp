@@ -29,20 +29,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-<<<<<<< HEAD
-# Options
-option(WITH_CUDA "Build with CUDA support" OFF)
-option(WITH_MPI "Build with MPI support" ON)
-option(ENABLE_AGGRESSIVE_OPTS "Enable aggressive optimizations (may reduce numerical stability)" OFF)
-option(ENABLE_PROFILE_GUIDED_OPTS "Enable profile-guided optimization" OFF)
-option(ENABLE_NATIVE_ARCH "Use -march=native (disable for portable builds)" ON)
-
-if (WITH_CUDA)
-    set(CMAKE_CUDA_ARCHITECTURES "native")
-endif()
-
-=======
->>>>>>> b3e0d021fb259023a59c109c11597d5dec96a6d4
 # Source directories
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(${SRC_DIR})
@@ -185,8 +171,6 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
 )
 
-<<<<<<< HEAD
-=======
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
@@ -207,50 +191,11 @@ if(WITH_CUDA)
     )
 endif()
 
->>>>>>> b3e0d021fb259023a59c109c11597d5dec96a6d4
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
             endif()
 
-<<<<<<< HEAD
-# Add CUDA if enabled
-if(WITH_CUDA)
-    target_link_libraries(ED 
-        lanczos_cuda
-        ${CUDA_LIBRARIES}
-        ${CUBLAS_LIBRARY}
-        ${CUSOLVER_LIBRARY}
-    )
-endif()
-
-# Suppress warnings that might be triggered by aggressive optimizations
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-    target_compile_options(ED PRIVATE
-        -Wno-maybe-uninitialized      # May trigger false positives with -O3
-        -Wno-aggressive-loop-optimizations # Suppress aggressive loop optimization warnings
-    )
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-    target_compile_options(ED PRIVATE
-        -Wno-pass-failed              # Suppress optimization pass failure warnings
-    )
-endif()
-
-# Fortran interface flags for BLAS/LAPACK compatibility
-if(CMAKE_Fortran_COMPILER)
-    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -O3 -march=native")
-endif()
-
-# Install targets
-install(TARGETS ED DESTINATION bin)
-
-# Runtime performance optimization hints
-configure_file(
-    "${CMAKE_SOURCE_DIR}/cmake/performance_config.h.in"
-    "${CMAKE_BINARY_DIR}/performance_config.h"
-)
-target_include_directories(ED PRIVATE ${CMAKE_BINARY_DIR})
-=======
 # Install targets
 install(TARGETS ED DESTINATION bin)
 
@@ -261,7 +206,6 @@ if(WITH_CUDA)
     set_target_properties(test_cuda_basic PROPERTIES CUDA_STANDARD 17)
     message(STATUS "Building CUDA test executable: test_cuda_basic")
 endif()
->>>>>>> b3e0d021fb259023a59c109c11597d5dec96a6d4
 
 # Print configuration summary
 message(STATUS "Configuration Summary:")
@@ -308,52 +252,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     endif()
 endif()
 
-<<<<<<< HEAD
-# Memory information
-if(UNIX AND NOT APPLE)
-    execute_process(COMMAND grep "MemTotal" /proc/meminfo COMMAND awk "{print $2}" OUTPUT_VARIABLE MEM_KB OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(MEM_KB)
-        math(EXPR MEM_GB "${MEM_KB} / 1024 / 1024")
-        message(STATUS "  System Memory: ${MEM_GB} GB")
-    endif()
-endif()
-
-# Performance recommendations
-message(STATUS "")
-message(STATUS "=== Performance Recommendations ===")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(STATUS "  WARNING: Debug build detected. Use Release for production runs.")
-endif()
-
-if(NOT WITH_MKL)
-    message(STATUS "  TIP: Enable Intel MKL for optimal BLAS/LAPACK performance")
-    message(STATUS "       Use: -DWITH_MKL=ON")
-endif()
-
-if(NOT OpenMP_CXX_FOUND)
-    message(STATUS "  TIP: Install OpenMP for parallel computation support")
-endif()
-
-if(NOT WITH_CUDA)
-    message(STATUS "  TIP: Enable CUDA for GPU acceleration")
-    message(STATUS "       Use: -DWITH_CUDA=ON")
-endif()
-
-if(NOT ENABLE_AGGRESSIVE_OPTS)
-    message(STATUS "  TIP: For maximum performance (with potential numerical risks):")
-    message(STATUS "       Use: -DENABLE_AGGRESSIVE_OPTS=ON")
-endif()
-
-message(STATUS "===============================================")
-message(STATUS "")
-
-# Optional: Add compile-time feature detection
-try_compile(HAVE_BUILTIN_PREFETCH 
-    ${CMAKE_BINARY_DIR} 
-    ${CMAKE_SOURCE_DIR}/cmake/test_prefetch.cpp)
-if(HAVE_BUILTIN_PREFETCH)
-    target_compile_definitions(ED PRIVATE HAVE_BUILTIN_PREFETCH)
-=======
 # CUDA-specific compile options
 if(WITH_CUDA)
     set_property(TARGET ED PROPERTY CUDA_SEPARABLE_COMPILATION ON)
@@ -371,5 +269,4 @@ if(OpenMP_CXX_FOUND)
     message(STATUS "  OpenMP Support: YES")
 else()
     message(STATUS "  OpenMP Support: NO")
->>>>>>> b3e0d021fb259023a59c109c11597d5dec96a6d4
 endif()
