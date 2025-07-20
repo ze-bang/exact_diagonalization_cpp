@@ -1128,7 +1128,7 @@ void computeObservableDynamics_U_t(
     int N, 
     const std::string& dir,
     int sample,
-    int step,
+    double inv_temp,
     double omega_min = -10.0,
     double omega_max = 10.0,
     int num_points = 1000,
@@ -1136,12 +1136,12 @@ void computeObservableDynamics_U_t(
     double dt = 0.01
 ) {
     // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
     save_tpq_state(tpq_state, state_file);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", step " << step << ", for " << observables.size() << " observables" << std::endl;
-    
+              << ", beta=" << inv_temp << ", for " << observables.size() << " observables" << std::endl;
+
     // Create array of operator functions
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
     operatorFuncs.reserve(observables.size());
@@ -1167,7 +1167,7 @@ void computeObservableDynamics_U_t(
     // Process and save results for each observable
     for (size_t i = 0; i < observables.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
+                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
         
         std::vector<double> time_points(time_correlations[i].size());
         for (size_t j = 0; j < time_correlations[i].size(); j++) {
@@ -1267,7 +1267,14 @@ void microcanonical_tpq(
     }
 
 
-    std::array<double, 3> measure_inv_temp = {{10.0, 100.0, 1000.0}};
+    // Create logarithmically spaced inverse temperature points
+    const int num_temp_points = 50;
+    std::array<double, num_temp_points> measure_inv_temp;
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 100
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
@@ -1359,10 +1366,10 @@ void microcanonical_tpq(
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
             for (auto temp : measure_inv_temp) {
-                if (std::abs(inv_temp - temp) < 4e-3) {
+                if (std::abs(inv_temp - temp) < 8e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
-                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
+                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, inv_temp, omega_min, omega_max, num_points, t_end, dt);
                     }
                 }
             }

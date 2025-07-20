@@ -444,63 +444,53 @@ class NLCExpansion:
                     
                 sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
             
-            if not euler_resum:  
-                # Regular summation with Wynn resummation
-                # First calculate partial sums by order
+            if not euler_resum:
+                # Wynn's epsilon algorithm
                 max_order = max(sum_by_order.keys()) if sum_by_order else 0
-                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
 
+                # Calculate partial sums
+                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
                 for order in range(max_order + 1):
                     if order > 0:
                         partial_sums[order] = partial_sums[order-1]
                     if order in sum_by_order:
                         partial_sums[order] += sum_by_order[order]
 
-                # If we don't have enough orders, just use direct summation
-                if max_order < 2:
-                    for order, contribution in sum_by_order.items():
-                        results[prop] += contribution
-                else:
-                    # Apply Wynn's epsilon algorithm
-                    # Initialize epsilon table: eps[k, n, temp_idx]
-                    eps = np.zeros((max_order + 1, max_order + 1, len(self.temp_values)))
-                    
-                    # Set initial values: eps[0,n] = partial_sums[n]
-                    for n in range(max_order + 1):
-                        eps[0, n] = partial_sums[n]
-                    
-                    # Apply epsilon algorithm recursion
-                    for k in range(1, max_order + 1):
-                        for n in range(max_order - k + 1):
-                            diff = eps[k-1, n+1] - eps[k-1, n]
-                            # Calculate reciprocal safely
-                            with np.errstate(all='ignore'):
-                                recip = np.zeros_like(diff)
-                                nonzero = np.abs(diff) > 1e-10
-                                recip[nonzero] = 1.0 / diff[nonzero]
-                            
-                            if k == 1:
-                                eps[k, n] = recip
+                # Apply Wynn's epsilon algorithm
+                # Initialize epsilon table
+                epsilon_table = np.zeros((2 * max_order + 1, max_order + 1, len(self.temp_values)))
+
+                # First column: partial sums
+                for n in range(max_order + 1):
+                    epsilon_table[0, n] = partial_sums[n]
+
+                # Fill the epsilon table using Wynn's recurrence relation
+                for k in range(1, 2 * max_order):
+                    for n in range(max_order - (k + 1) // 2):
+                        if k % 2 == 1:
+                            # Odd columns: auxiliary quantities
+                            if np.any(epsilon_table[k-1, n+1] - epsilon_table[k-1, n] != 0):
+                                epsilon_table[k, n] = epsilon_table[k-2, n+1] + 1.0 / (epsilon_table[k-1, n+1] - epsilon_table[k-1, n])
                             else:
-                                eps[k, n] = eps[k-2, n+1] + recip
-                    
-                    # Use even-order epsilon values at n=0 for the transformed series
-                    # Find the highest valid even k
-                    best_k = None
-                    for k in range(max_order, 0, -1):
-                        if k % 2 == 0:
-                            values = eps[k, max_order - k]
-                            if not np.any(np.isnan(values)) and not np.any(np.isinf(values)):
-                                best_k = k
-                                break
-                    
-                    # Use the best approximation, or fall back to direct summation
-                    if best_k is not None:
-                        results[prop] = eps[best_k, max_order - best_k]
-                    else:
-                        # Fall back to direct summation
-                        for order, contribution in sum_by_order.items():
-                            results[prop] += contribution
+                                # Handle division by zero
+                                epsilon_table[k, n] = epsilon_table[k-2, n+1]
+                        else:
+                            # Even columns: accelerated partial sums
+                            if np.any(epsilon_table[k-1, n+1] - epsilon_table[k-1, n] != 0):
+                                epsilon_table[k, n] = epsilon_table[k-2, n+1] + 1.0 / (epsilon_table[k-1, n+1] - epsilon_table[k-1, n])
+                            else:
+                                epsilon_table[k, n] = epsilon_table[k-2, n+1]
+
+                # Extract the best approximation (rightmost even column)
+                best_k = 2 * ((max_order - 1) // 2)
+                if best_k >= 0 and best_k < epsilon_table.shape[0]:
+                    results[prop] = epsilon_table[best_k, 0]
+                else:
+                    # Fallback to last partial sum if Wynn's fails
+                    results[prop] = partial_sums[max_order]
+                # force specific heat to be derivative of energy
+                if prop == 'specific_heat':
+                    results[prop] = np.gradient(results['energy'], self.temp_values)
             else:
                 # Euler resummation
                 max_order = max(sum_by_order.keys()) if sum_by_order else 0
