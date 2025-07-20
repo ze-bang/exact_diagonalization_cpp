@@ -12,7 +12,6 @@
 #include <cmath>
 #include <mkl.h>
 #include "construct_ham.h"
-#include "optimized_full_diag.h"  // Include advanced optimization framework
 #include <iomanip>
 #include <algorithm>
 #include <Eigen/Dense>

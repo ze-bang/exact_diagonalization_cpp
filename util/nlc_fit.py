@@ -71,7 +71,6 @@ def run_nlce(params, fixed_params, exp_temp, work_dir):
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
             '--SI_units',
-            '--euler_resum',
             '--method=mTPQ'
         ]
     
@@ -209,7 +208,7 @@ def main():
     parser.add_argument('--skip_ham_prep', action='store_true', help='Skip Hamiltonian preparation step')
     
     # Optimization parameters
-    parser.add_argument('--method', type=str, default='L-BFGS-B', help='Optimization method')
+    parser.add_argument('--method', type=str, default='Nelder-Mead', help='Optimization method')
     parser.add_argument('--ED_method', type=str, default='FULL', help='ED method for NLCE')
     parser.add_argument('--max_iter', type=int, default=5000 , help='Maximum number of iterations')
     parser.add_argument('--tolerance', type=float, default=0.01, help='Tolerance for convergence')

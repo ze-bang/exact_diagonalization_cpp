@@ -202,26 +202,6 @@ message(STATUS "  Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "  CUDA Support: ${WITH_CUDA}")
 message(STATUS "  MPI Support: ${WITH_MPI}")
 
-<<<<<<< HEAD
-# Platform-specific optimizations
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(ED PRIVATE -O3 -march=native -funroll-loops -ffast-math)
-    # Enable link-time optimization (LTO) if supported
-    include(CheckIPOSupported)
-    check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
-    if(ipo_supported)
-        set_target_properties(ED PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-        message(STATUS "  LTO (IPO) Support: YES")
-    else()
-        message(STATUS "  LTO (IPO) Support: NO: ${ipo_error}")
-    endif()
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-        target_compile_options(ED PRIVATE -g)
-    endif()
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "Intel")
-    target_compile_options(ED PRIVATE -O3 -xHost -ipo)
-    set_target_properties(ED PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
-=======
 # Build configuration summary and performance options
 message(STATUS "")
 message(STATUS "=== Performance Configuration Summary ===")
@@ -250,7 +230,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     if(FMA_RESULT EQUAL 0)
         message(STATUS "  FMA: Available")
     endif()
->>>>>>> 7cc0fbf6652ae5e272aef0befeee98151a5f959e
 endif()
 
 # Memory information
