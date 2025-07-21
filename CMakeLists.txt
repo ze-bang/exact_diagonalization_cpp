@@ -199,14 +199,6 @@ endif()
 # Install targets
 install(TARGETS ED DESTINATION bin)
 
-# Optional: Build CUDA test executable if CUDA is enabled
-if(WITH_CUDA)
-    add_executable(test_cuda_basic test_cuda_basic.cu)
-    target_link_libraries(test_cuda_basic CUDA::cudart)
-    set_target_properties(test_cuda_basic PROPERTIES CUDA_STANDARD 17)
-    message(STATUS "Building CUDA test executable: test_cuda_basic")
-endif()
-
 # Print configuration summary
 message(STATUS "Configuration Summary:")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
