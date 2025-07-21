@@ -522,6 +522,11 @@ class NLCExpansion:
                 # Use the highest order Euler sum
                 results[prop] = euler_sums[max_order]
         
+        # Force specific heat as derivative of energy for now
+        results['specific_heat'] = np.gradient(results['energy'], self.temp_values)
+
+        # Force specific heat to be non-negative
+        results['specific_heat'] = np.maximum(results['specific_heat'], 0.0)
 
         if self.measure_spin:
             # Calculate spin expectation values

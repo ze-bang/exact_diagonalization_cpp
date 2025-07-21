@@ -89,7 +89,6 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
             '--SI_units',
-            '--euler_resum',
             '--method=mTPQ'
         ]
     
