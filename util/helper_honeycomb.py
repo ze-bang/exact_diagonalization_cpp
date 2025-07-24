@@ -214,7 +214,16 @@ def genNNNN_list(d1, d2, PBC):
 
 def KitaevNN(J_values, indx1, indx2, bond_type, max_site):
     """Generate Kitaev interaction terms for a given bond"""
-    J1, delta1, Jpmpm, Jzpm, J2, J3, delta3 = J_values
+    J1xy, J1z, J3xy, J3z, D, E, F, G = J_values
+    J1z_ = np.array([[J1xy+D, E, F],
+                     [E, J1xy-D, G],
+                     [F, G, J1z]])
+    U_2pi_3 = np.array([[np.cos(2*np.pi/3), -np.sin(2*np.pi/3), 0],
+                        [np.sin(2*np.pi/3), np.cos(2*np.pi/3), 0],
+                       [0, 0, 1]])
+    J1x_ = U_2pi_3 @ J1z_ @ U_2pi_3.T
+    J1y_ = U_2pi_3.T @ J1z_ @ U_2pi_3
+    
     if indx1 < max_site and indx2 < max_site and indx1 >= 0 and indx2 >= 0:
         alpha = 0
         if bond_type == 'x':
@@ -223,8 +232,8 @@ def KitaevNN(J_values, indx1, indx2, bond_type, max_site):
             alpha = -np.pi/3*2
         elif bond_type == 'z':
             alpha = 0
-        return np.array([[2, indx1, 2, indx2, J1*delta1, 0],
-                    [1, indx1, 0, indx2, J1/2, 0],
+        return np.array([[2, indx1, 2, indx2, J1*delta1, 0], # SzSz
+                    [1, indx1, 0, indx2, J1/2, 0], 
                     [0, indx1, 1, indx2, J1/2, 0],
                     [1, indx1, 2, indx2, Jzpm/2*np.cos(alpha), -Jzpm/2*np.sin(alpha)],
                     [2, indx1, 1, indx2, Jzpm/2*np.cos(alpha), -Jzpm/2*np.sin(alpha)],

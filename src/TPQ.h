@@ -1128,7 +1128,7 @@ void computeObservableDynamics_U_t(
     int N, 
     const std::string& dir,
     int sample,
-    double inv_temp,
+    int step,
     double omega_min = -10.0,
     double omega_max = 10.0,
     int num_points = 1000,
@@ -1136,12 +1136,12 @@ void computeObservableDynamics_U_t(
     double dt = 0.01
 ) {
     // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
     save_tpq_state(tpq_state, state_file);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", beta=" << inv_temp << ", for " << observables.size() << " observables" << std::endl;
-
+              << ", step " << step << ", for " << observables.size() << " observables" << std::endl;
+    
     // Create array of operator functions
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
     operatorFuncs.reserve(observables.size());
@@ -1167,7 +1167,7 @@ void computeObservableDynamics_U_t(
     // Process and save results for each observable
     for (size_t i = 0; i < observables.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
+                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
         
         std::vector<double> time_points(time_correlations[i].size());
         for (size_t j = 0; j < time_correlations[i].size(); j++) {
@@ -1257,7 +1257,7 @@ void microcanonical_tpq(
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops = createDoubleSiteOperators(num_sites, spin_length);
+    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
     std::function<void(const Complex*, Complex*, int)> U_t;
     std::function<void(const Complex*, Complex*, int)> U_nt;   
@@ -1267,19 +1267,11 @@ void microcanonical_tpq(
     }
 
 
-    // Create logarithmically spaced inverse temperature points
-    const int num_temp_points = 50;
-    std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1);   // Start from β = 1
-    double log_max = std::log10(1000); // End at β = 1000
-    for (int i = 0; i < num_temp_points; ++i) {
-        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
-    }
+    std::array<double, 3> measure_inv_temp = {{10.0, 100.0, 1000.0}};
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
-        std::vector<bool> temp_measured(num_temp_points, false);
         std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
         
         // Setup filenames
@@ -1366,13 +1358,12 @@ void microcanonical_tpq(
                 }
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+            for (auto temp : measure_inv_temp) {
+                if (std::abs(inv_temp - temp) < 4e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
-                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, inv_temp, omega_min, omega_max, num_points, t_end, dt);
+                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
                     }
-                    temp_measured[i] = true; // Mark this temperature as measured
                 }
             }
         }

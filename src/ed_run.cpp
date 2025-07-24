@@ -145,14 +145,11 @@ int main(int argc, char* argv[]) {
             else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else if (method_str == "BLOCK_LANCZOS") method = DiagonalizationMethod::BLOCK_LANCZOS;
             else if (method_str == "OSS") method = DiagonalizationMethod::OSS;
-            else if (method_str == "ARPACK_SHIFT_INVERT") method = DiagonalizationMethod::ARPACK_SHIFT_INVERT;
-            else if (method_str == "ARPACK_SPECTRUM_SLICE") method = DiagonalizationMethod::ARPACK_SPECTRUM_SLICE;
-            else if (method_str == "ARPACK_LOWEST") method = DiagonalizationMethod::ARPACK_LOWEST;
-            else if (method_str == "ARPACK_HIGHEST") method = DiagonalizationMethod::ARPACK_HIGHEST;
-            else if (method_str == "ARPACK_NEAR_VALUE") method = DiagonalizationMethod::ARPACK_NEAR_VALUE;
             else if (method_str == "mTPQ_CUDA") method = DiagonalizationMethod::mTPQ_CUDA;
             else if (method_str == "FTLM") method = DiagonalizationMethod::FTLM;
             else if (method_str == "LTLM") method = DiagonalizationMethod::LTLM;
+            else if (method_str == "ARPACK_SHIFT_INVERT") method = DiagonalizationMethod::ARPACK_SHIFT_INVERT;
+            else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {

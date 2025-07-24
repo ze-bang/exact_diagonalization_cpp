@@ -3,7 +3,8 @@ import re
 import matplotlib.pyplot as plt
 
 # Load the data
-data_file = "/home/pc_linux/exact_diagonalization_cpp/ED_16_sites/output/spin_corr_rand0.dat"
+dir = "/home/pc_linux/exact_diagonalization_cpp/ED_16_sites_Jpm=0.045/output/"
+data_file = dir + "spin_corr_rand0.dat"
 
 # Read header and get column names
 with open(data_file, 'r') as f:
@@ -41,7 +42,7 @@ plt.legend()
 plt.title('spm vs Temperature')
 
 plt.tight_layout()
-plt.savefig('szz_spm_plot.png')
+plt.savefig(dir + 'szz_spm_plot.png')
 
 # Create 4x4 subplot for szz# and spm#
 fig, axs = plt.subplots(4, 4, figsize=(20, 16))
@@ -67,6 +68,7 @@ for i, col_name in enumerate(column_names):
         elif '(imag)' in col_name:
             site_columns[site][f"{corr_type}_imag"] = i
 
+plt.savefig(dir + 'site_correlations_subplot_szz.png')
 # Plot each site in the 4x4 grid
 for site in range(16):
     row = site // 4
@@ -97,6 +99,6 @@ for ax in axs1.flat:
 
 
 plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-plt.savefig('site_correlations_subplot.png')
+plt.savefig(dir + 'site_correlations_subplot_spm.png')
 
 plt.show()

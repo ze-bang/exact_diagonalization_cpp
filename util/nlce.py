@@ -205,7 +205,7 @@ def main():
         
         cmd = [
             'python3', 
-            '/home/zhouzb79/projects/def-ybkim/zhouzb79/exact_diagonalization_cpp/util/generate_pyrochlore_clusters.py',
+            'util/generate_pyrochlore_clusters.py',
             f'--max_order={args.max_order}',
             f'--output_dir={cluster_dir}'
         ]
@@ -250,7 +250,7 @@ def main():
             # Run helper_cluster.py
             cmd = [
                 'python3',
-                '/home/zhouzb79/projects/def-ybkim/zhouzb79/exact_diagonalization_cpp/util/helper_cluster.py',
+                'util/helper_cluster.py',
                 str(args.Jxx),
                 str(args.Jyy),
                 str(args.Jzz),
@@ -493,7 +493,7 @@ def main():
             # Add mTPQ specific parameters here if needed
             nlc_params = [
                 'python3',
-                '/home/zhouzb79/projects/def-ybkim/zhouzb79/exact_diagonalization_cpp/util/NLC_sum_TPQ.py',
+                'util/NLC_sum_TPQ.py',
                 f'--cluster_dir={cluster_info_dir}',
                 f'--eigenvalue_dir={ed_dir}',
                 f'--output_dir={nlc_dir}',
@@ -505,7 +505,7 @@ def main():
         else:
             nlc_params = [
                 'python3',
-                '/home/zhouzb79/projects/def-ybkim/zhouzb79/exact_diagonalization_cpp/util/NLC_sum.py',
+                'util/NLC_sum.py',
                 f'--cluster_dir={cluster_info_dir}',
                 f'--eigenvalue_dir={ed_dir}',
                 f'--output_dir={nlc_dir}',
