@@ -1136,7 +1136,7 @@ void computeObservableDynamics_U_t(
     double dt = 0.01
 ) {
     // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
     save_tpq_state(tpq_state, state_file);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
