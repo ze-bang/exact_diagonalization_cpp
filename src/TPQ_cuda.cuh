@@ -42,6 +42,7 @@ void extract_eigen_sparse_data(const SparseMatrix& matrix,
     int nnz = compressed_matrix.nonZeros();
     values.resize(nnz);
     row_ptr.resize(compressed_matrix.outerSize() + 1);
+    col_ind.resize(nnz);
 
     // Eigen's valuePtr(), innerIndexPtr(), and outerIndexPtr() give direct access
     const Complex* eigen_values = compressed_matrix.valuePtr();
@@ -77,6 +78,21 @@ SparseMatrix construct_sparse_matrix(
     }
     H_sparse.setFromTriplets(triplets.begin(), triplets.end());
     return H_sparse;
+}
+
+
+// Helper function to check available GPU memory
+void checkGpuMemory(size_t required_memory) {
+    size_t free_mem, total_mem;
+    cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA Error checking memory info: %s:%d, %s\n", __FILE__, __LINE__, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+    if (free_mem < required_memory) {
+        fprintf(stderr, "Error: Not enough GPU memory. Required: %zu bytes, Available: %zu bytes.\n", required_memory, free_mem);
+        exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -167,23 +183,34 @@ public:
         if (d_csr_values) cudaFree(d_csr_values);
         if (d_csr_row_ptr) cudaFree(d_csr_row_ptr);
         if (d_csr_col_ind) cudaFree(d_csr_col_ind);
+        if (d_buffer) cudaFree(d_buffer);
     }
 
     // Apply H|v_in> = |v_out>
     void apply(const cuDoubleComplex* d_v_in, cuDoubleComplex* d_v_out) {
         const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-        void* buffer = nullptr; // cuSPARSE can manage buffer internally if passed nullptr
 
         // Create vector descriptors
         cusparseDnVecDescr_t vec_in_descr, vec_out_descr;
         CUSPARSE_CHECK(cusparseCreateDnVec(&vec_in_descr, n, (void*)d_v_in, CUDA_C_64F));
         CUSPARSE_CHECK(cusparseCreateDnVec(&vec_out_descr, n, (void*)d_v_out, CUDA_C_64F));
 
+        // Query buffer size if not already done
+        if (!buffer_initialized) {
+            CUSPARSE_CHECK(cusparseSpMV_bufferSize(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                                   &alpha, mat_descr, vec_in_descr, &beta, vec_out_descr,
+                                                   CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buffer_size));
+            if (buffer_size > 0) {
+                CUDA_CHECK(cudaMalloc(&d_buffer, buffer_size));
+            }
+            buffer_initialized = true;
+        }
+
         // Perform SpMV: y = alpha * op(A) * x + beta * y
         CUSPARSE_CHECK(cusparseSpMV(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                     &alpha, mat_descr, vec_in_descr, &beta, vec_out_descr,
-                                    CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+                                    CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buffer));
 
         // Clean up vector descriptors
         CUSPARSE_CHECK(cusparseDestroyDnVec(vec_in_descr));
@@ -192,12 +219,15 @@ public:
 
 private:
     int n;
-    int nnz;
+    long long nnz;
     cusparseHandle_t cusparse_handle = nullptr;
     cusparseSpMatDescr_t mat_descr = nullptr;
     cuDoubleComplex* d_csr_values = nullptr;
     int* d_csr_row_ptr = nullptr;
     int* d_csr_col_ind = nullptr;
+    void* d_buffer = nullptr;
+    size_t buffer_size = 0;
+    bool buffer_initialized = false;
 };
 
 /**
@@ -318,21 +348,32 @@ public:
         if (d_csr_values) cudaFree(d_csr_values);
         if (d_csr_row_ptr) cudaFree(d_csr_row_ptr);
         if (d_csr_col_ind) cudaFree(d_csr_col_ind);
+        if (d_buffer) cudaFree(d_buffer);
     }
 
     // Apply Op|v_in> = |v_out>
     void apply(const cuDoubleComplex* d_v_in, cuDoubleComplex* d_v_out) const {
         const cuDoubleComplex alpha = make_cuDoubleComplex(1.0, 0.0);
         const cuDoubleComplex beta = make_cuDoubleComplex(0.0, 0.0);
-        void* buffer = nullptr;
 
         cusparseDnVecDescr_t vec_in_descr, vec_out_descr;
         CUSPARSE_CHECK(cusparseCreateDnVec(&vec_in_descr, n, (void*)d_v_in, CUDA_C_64F));
         CUSPARSE_CHECK(cusparseCreateDnVec(&vec_out_descr, n, (void*)d_v_out, CUDA_C_64F));
 
+        // Query buffer size if not already done
+        if (!buffer_initialized) {
+            CUSPARSE_CHECK(cusparseSpMV_bufferSize(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                                                   &alpha, mat_descr, vec_in_descr, &beta, vec_out_descr,
+                                                   CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, &buffer_size));
+            if (buffer_size > 0) {
+                CUDA_CHECK(cudaMalloc(&d_buffer, buffer_size));
+            }
+            buffer_initialized = true;
+        }
+
         CUSPARSE_CHECK(cusparseSpMV(cusparse_handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
                                     &alpha, mat_descr, vec_in_descr, &beta, vec_out_descr,
-                                    CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, buffer));
+                                    CUDA_C_64F, CUSPARSE_SPMV_ALG_DEFAULT, d_buffer));
 
         CUSPARSE_CHECK(cusparseDestroyDnVec(vec_in_descr));
         CUSPARSE_CHECK(cusparseDestroyDnVec(vec_out_descr));
@@ -346,6 +387,9 @@ private:
     cuDoubleComplex* d_csr_values = nullptr;
     int* d_csr_row_ptr = nullptr;
     int* d_csr_col_ind = nullptr;
+    mutable void* d_buffer = nullptr;
+    mutable size_t buffer_size = 0;
+    mutable bool buffer_initialized = false;
 };
 
 /**
@@ -819,6 +863,44 @@ void microcanonical_tpq_cuda(
         ensureDirectoryExists(dir);
     }
 
+    // --- Memory Requirement Check ---
+    size_t required_mem = 0;
+    size_t cu_double_complex_size = sizeof(cuDoubleComplex);
+    int num_sites = static_cast<int>(std::log2(N));
+
+    // Memory for state vectors in the main loop
+    required_mem += 2 * N * cu_double_complex_size; // d_v, d_v_next
+
+    // Memory for Hamiltonian
+    required_mem += H_sparse.nonZeros() * cu_double_complex_size + (H_sparse.nonZeros() + N + 1) * sizeof(int);
+
+    if (measure_sz) {
+        // This is a rough estimate. A more precise calculation would require
+        // constructing the operators first to get their nnz.
+        // For Sz, nnz is 2*N. For Szz, nnz is 4*N. For Spm, nnz is N.
+        // We overestimate slightly for safety.
+        size_t sz_op_mem = (2 * N * cu_double_complex_size) + ((2 * N + N + 1) * sizeof(int));
+        required_mem += num_sites * sz_op_mem;
+
+        size_t double_site_op_mem = (4 * N * cu_double_complex_size) + ((4 * N + N + 1) * sizeof(int));
+        required_mem += 2 * num_sites * num_sites * double_site_op_mem;
+    }
+
+    if (compute_observables) {
+        // Memory for time evolution operator buffers
+        required_mem += 2 * N * cu_double_complex_size; // d_term, d_Hterm in create_time_evolution_operator_cuda
+
+        // Memory for spectral function calculation
+        int num_ops = observables.size();
+        required_mem += 2 * N * cu_double_complex_size; // d_state, d_state_next
+        required_mem += 3 * num_ops * N * cu_double_complex_size; // d_O_psi_vec, d_O_psi_next_vec, d_O_dag_state_vec
+    }
+
+    std::cout << "Estimated GPU memory requirement: " << required_mem / (1024.0 * 1024.0) << " MB" << std::endl;
+    checkGpuMemory(required_mem);
+    // --- End Memory Check ---
+
+
     // Initialize cuBLAS
     cublasHandle_t cublas_handle;
     CUBLAS_CHECK(cublasCreate(&cublas_handle));
@@ -839,7 +921,6 @@ void microcanonical_tpq_cuda(
     // --- NOTE: Observables are computed on CPU for simplicity. ---
     // For full GPU acceleration, observable operators would also need to be
     // moved to the GPU and applied with cuSPARSE.
-    int num_sites = static_cast<int>(std::log2(N));
     std::vector<std::unique_ptr<CudaOperator>> Sz_ops;
     std::pair<std::vector<std::unique_ptr<CudaOperator>>, std::vector<std::unique_ptr<CudaOperator>>> double_site_ops;
     std::function<void(const cuDoubleComplex*, cuDoubleComplex*)> U_t, U_nt;
@@ -894,7 +975,7 @@ void microcanonical_tpq_cuda(
                 inv_temp = (2.0*step) / (LargeValue * num_sites - energy);
 
                 // Copy current state back to host for measurements
-                CUDA_CHECK(cudaMemcpy(h_v.data(), d_v, N * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+                CUDA_CHECK(cudaMemcpy(h_v.data(), d_v, N * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
 
                 writeTPQData(ss_file, inv_temp, energy, variance, norm, step);
 
