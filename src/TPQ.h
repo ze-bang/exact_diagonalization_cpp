@@ -555,8 +555,8 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
     double omega_min = -10.0,
     double omega_max = 10.0,
     int num_points = 1000,
-    double tmax = 100.0,
-    double dt = 0.1,
+    double tmax = 10.0,
+    double dt = 0.01,
     double eta = 0.1,
     bool use_lorentzian = false,
     int n_max = 100 // Order of Taylor expansion
@@ -1128,7 +1128,7 @@ void computeObservableDynamics_U_t(
     int N, 
     const std::string& dir,
     int sample,
-    int step,
+    double inv_temp,
     double omega_min = -10.0,
     double omega_max = 10.0,
     int num_points = 1000,
@@ -1167,7 +1167,7 @@ void computeObservableDynamics_U_t(
     // Process and save results for each observable
     for (size_t i = 0; i < observables.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
+                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
         
         std::vector<double> time_points(time_correlations[i].size());
         for (size_t j = 0; j < time_correlations[i].size(); j++) {
@@ -1362,7 +1362,7 @@ void microcanonical_tpq(
                 if (std::abs(inv_temp - temp) < 4e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
-                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
+                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, inv_temp, omega_min, omega_max, num_points, t_end, dt);
                     }
                 }
             }
