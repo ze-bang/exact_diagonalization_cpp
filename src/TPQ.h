@@ -1240,7 +1240,7 @@ void microcanonical_tpq(
     double omega_min = -20.0,
     double omega_max = 20.0,
     int num_points = 10000,
-    double t_end = 100.0,
+    double t_end = 10.0,
     double dt = 0.01,
     float spin_length = 0.5,
     bool measure_sz = false,
