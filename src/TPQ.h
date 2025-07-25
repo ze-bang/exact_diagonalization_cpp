@@ -1140,7 +1140,7 @@ void computeObservableDynamics_U_t(
     save_tpq_state(tpq_state, state_file);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", step " << step << ", for " << observables.size() << " observables" << std::endl;
+              << ", beta = " << inv_temp << ", for " << observables.size() << " observables" << std::endl;
     
     // Create array of operator functions
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
