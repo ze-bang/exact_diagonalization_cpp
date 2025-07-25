@@ -1267,11 +1267,20 @@ void microcanonical_tpq(
     }
 
 
-    std::array<double, 3> measure_inv_temp = {{10.0, 100.0, 1000.0}};
+    const int num_temp_points = 50;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
+
+    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
 
     std::cout << "Setting LargeValue: " << LargeValue << std::endl;
     // For each random sample
     for (int sample = 0; sample < num_samples; sample++) {
+        std::vector<bool> temp_measured(num_temp_points, false);
         std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
         
         // Setup filenames
@@ -1358,12 +1367,13 @@ void microcanonical_tpq(
                 }
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
-            for (auto temp : measure_inv_temp) {
-                if (std::abs(inv_temp - temp) < 4e-3) {
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
                         computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, inv_temp, omega_min, omega_max, num_points, t_end, dt);
                     }
+                    temp_measured[i] = true; // Mark this temperature as measured
                 }
             }
         }
