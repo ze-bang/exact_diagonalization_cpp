@@ -191,16 +191,7 @@ def generate_c3_interactions(c3_sites, site_map, use_pbc, J_values):
                 bond_type = bond_types[idx]
                 
                 if site_idx < neighbor_idx:  # Only add each bond once
-                    term = KitaevNN(J_values[:-1], site_idx, neighbor_idx, bond_type, len(c3_sites))
-                    if term.size > 0:
-                        interALL.append(term)
-        
-        # Add next-nearest neighbor interactions
-        for ni, nj, nu in nnn_coords:
-            if (ni, nj, nu) in site_map:
-                neighbor_idx = site_map[(ni, nj, nu)]
-                if site_idx < neighbor_idx:
-                    term = J2NNN(J_values[:-1], site_idx, neighbor_idx, "nnn", len(c3_sites))
+                    term = KitaevNN(J_values, site_idx, neighbor_idx, bond_type, len(c3_sites))
                     if term.size > 0:
                         interALL.append(term)
         
@@ -209,7 +200,7 @@ def generate_c3_interactions(c3_sites, site_map, use_pbc, J_values):
             if (ni, nj, nu) in site_map:
                 neighbor_idx = site_map[(ni, nj, nu)]
                 if site_idx < neighbor_idx:
-                    term = J3NNNN(J_values[:-1], site_idx, neighbor_idx, "nnnn", len(c3_sites))
+                    term = J3NNNN(J_values, site_idx, neighbor_idx, "nnnn", len(c3_sites))
                     if term.size > 0:
                         interALL.append(term)
         
@@ -349,11 +340,81 @@ def write_c3_site_positions(c3_sites, site_map, output_dir):
             # Write to file
             f.write(f"{site_idx} {position[0]:.6f} {position[1]:.6f}\n")
 
+def read_param_file(filepath):
+    """Reads parameters from a file."""
+    params = {}
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('//'):
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+            
+            # Handle different value types
+            if ',' in value:
+                params[key] = [float(v.strip()) for v in value.split(',')]
+            else:
+                try:
+                    params[key] = float(value)
+                except ValueError:
+                    params[key] = value
+    return params
+
 def main_c3():
     """Main function to generate C3 symmetric honeycomb lattice"""
-    # Parse arguments
-    args = parse_c3_arguments()
+    # Add a new argument for the parameter file
+    parser = argparse.ArgumentParser(description='Generate C3 symmetric honeycomb lattice', add_help=False)
+    parser.add_argument('--param_file', type=str, default=None, help='Path to parameter file')
     
+    # Parse known and unknown args to avoid conflicts if param file is used
+    args, unknown = parser.parse_known_args()
+
+    # Parse the rest of the arguments
+    base_parser = argparse.ArgumentParser()
+    base_parser.add_argument('--size', type=int, default=4, help='Size parameter for the C3 symmetric lattice')
+    base_parser.add_argument('--pbc', type=int, default=0, help='Use periodic boundary conditions (1) or open boundary conditions (0)')
+    base_parser.add_argument('--J1', type=float, default=-6.54, help='J1 coupling constant')
+    base_parser.add_argument('--delta1', type=float, default=0.36, help='Delta1 coupling constant')
+    base_parser.add_argument('--Jpmpm', type=float, default=0.15, help='Jpmpm coupling constant')
+    base_parser.add_argument('--Jzpm', type=float, default=-3.76, help='Jzpm coupling constant')
+    base_parser.add_argument('--J2', type=float, default=-0.21, help='J2 coupling constant')
+    base_parser.add_argument('--J3', type=float, default=1.7, help='J3 coupling constant')
+    base_parser.add_argument('--delta3', type=float, default=0.03, help='Delta3 coupling constant')
+    base_parser.add_argument('--h', type=float, default=0.0, help='Field strength')
+    base_parser.add_argument('--hx', type=float, default=1.0, help='Field strength in x-direction')
+    base_parser.add_argument('--hy', type=float, default=0.0, help='Field strength in y-direction')
+    base_parser.add_argument('--hz', type=float, default=0.0, help='Field strength in z-direction')
+    base_parser.add_argument('--outdir', type=str, default='output_c3', help='Output directory')
+    
+    # Parse the remaining arguments
+    args = base_parser.parse_args(unknown, namespace=args)
+
+    # If a parameter file is provided, read it and override the arguments
+    if args.param_file:
+        file_params = read_param_file(args.param_file)
+        
+        # Map file parameters to argument names
+        param_map = {
+            'h': 'h',
+            'dir': 'outdir',
+            'J1xy': 'J1',
+            'J1z': 'delta1', # Assuming J1z maps to delta1 for Jz = J1 + delta1
+            'J3xy': 'J3',
+            'J3z': 'delta3', # Assuming J3z maps to delta3 for J3z = J3 + delta3
+        }
+        
+        for key, value in file_params.items():
+            if key in param_map:
+                setattr(args, param_map[key], value)
+        
+        if 'field_dir' in file_params:
+            args.hx, args.hy, args.hz = file_params['field_dir']
+        
+        # The provided file does not specify Jpmpm, Jzpm, J2.
+        # They will keep their default or command-line values.
+
     # Extract parameters
     size = args.size
     use_pbc = args.pbc == 1
@@ -398,6 +459,8 @@ def main_c3():
     
     print(f"Generated C3 symmetric honeycomb lattice with {len(c3_sites)} sites")
     print(f"Output saved to {output_dir}")
+
+
 
 if __name__ == "__main__":
     main_c3()

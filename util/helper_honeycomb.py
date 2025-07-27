@@ -27,13 +27,14 @@ def parse_arguments():
     parser.add_argument('--dim1', type=int, default=4, help='Number of unit cells in the x-direction')
     parser.add_argument('--dim2', type=int, default=4, help='Number of unit cells in the y-direction')
     parser.add_argument('--pbc', type=int, default=1, help='Use periodic boundary conditions (1) or open boundary conditions (0)')
-    parser.add_argument('--J1', type=float, default=-6.54, help='J1 coupling constant')
-    parser.add_argument('--delta1', type=float, default=0.36, help='Delta1 coupling constant')
-    parser.add_argument('--Jpmpm', type=float, default=0.15, help='Jpmpm coupling constant')
-    parser.add_argument('--Jzpm', type=float, default=-3.76, help='Jzpm coupling constant')
-    parser.add_argument('--J2', type=float, default=-0.21, help='J2 coupling constant')
-    parser.add_argument('--J3', type=float, default=1.7, help='J3 coupling constant')
-    parser.add_argument('--delta3', type=float, default=0.03, help='Delta3 coupling constant')
+    parser.add_argument('--J1xy', type=float, default=-6.54, help='J1 coupling constant')
+    parser.add_argument('--J1z', type=float, default=0.36, help='Delta1 coupling constant')
+    parser.add_argument('--J3xy', type=float, default=2.0, help='J3 coupling constant')
+    parser.add_argument('--J3z', type=float, default=0.0, help='Delta3 coupling constant')
+    parser.add_argument('--D', type=float, default=-0.21, help='D coupling constant')
+    parser.add_argument('--E', type=float, default=0.0, help='E coupling constant')
+    parser.add_argument('--F', type=float, default=0.0, help='F coupling constant')
+    parser.add_argument('--G', type=float, default=0.0, help='G coupling constant')
     parser.add_argument('--h', type=float, default=0.0, help='Field strength')
     parser.add_argument('--hx', type=float, default=1.0, help='Field strength in x-direction')
     parser.add_argument('--hy', type=float, default=0.0, help='Field strength in y-direction')
@@ -224,38 +225,75 @@ def KitaevNN(J_values, indx1, indx2, bond_type, max_site):
     J1x_ = U_2pi_3 @ J1z_ @ U_2pi_3.T
     J1y_ = U_2pi_3.T @ J1z_ @ U_2pi_3
     
+
+    # Bond-dependent interactions
+    # Convert from matrix representation to S+, S-, Sz representation
+    # Using the relations:
+    # Sx = (S+ + S-)/2
+    # Sy = (S+ - S-)/2i
+    # Sz = Sz
+    
+    # For each bond type, we need to extract the appropriate interaction matrix elements
+    # and convert them to the appropriate terms involving S+, S-, and Sz operators
+    
     if indx1 < max_site and indx2 < max_site and indx1 >= 0 and indx2 >= 0:
         alpha = 0
+        J_matrix = np.zeros((3, 3))
         if bond_type == 'x':
-            alpha = np.pi/3*2
+            J_matrix = J1x_
         elif bond_type == 'y':
-            alpha = -np.pi/3*2
+            J_matrix = J1y_
         elif bond_type == 'z':
-            alpha = 0
-        return np.array([[2, indx1, 2, indx2, J1*delta1, 0], # SzSz
-                    [1, indx1, 0, indx2, J1/2, 0], 
-                    [0, indx1, 1, indx2, J1/2, 0],
-                    [1, indx1, 2, indx2, Jzpm/2*np.cos(alpha), -Jzpm/2*np.sin(alpha)],
-                    [2, indx1, 1, indx2, Jzpm/2*np.cos(alpha), -Jzpm/2*np.sin(alpha)],
-                    [0, indx1, 2, indx2, Jzpm/2*np.cos(alpha), Jzpm/2*np.sin(alpha)],
-                    [2, indx1, 0, indx2, Jzpm/2*np.cos(alpha), Jzpm/2*np.sin(alpha)],
-                    [0, indx1, 0, indx2, Jpmpm*np.cos(alpha), Jpmpm*np.sin(alpha)],
-                    [1, indx1, 1, indx2, Jpmpm*np.cos(alpha), -Jpmpm*np.sin(alpha)]])
+            J_matrix = J1z_
+            
+        # Extracting the matrix elements
+        Jxx = J_matrix[0, 0]
+        Jxy = J_matrix[0, 1]
+        Jxz = J_matrix[0, 2]
+        Jyx = J_matrix[1, 0]
+        Jyy = J_matrix[1, 1]
+        Jyz = J_matrix[1, 2]
+        Jzx = J_matrix[2, 0]
+        Jzy = J_matrix[2, 1]
+        Jzz = J_matrix[2, 2]
+        
+        # Converting to S+, S-, Sz representation
+        # S+S+ term: (Jxx - Jyy - 2i*Jxy)/4
+        # S-S- term: (Jxx - Jyy + 2i*Jxy)/4
+        # S+S- term: (Jxx + Jyy + 2i*Jyx)/4
+        # S-S+ term: (Jxx + Jyy - 2i*Jyx)/4
+        # S+Sz term: (Jxz - i*Jyz)/2
+        # S-Sz term: (Jxz + i*Jyz)/2
+        # SzS+ term: (Jzx - i*Jzy)/2
+        # SzS- term: (Jzx + i*Jzy)/2
+        # SzSz term: Jzz
+        
+        return np.array([
+            [2, indx1, 2, indx2, Jzz, 0], # SzSz
+            [0, indx1, 0, indx2, (Jxx-Jyy)/4, -Jxy/2], # S+S+ (real, imag)
+            [1, indx1, 1, indx2, (Jxx-Jyy)/4, Jxy/2], # S-S- (real, imag)
+            [0, indx1, 1, indx2, (Jxx+Jyy)/4, Jyx/2], # S+S- (real, imag)
+            [1, indx1, 0, indx2, (Jxx+Jyy)/4, -Jyx/2], # S-S+ (real, imag)
+            [0, indx1, 2, indx2, Jxz/2, -Jyz/2], # S+Sz (real, imag)
+            [1, indx1, 2, indx2, Jxz/2, Jyz/2], # S-Sz (real, imag)
+            [2, indx1, 0, indx2, Jzx/2, -Jzy/2], # SzS+ (real, imag)
+            [2, indx1, 1, indx2, Jzx/2, Jzy/2], # SzS- (real, imag)
+        ])
     return np.array([])
 
 def J2NNN(J_values, indx1, indx2, bond_type, max_site):
     """Generate next-nearest neighbor interaction terms"""
-    J1, delta1, Jpmpm, Jzpm, J2, J3, delta3 = J_values
+    J1xy, J1z, J3xy, J3z, D, E, F, G = J_values
     if indx1 < max_site and indx2 < max_site and indx1 >= 0 and indx2 >= 0:
-        return np.array([[1, indx1, 0, indx2, J2/2, 0],[0, indx1, 1, indx2, J2/2, 0]])
+        return np.array([[1, indx1, 0, indx2, D/2, 0],[0, indx1, 1, indx2, D/2, 0]])
     return np.array([])
 
 def J3NNNN(J_values, indx1, indx2, bond_type, max_site):
-    J1, delta1, Jpmpm, Jzpm, J2, J3, delta3 = J_values
+    J1xy, J1z, J3xy, J3z, D, E, F, G = J_values
     if indx1 < max_site and indx2 < max_site and indx1 >= 0 and indx2 >= 0:
-        return np.array([[2, indx1, 2, indx2, J3*delta3, 0],
-                    [1, indx1, 0, indx2, J3/2, 0],
-                    [0, indx1, 1, indx2, J3/2, 0]])
+        return np.array([[2, indx1, 2, indx2, J3z, 0],
+                    [1, indx1, 0, indx2, J3xy/2, 0],
+                    [0, indx1, 1, indx2, J3xy/2, 0]])
     return np.array([])
 
 def Zeeman(h, hx, hy, hz):
@@ -482,8 +520,8 @@ def main():
     
     # Extract parameters
     use_pbc = args.pbc == 1
-    J1, delta1, Jpmpm, Jzpm, J2, J3, delta3 = args.J1, args.delta1, args.Jpmpm, args.Jzpm, args.J2, args.J3, args.delta3
-    J_values = [J1, delta1, Jpmpm, Jzpm, J2, J3, delta3]
+    J1xy, J1z, J3xy, J3z, D, E, F, G = args.J1xy, args.J1z, args.J3xy, args.J3z, args.D, args.E, args.F, args.G
+    J_values = np.array([J1xy, J1z, J3xy, J3z, D, E, F, G])
 
     
     # Field parameters
@@ -522,13 +560,6 @@ def main():
                     term = KitaevNN(J_values, site_idx, neighbor_idx, bond_type, max_site)
                     if term.size > 0:
                         interALL.append(term)
-        
-        # Generate next-nearest neighbor interaction terms
-        for j, neighbor_idx in enumerate(NNN_list[site_idx]):
-            if site_idx < neighbor_idx:
-                term = J2NNN(J_values, site_idx, neighbor_idx, bond_type, max_site)
-                if term.size > 0:
-                    interALL.append(term)
         # Generate next-next-nearest neighbor interaction terms
         for j, neighbor_idx in enumerate(NNNN_list[site_idx]):
             if site_idx < neighbor_idx:
