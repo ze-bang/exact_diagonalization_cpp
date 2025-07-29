@@ -477,8 +477,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
     # Write spin operators at specific k-points
     write_spin_operators(output_dir, 1, [0, 0, 0], "observables_S-_Gamma.dat", max_site, positions)
     write_spin_operators(output_dir, 2, [0, 0, 0], "observables_Sz_Gamma.dat", max_site, positions)
-    write_spin_operators(output_dir, 1, [2*np.pi, 0, 0], "observables_S-_X.dat", max_site, positions)
-    write_spin_operators(output_dir, 2, [2*np.pi, 0, 0], "observables_Sz_X.dat", max_site, positions)
+    write_spin_operators(output_dir, 1, [0, 0, 4*np.pi], "observables_S-_Gammap.dat", max_site, positions)
+    write_spin_operators(output_dir, 2, [0, 0, 4*np.pi], "observables_Sz_Gammap.dat", max_site, positions)
 
 def write_interALL(output_dir, interALL, file_name):
     """Write interaction parameters to a file"""
