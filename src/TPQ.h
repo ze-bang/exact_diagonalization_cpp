@@ -21,6 +21,11 @@
 #include "construct_ham.h"
 #include <memory>
 
+// Forward declaration for CUDA wrapper
+#ifdef __CUDACC__
+#include "TPQ_cuda.cuh"
+#endif
+
 #define GET_VARIABLE_NAME(Variable) (#Variable)
 
 /**
@@ -247,7 +252,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
 
 }
 
-std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
+std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
     int num_sites,
     float spin_length,
@@ -259,7 +264,8 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     
     ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-
+    ComplexVector Spp_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
+    ComplexVector Spz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     // Create S operators for each site
     std::vector<SingleSiteOperator> Szz_ops;
     std::vector<SingleSiteOperator> Spm_ops;
@@ -272,17 +278,22 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
             int n2 = site2 % sublattice_size;
 
             // Apply operators
+            // SzSz
             std::vector<Complex> Szz_psi = Szz_ops[site].apply({tpq_state.begin(), tpq_state.end()});
             std::vector<Complex> Szz_psi2 = Szz_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
 
+            // S+S-
             std::vector<Complex> Spm_psi = Spm_ops[site].apply({tpq_state.begin(), tpq_state.end()});
             std::vector<Complex> Spm_psi2 = Spm_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
 
+            // S+S+
+            std::vector<Complex> Spp_psi = Spm_ops[site2].apply({Spm_psi.begin(), Spm_psi.end()});
 
             // Calculate expectation values
             Complex Szz_exp = Complex(0.0, 0.0);
             Complex Spm_exp = Complex(0.0, 0.0);
-
+            Complex Spp_exp = Complex(0.0, 0.0);
+            Complex Spz_exp = Complex(0.0, 0.0);
 
             for (int i = 0; i < N; i++) {
                 Szz_exp += std::conj(Szz_psi[i]) * Szz_psi2[i];
@@ -290,19 +301,32 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
             for (int i = 0; i < N; i++) {
                 Spm_exp += std::conj(Spm_psi[i]) * Spm_psi2[i];
             }
+            for (int i = 0; i < N; i++) {
+                Spp_exp += std::conj(tpq_state[i]) * Spp_psi[i];
+            }
+            for (int i = 0; i < N; i++) {
+                Spz_exp += std::conj(Spm_psi[i]) * Szz_psi2[i];
+            }
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
             Szz_exps[n1*sublattice_size+n2] += Szz_exp;
+            Spp_exps[n1*sublattice_size+n2] += Spp_exp;
+            Spz_exps[n1*sublattice_size+n2] += Spz_exp;
+
         }
     }
 
     for (int i = 0; i < sublattice_size*sublattice_size; i++) {
         Spm_exps[i] /= double(num_sites);
         Szz_exps[i] /= double(num_sites);
+        Spp_exps[i] /= double(num_sites);
+        Spz_exps[i] /= double(num_sites);
         Spm_exps[sublattice_size*sublattice_size] += Spm_exps[i];
         Szz_exps[sublattice_size*sublattice_size] += Szz_exps[i];
+        Spp_exps[sublattice_size*sublattice_size] += Spp_exps[i];
+        Spz_exps[sublattice_size*sublattice_size] += Spz_exps[i];
     }
     
-    return {Szz_exps, Spm_exps};
+    return {Szz_exps, Spm_exps, Spp_exps, Spz_exps};
 
 }
 
@@ -832,64 +856,11 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     return expectations;
 }
 
-/**
- * Write fluctuation data to file during TPQ evolution
- * 
- * @param flct_file Fluctuation data file path
- * @param spin_corr Spin correlation data file path  
- * @param inv_temp Current inverse temperature
- * @param v Current TPQ state vector
- * @param num_sites Number of lattice sites
- * @param spin_length Spin length value
- * @param Sz_ops Single site operators
- * @param double_site_ops Double site operators
- * @param sublattice_size Size of sublattice
- * @param step Current TPQ step
- */
-void writeFluctuationData(
-    const std::string& flct_file,
-    const std::string& spin_corr,
-    double inv_temp,
-    const ComplexVector& tpq_state,
-    int num_sites,
-    float spin_length,
-    const std::vector<SingleSiteOperator>& Sz_ops,
-    const std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>>& double_site_ops,
-    int sublattice_size,
-    int step
-) {
-    std::ofstream flct_out(flct_file, std::ios::app);
-    auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
-    
-    flct_out << std::setprecision(16) << inv_temp 
-             << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
-             << " " << Sz2[sublattice_size].real() << " " << Sz2[sublattice_size].imag();
-    
-    for (int i = 0; i < sublattice_size; i++) {
-        flct_out << " " << Sz[i].real() << " " << Sz[i].imag() 
-                 << " " << Sz2[i].real() << " " << Sz2[i].imag();
-    }
-    flct_out << " " << step << std::endl;
-
-    std::ofstream spin_out(spin_corr, std::ios::app);
-    auto [Szz, Spm] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
-    
-    spin_out << std::setprecision(16) << inv_temp 
-             << " " << Spm[sublattice_size*sublattice_size].real() << " " << Spm[sublattice_size*sublattice_size].imag() 
-             << " " << Szz[sublattice_size*sublattice_size].real() << " " << Szz[sublattice_size*sublattice_size].imag();
-    
-    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-        spin_out << " " << Spm[i].real() << " " << Spm[i].imag() 
-                 << " " << Szz[i].real() << " " << Szz[i].imag();
-    }
-    spin_out << " " << step << std::endl;
-}
-
 
 
 void writeFluctuationData(
     const std::string& flct_file,
-    const std::string& spin_corr,
+    const std::vector<std::string>& spin_corr,
     double inv_temp,
     const ComplexVector& tpq_state,
     int num_sites,
@@ -912,18 +883,31 @@ void writeFluctuationData(
     }
     flct_out << " " << step << std::endl;
 
-    std::ofstream spin_out(spin_corr, std::ios::app);
-    auto [Szz, Spm] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
-    
-    spin_out << std::setprecision(16) << inv_temp 
-             << " " << Spm[sublattice_size*sublattice_size].real() << " " << Spm[sublattice_size*sublattice_size].imag() 
-             << " " << Szz[sublattice_size*sublattice_size].real() << " " << Szz[sublattice_size*sublattice_size].imag();
-    
-    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-        spin_out << " " << Spm[i].real() << " " << Spm[i].imag() 
-                 << " " << Szz[i].real() << " " << Szz[i].imag();
+    auto [Szz, Spm, Spp, Spz] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
+    for (size_t idx = 0; idx < spin_corr.size(); idx++) {
+        std::ofstream corr_out(spin_corr[idx], std::ios::app);
+        
+        corr_out << std::setprecision(16) << inv_temp;
+        
+        // Write total (last element)
+        std::vector<Complex>* data_ptr = nullptr;
+        if (idx == 0) data_ptr = &Szz;
+        else if (idx == 1) data_ptr = &Spm;
+        else if (idx == 2) data_ptr = &Spp;
+        else if (idx == 3) data_ptr = &Spz;
+        
+        corr_out << " " << (*data_ptr)[sublattice_size*sublattice_size].real() 
+                 << " " << (*data_ptr)[sublattice_size*sublattice_size].imag();
+        
+        // Write individual correlations
+        for (int i = 0; i < sublattice_size*sublattice_size; i++) {
+            corr_out << " " << (*data_ptr)[i].real() 
+                     << " " << (*data_ptr)[i].imag();
+        }
+        
+        corr_out << " " << step << std::endl;
+        corr_out.close();
     }
-    spin_out << " " << step << std::endl;
 }
 
 /**
@@ -1007,7 +991,7 @@ ComplexVector get_tpq_state_at_temperature(
  * @param sublattice_size Size of sublattice for measurements
  * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr)
  */
-std::tuple<std::string, std::string, std::string, std::string> initializeTPQFiles(
+std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
     const std::string& dir,
     int sample,
     int sublattice_size
@@ -1015,7 +999,15 @@ std::tuple<std::string, std::string, std::string, std::string> initializeTPQFile
     std::string ss_file = dir + "/SS_rand" + std::to_string(sample) + ".dat";
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
     std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
-    std::string spin_corr = dir + "/spin_corr_rand" + std::to_string(sample) + ".dat";
+    
+    // Create vector of spin correlation files
+    std::vector<std::string> spin_corr_files;
+    std::vector<std::string> suffixes = {"SzSz", "SpSm", "SmSm", "SpSz"};
+    
+    for (const auto& suffix : suffixes) {
+        std::string filename = dir + "/spin_corr_" + suffix + "_rand" + std::to_string(sample) + ".dat";
+        spin_corr_files.push_back(filename);
+    }
     
     // Initialize output files
     {
@@ -1033,16 +1025,19 @@ std::tuple<std::string, std::string, std::string, std::string> initializeTPQFile
         }
         flct_out << " step" << std::endl;
 
-        std::ofstream spin_out(spin_corr);
-        spin_out << "# inv_temp spm(real) spm(imag) szz(real) szz(imag)";
-
-        for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-            spin_out << " spm" << i << "(real) spm" << i << "(imag)" << " szz" << i << "(real) szz" << i << "(imag)";
+        // Initialize each spin correlation file
+        for (const auto& file : spin_corr_files) {
+            std::ofstream spin_out(file);
+            spin_out << "# inv_temp total(real) total(imag)";
+            
+            for (int i = 0; i < sublattice_size*sublattice_size; i++) {
+                spin_out << " site" << i << "(real) site" << i << "(imag)";
+            }
+            spin_out << " step" << std::endl;
         }
-        spin_out << " step" << std::endl;
     }
     
-    return {ss_file, norm_file, flct_file, spin_corr};
+    return {ss_file, norm_file, flct_file, spin_corr_files};
 }
 
 /**
@@ -1267,7 +1262,7 @@ void microcanonical_tpq(
     }
 
 
-    const int num_temp_points = 50;
+    const int num_temp_points = 4;
     std::vector<double> measure_inv_temp(num_temp_points);
     double log_min = std::log10(1);   // Start from β = 1
     double log_max = std::log10(1000); // End at β = 1000
@@ -1383,171 +1378,6 @@ void microcanonical_tpq(
     }
 }
 
-/**
- * Canonical TPQ implementation (using imaginary time evolution)
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param max_iter Maximum number of iterations
- * @param num_samples Number of random samples
- * @param temp_interval Interval for calculating physical quantities
- * @param eigenvalues Optional output vector for final state energies
- * @param dir Output directory
- * @param delta_tau Time step for imaginary time evolution
- * @param compute_spectrum Whether to compute spectrum
- */
-void canonical_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    int N, 
-    int max_iter,
-    int num_samples,
-    int temp_interval,
-    std::vector<double>& eigenvalues,
-    std::string dir = "",
-    double delta_tau = 0.0, // Default 0 means use 1/LargeValue
-    bool compute_spectrum = false,
-    int n_max = 10, // Order of Taylor expansion
-    bool compute_observables = false,
-    std::vector<Operator> observables = {},
-    std::vector<std::string> observable_names = {},
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
-    double t_end = 100.0,
-    double dt = 0.1,
-    float spin_length = 0.5,
-    bool measure_sz = false,
-    int sublattice_size = 1
-) {
-    // Create output directory if needed
-    if (!dir.empty()) {
-        ensureDirectoryExists(dir);
-    }
-    
-    // Set default delta_tau if not specified
-    if (delta_tau <= 0.0) {
-        delta_tau = 1.0/1e10;
-    }
-    eigenvalues.clear();
-
-    int num_sites = static_cast<int>(std::log2(N));
-        // Create Sz operators
-    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops = createDoubleSiteOperators(num_sites, spin_length);
-
-
-    // Define the exponential imaginary time evolution operator function outside the loops
-    auto expMinusHalfDeltaTauH = [&H, delta_tau, n_max, N](const Complex* v_in, Complex* v_out) {
-        // Copy v_in to v_out for the first term in Taylor series
-        std::copy(v_in, v_in + N, v_out);
-        
-        // Allocate memory for temporary vectors
-        ComplexVector term(N);
-        ComplexVector Hterm(N);
-        std::copy(v_in, v_in + N, term.data());
-        
-        // Precompute coefficients for each term in the Taylor series
-        std::vector<double> coefficients(n_max + 1);
-        coefficients[0] = 1.0;  // 0th order term
-        double factorial = 1.0;
-        
-        for (int order = 1; order <= n_max; order++) {
-            factorial *= order;
-            double coef = (order % 2 == 1) ? -1.0 : 1.0;  // Alternating sign
-            coefficients[order] = coef * std::pow(delta_tau/2.0, order) / factorial;
-        }
-        
-        // Apply Taylor expansion terms
-        for (int order = 1; order <= n_max; order++) {
-            // Apply H to the previous term
-            H(term.data(), Hterm.data(), N);
-            std::swap(term, Hterm);
-            
-            // Add this term to the result
-            for (int i = 0; i < N; i++) {
-                v_out[i] += coefficients[order] * term[i];
-            }
-        }
-    };
-    
-    // For each random sample
-    for (int sample = 0; sample < num_samples; sample++) {
-        std::cout << "Canonical TPQ sample " << sample+1 << " of " << num_samples << std::endl;
-        
-        // Setup filenames
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
-        
-        // Generate initial random state
-        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
-        ComplexVector v1 = generateTPQVector(N, seed);
-        ComplexVector v0 = v1; // In canonical TPQ, v0 starts as v1
-        
-        // Calculate initial energy and norm
-        auto [energy, variance] = calculateEnergyAndVariance(H, v1, N);
-        double first_norm = cblas_dznrm2(N, v1.data(), 1);
-        double current_norm = first_norm;
-        
-        // Initial inverse temperature is 0
-        double inv_temp = 0.0;
-        
-        // Write initial state (infinite temperature)
-        writeTPQData(ss_file, inv_temp, energy, variance, current_norm, 0);
-        
-        {
-            std::ofstream norm_out(norm_file, std::ios::app);
-            norm_out << std::setprecision(16) << inv_temp << " " 
-                     << current_norm << " " << first_norm << " " << 0 << std::endl;
-        }
-        
-        // Main canonical TPQ loop
-        for (int step = 1; step <= max_iter; step++) {
-            // Report progress
-            if (step % (max_iter/10) == 0 || step == max_iter) {
-                std::cout << "  Step " << step << " of " << max_iter << std::endl;
-            }
-            
-            // Canonical TPQ: Apply exp(-delta_tau*H/2) to v1 using 4th order approximation
-            expMinusHalfDeltaTauH(v1.data(), v0.data());
-
-            // Normalize v0
-            current_norm = cblas_dznrm2(N, v0.data(), 1);
-            Complex scale_factor = Complex(1.0/current_norm, 0.0);
-            cblas_zscal(N, &scale_factor, v0.data(), 1);
-            
-            // Swap v0 and v1 for next iteration
-            std::swap(v0, v1);
-            
-            // Calculate energy and variance
-            auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v1, N);
-            
-            // Update inverse temperature
-            inv_temp += delta_tau;
-            
-            // Write data
-            writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
-            
-            {
-                std::ofstream norm_out(norm_file, std::ios::app);
-                norm_out << std::setprecision(16) << inv_temp << " " 
-                         << current_norm << " " << first_norm << " " << step << std::endl;
-            }
-            
-            // Write fluctuation data at specified intervals
-            if (step % temp_interval == 0 || step == max_iter) {
-                if (measure_sz){
-                    writeFluctuationData(flct_file, spin_corr, inv_temp, v1, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
-                }
-                // Optionally compute dynamical susceptibiltity
-                if (compute_observables) {
-                    computeObservableDynamics(H, v1, observables, observable_names, N, dir, sample, step, omega_min, omega_max, num_points, t_end, dt);
-                }
-            }
-        }
-        
-        // Store final energy for this sample
-        eigenvalues.push_back(energy);
-    }
-}
 
 /**
  * Calculate spectrum function from TPQ state

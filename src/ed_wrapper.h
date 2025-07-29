@@ -10,7 +10,7 @@
 #include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
 
-#include "TPQ_cuda.cuh"
+// #include "TPQ_cuda.cuh"
 #include "lanczos_cuda.cuh"
 
 std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
@@ -355,165 +355,165 @@ EDResults exact_diagonalization_core(
                             params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
             break;
 
-        case DiagonalizationMethod::cTPQ:
-            std::cout << "Using canonical TPQ method" << std::endl;
+        // case DiagonalizationMethod::cTPQ:
+        //     std::cout << "Using canonical TPQ method" << std::endl;
 
-            // Search for observable files and load them as operators
-            if (params.calc_observables) {
-                std::string base_dir;
-                if (!params.output_dir.empty()) {
-                    size_t pos = params.output_dir.find_last_of("/\\");
-                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
-                } else {
-                    base_dir = ".";
-                }
+        //     // Search for observable files and load them as operators
+        //     if (params.calc_observables) {
+        //         std::string base_dir;
+        //         if (!params.output_dir.empty()) {
+        //             size_t pos = params.output_dir.find_last_of("/\\");
+        //             base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+        //         } else {
+        //             base_dir = ".";
+        //         }
                 
-                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+        //         std::cout << "Searching for observable files in: " << base_dir << std::endl;
                 
-                // Create a temporary file to store the list of observable files
-                std::string temp_list_file = params.output_dir + "/observable_files.txt";
-                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
-                system(find_command.c_str());
+        //         // Create a temporary file to store the list of observable files
+        //         std::string temp_list_file = params.output_dir + "/observable_files.txt";
+        //         std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+        //         system(find_command.c_str());
                 
-                // Read the list of observable files
-                std::ifstream file_list(temp_list_file);
-                if (file_list.is_open()) {
-                    std::string observable_file;
-                    int loaded_count = 0;
+        //         // Read the list of observable files
+        //         std::ifstream file_list(temp_list_file);
+        //         if (file_list.is_open()) {
+        //             std::string observable_file;
+        //             int loaded_count = 0;
                     
-                    while (std::getline(file_list, observable_file)) {
-                        if (observable_file.empty()) continue;
+        //             while (std::getline(file_list, observable_file)) {
+        //                 if (observable_file.empty()) continue;
                         
-                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+        //                 std::cout << "Loading observable from file: " << observable_file << std::endl;
                         
-                        try {
-                            Operator obs_op(params.num_sites, params.spin_length);
+        //                 try {
+        //                     Operator obs_op(params.num_sites, params.spin_length);
                             
-                            // Determine file type and load accordingly
-                            if (observable_file.find("InterAll") != std::string::npos) {
-                                obs_op.loadFromInterAllFile(observable_file);
-                            } else {
-                                obs_op.loadFromFile(observable_file);
-                            }
+        //                     // Determine file type and load accordingly
+        //                     if (observable_file.find("InterAll") != std::string::npos) {
+        //                         obs_op.loadFromInterAllFile(observable_file);
+        //                     } else {
+        //                         obs_op.loadFromFile(observable_file);
+        //                     }
                             
-                            params.observables.push_back(obs_op);
-                            loaded_count++;
-                        }
-                        catch (const std::exception& e) {
-                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
-                        }
-                    }
+        //                     params.observables.push_back(obs_op);
+        //                     loaded_count++;
+        //                 }
+        //                 catch (const std::exception& e) {
+        //                     std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+        //                 }
+        //             }
                     
-                    file_list.close();
-                    std::remove(temp_list_file.c_str());
+        //             file_list.close();
+        //             std::remove(temp_list_file.c_str());
                     
-                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
-                }
-            }
+        //             std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+        //         }
+        //     }
 
-            canonical_tpq(H, hilbert_space_dim,
-                        params.max_iterations, params.num_samples,
-                        params.num_measure_freq,
-                        results.eigenvalues,
-                        params.output_dir,
-                        params.delta_tau, 
-                        params.compute_eigenvectors,
-                        params.num_order,
-                        params.calc_observables,params.observables, params.observable_names,
-                        params.omega_min, params.omega_max,
-                        params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); // n_max order for Taylor expansion
-            break;
+        //     canonical_tpq(H, hilbert_space_dim,
+        //                 params.max_iterations, params.num_samples,
+        //                 params.num_measure_freq,
+        //                 results.eigenvalues,
+        //                 params.output_dir,
+        //                 params.delta_tau, 
+        //                 params.compute_eigenvectors,
+        //                 params.num_order,
+        //                 params.calc_observables,params.observables, params.observable_names,
+        //                 params.omega_min, params.omega_max,
+        //                 params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); // n_max order for Taylor expansion
+        //     break;
 
-        case DiagonalizationMethod::mTPQ_CUDA:
-            std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
+        // case DiagonalizationMethod::mTPQ_CUDA:
+        //     std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
             
-            // Search for observable files and load them as operators
-            if (params.calc_observables) {
-                std::string base_dir;
-                if (!params.output_dir.empty()) {
-                    size_t pos = params.output_dir.find_last_of("/\\");
-                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
-                } else {
-                    base_dir = ".";
-                }
+        //     // Search for observable files and load them as operators
+        //     if (params.calc_observables) {
+        //         std::string base_dir;
+        //         if (!params.output_dir.empty()) {
+        //             size_t pos = params.output_dir.find_last_of("/\\");
+        //             base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+        //         } else {
+        //             base_dir = ".";
+        //         }
                 
-                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+        //         std::cout << "Searching for observable files in: " << base_dir << std::endl;
                 
-                // Create a temporary file to store the list of observable files
-                std::string temp_list_file = params.output_dir + "/observable_files.txt";
-                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
-                system(find_command.c_str());
+        //         // Create a temporary file to store the list of observable files
+        //         std::string temp_list_file = params.output_dir + "/observable_files.txt";
+        //         std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+        //         system(find_command.c_str());
                 
-                // Read the list of observable files
-                std::ifstream file_list(temp_list_file);
-                if (file_list.is_open()) {
-                    std::string observable_file;
-                    int loaded_count = 0;
+        //         // Read the list of observable files
+        //         std::ifstream file_list(temp_list_file);
+        //         if (file_list.is_open()) {
+        //             std::string observable_file;
+        //             int loaded_count = 0;
                     
-                    while (std::getline(file_list, observable_file)) {
-                        if (observable_file.empty()) continue;
+        //             while (std::getline(file_list, observable_file)) {
+        //                 if (observable_file.empty()) continue;
                         
-                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+        //                 std::cout << "Loading observable from file: " << observable_file << std::endl;
                         
-                        try {
-                            Operator obs_op(params.num_sites, params.spin_length);
+        //                 try {
+        //                     Operator obs_op(params.num_sites, params.spin_length);
                             
-                            // Extract observable name from the filename
-                            std::string obs_name = "observable";
-                            size_t name_pos = observable_file.find("observables_");
-                            if (name_pos != std::string::npos) {
-                                size_t start = name_pos + 12; // Length of "observables_"
-                                size_t end = observable_file.find(".dat", start);
-                                if (end != std::string::npos) {
-                                    obs_name = observable_file.substr(start, end - start);
-                                }
-                            } else {
-                                // Get the filename without path
-                                size_t last_slash = observable_file.find_last_of("/\\");
-                                if (last_slash != std::string::npos) {
-                                    obs_name = observable_file.substr(last_slash + 11);
-                                    // Remove .dat extension if present
-                                    size_t dot_pos = obs_name.find(".dat");
-                                    if (dot_pos != std::string::npos) {
-                                        obs_name = obs_name.substr(0, dot_pos);
-                                    }
-                                }
-                            }
+        //                     // Extract observable name from the filename
+        //                     std::string obs_name = "observable";
+        //                     size_t name_pos = observable_file.find("observables_");
+        //                     if (name_pos != std::string::npos) {
+        //                         size_t start = name_pos + 12; // Length of "observables_"
+        //                         size_t end = observable_file.find(".dat", start);
+        //                         if (end != std::string::npos) {
+        //                             obs_name = observable_file.substr(start, end - start);
+        //                         }
+        //                     } else {
+        //                         // Get the filename without path
+        //                         size_t last_slash = observable_file.find_last_of("/\\");
+        //                         if (last_slash != std::string::npos) {
+        //                             obs_name = observable_file.substr(last_slash + 11);
+        //                             // Remove .dat extension if present
+        //                             size_t dot_pos = obs_name.find(".dat");
+        //                             if (dot_pos != std::string::npos) {
+        //                                 obs_name = obs_name.substr(0, dot_pos);
+        //                             }
+        //                         }
+        //                     }
                             
-                            // Determine file type and load accordingly
-                            if (observable_file.find("InterAll") != std::string::npos) {
-                                obs_op.loadFromInterAllFile(observable_file);
-                            } else {
-                                obs_op.loadFromFile(observable_file);
-                            }
+        //                     // Determine file type and load accordingly
+        //                     if (observable_file.find("InterAll") != std::string::npos) {
+        //                         obs_op.loadFromInterAllFile(observable_file);
+        //                     } else {
+        //                         obs_op.loadFromFile(observable_file);
+        //                     }
                             
-                            params.observables.push_back(obs_op);
-                            params.observable_names.push_back(obs_name);
-                            loaded_count++;
-                        }
-                        catch (const std::exception& e) {
-                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
-                        }
-                    }
+        //                     params.observables.push_back(obs_op);
+        //                     params.observable_names.push_back(obs_name);
+        //                     loaded_count++;
+        //                 }
+        //                 catch (const std::exception& e) {
+        //                     std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+        //                 }
+        //             }
                     
-                    file_list.close();
-                    std::remove(temp_list_file.c_str());
+        //             file_list.close();
+        //             std::remove(temp_list_file.c_str());
                     
-                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
-                }
-            }
+        //             std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+        //         }
+        //     }
 
-            microcanonical_tpq_cuda_wrapper(H, hilbert_space_dim,
-                             params.max_iterations, params.num_samples,
-                             params.num_measure_freq,
-                             results.eigenvalues,
-                             params.output_dir,
-                             params.compute_eigenvectors,
-                             params.large_value,
-                             params.calc_observables, params.observables, params.observable_names,
-                            params.omega_min, params.omega_max,
-                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
-            break;
+        //     microcanonical_tpq_cuda_wrapper(H, hilbert_space_dim,
+        //                      params.max_iterations, params.num_samples,
+        //                      params.num_measure_freq,
+        //                      results.eigenvalues,
+        //                      params.output_dir,
+        //                      params.compute_eigenvectors,
+        //                      params.large_value,
+        //                      params.calc_observables, params.observables, params.observable_names,
+        //                     params.omega_min, params.omega_max,
+        //                     params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
+        //     break;
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;

@@ -50,34 +50,69 @@ def load_multiple_experimental_data(exp_data_configs):
     exp_datasets = []
     for config in exp_data_configs:
         temp, spec_heat = load_experimental_data(config['file'])
-        exp_datasets.append({
+        dataset = {
             'temp': temp,
             'spec_heat': spec_heat,
             'h': config['h'],
             'field_dir': config.get('field_dir', [1/np.sqrt(3), 1/np.sqrt(3), 1/np.sqrt(3)]),
             'weight': config.get('weight', 1.0)
-        })
+        }
+        # Add temp_min and temp_max if they exist in the config
+        if 'temp_min' in config:
+            dataset['temp_min'] = config['temp_min']
+        if 'temp_max' in config:
+            dataset['temp_max'] = config['temp_max']
+        exp_datasets.append(dataset)
     return exp_datasets
 
-def apply_gaussian_broadening(temp, spec_heat, sigma):
-    """Apply Gaussian broadening to specific heat data"""
+def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
+    """
+    Apply Gaussian broadening to specific heat data
+    
+    Parameters:
+    -----------
+    temp : array
+        Temperature values
+    spec_heat : array
+        Specific heat values
+    sigma : float
+        Broadening width. For log broadening, this is in log-temperature units.
+        For linear broadening, this is in temperature units.
+    broadening_type : str
+        'log' for broadening in log-temperature space (default)
+        'linear' for broadening in linear temperature space
+    """
     if sigma <= 0:
         return spec_heat
     
-    # Convert temperature to log space for more uniform broadening
-    log_temp = np.log(temp)
-    dt = np.mean(np.diff(log_temp))
-    
-    # Apply Gaussian filter in log-temperature space
-    # sigma_pixels converts sigma from log-temperature units to array indices
-    sigma_pixels = sigma / dt
-    
-    # Apply broadening
-    broadened_spec_heat = gaussian_filter1d(spec_heat, sigma=sigma_pixels, mode='nearest')
+    if broadening_type == 'log':
+        # Convert temperature to log space for more uniform broadening
+        # This is especially useful for data spanning multiple orders of magnitude
+        log_temp = np.log(temp)
+        
+        # Calculate the average spacing between points in log space
+        dt = np.mean(np.diff(log_temp))
+        
+        # Convert sigma from log-temperature units to array indices
+        # This tells the filter how many array elements correspond to the desired width
+        sigma_pixels = sigma / dt
+        
+        # Apply Gaussian filter in log-temperature space
+        # mode='nearest' extends the data at boundaries by replicating edge values
+        broadened_spec_heat = gaussian_filter1d(spec_heat, sigma=sigma_pixels, mode='nearest')
+        
+    elif broadening_type == 'linear':
+        # For linear broadening in regular temperature space
+        dt = np.mean(np.diff(temp))
+        sigma_pixels = sigma / dt
+        broadened_spec_heat = gaussian_filter1d(spec_heat, sigma=sigma_pixels, mode='nearest')
+        
+    else:
+        raise ValueError(f"Unknown broadening_type: {broadening_type}. Use 'log' or 'linear'.")
     
     return broadened_spec_heat
 
-def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
+def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
     # Extract J parameters (first 3) - other parameters are handled in calc_chi_squared
     Jxx, Jyy, Jzz = params[:3]
@@ -101,6 +136,10 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
             g_renorm = params[g_renorm_idx]
             h_value *= g_renorm
     
+    # Determine temperature range
+    temp_min = temp_range['temp_min'] if temp_range and 'temp_min' in temp_range else fixed_params["temp_min"]
+    temp_max = temp_range['temp_max'] if temp_range and 'temp_max' in temp_range else fixed_params["temp_max"]
+    
     # Create command for nlce.py
     if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
         cmd = [
@@ -114,8 +153,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
             '--ed_executable', str(fixed_params["ED_path"]),
             '--field_dir', f'{fixed_params["field_dir"][0]:.12f}', f'{fixed_params["field_dir"][1]:.12f}', f'{fixed_params["field_dir"][2]:.12f}',
             '--base_dir', work_dir,
-            '--temp_min', f'{fixed_params["temp_min"]:.8f}',
-            '--temp_max', f'{fixed_params["temp_max"]:.8f}',
+            '--temp_min', f'{temp_min:.8f}',
+            '--temp_max', f'{temp_max:.8f}',
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
             '--SI_units',
@@ -133,8 +172,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
             '--ed_executable', str(fixed_params["ED_path"]),
             '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
             '--base_dir', work_dir,
-            '--temp_min', str(fixed_params["temp_min"]),
-            '--temp_max', str(fixed_params["temp_max"]),
+            '--temp_min', str(temp_min),
+            '--temp_max', str(temp_max),
             '--temp_bins', str(fixed_params["temp_bins"]),
             '--thermo',
             '--SI_units',
@@ -153,6 +192,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None):
     
     try:
         logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}")
+        logging.info(f"Command: {' '.join(cmd)}")
         subprocess.run(cmd, check=True, capture_output=True)
         
         # Find the specific heat output file
@@ -205,15 +245,15 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     
     # Extract J parameters and sigma parameters
     n_datasets = len(exp_datasets)
-    Jxx, Jyy, Jzz = params[:3]
     
     # Extract sigma parameters if fitting broadening
     fit_broadening = fixed_params.get("fit_broadening", False)
     if fit_broadening:
         sigmas = params[3:3+n_datasets] if len(params) > 3 else [0.0] * n_datasets
+        sigmas[1:-1] = np.array(sigmas[1:-1])/2
     else:
-        sigmas = [2, 1, 1, 1]
-        # sigmas = [0, 0, 0, 0]
+        # sigmas = [5, 0.4771, 0.4771, 0.4771]
+        sigmas = [0, 0, 0, 0]
     
     # Extract g_renorm parameter if fitting
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
@@ -233,8 +273,36 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         weight = dataset['weight']
         sigma = sigmas[i] if i < len(sigmas) else 0.0
         
+        # Get dataset-specific temperature range if available
+        temp_range = {k: dataset[k] for k in ['temp_min', 'temp_max'] if k in dataset}
+        
+        # Find peak position in experimental data for peak weighting
+        peak_idx = np.argmax(exp_spec_heat)
+        peak_temp = exp_temp[peak_idx]
+        peak_height = exp_spec_heat[peak_idx]
+        
+        # Get peak weighting parameters
+        peak_width_factor = fixed_params.get("peak_width_factor", 1.0)
+        peak_weight_factor = fixed_params.get("peak_weight_factor", 1.0)
+        enable_peak_weighting = fixed_params.get("enable_peak_weighting", False)
+        
+        # Create weight array for each data point
+        point_weights = np.ones_like(exp_temp)
+        
+        if enable_peak_weighting and peak_weight_factor > 1.0:
+            # Define temperature range around peak (in log space for broader coverage)
+            peak_temp_min = peak_temp / peak_width_factor
+            peak_temp_max = peak_temp * peak_width_factor
+            
+            # Apply higher weights to points near the peak
+            peak_region_mask = (exp_temp >= peak_temp_min) & (exp_temp <= peak_temp_max)
+            point_weights[peak_region_mask] *= peak_weight_factor
+            
+            # Additional weight for the exact peak point
+            point_weights[peak_idx] *= 2.0
+        
         # Run NLCE with dataset-specific h field (g_renorm scaling handled in run_nlce)
-        calc_temp, calc_spec_heat = run_nlce(params, fixed_params, exp_temp, work_dir, h_field=h_field)
+        calc_temp, calc_spec_heat = run_nlce(params, fixed_params, exp_temp, work_dir, h_field=h_field, temp_range=temp_range)
         
         # Apply Gaussian broadening if sigma > 0
         if len(calc_spec_heat) > 0 and sigma > 0:
@@ -243,14 +311,113 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         # Interpolate calculated data to match experimental temperature points
         calc_interp = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
         
-        # Calculate chi-squared for this dataset
-        dataset_chi_squared = np.sum(((exp_spec_heat - calc_interp) / (exp_spec_heat + 1e-10)) ** 2)
+        # Plot results for this dataset if in plot-only mode
+        if len(calc_temp) > 0:
+            import matplotlib.pyplot as plt
+            
+            plt.figure(figsize=(12, 10))
+            
+            # Plot 1: Experimental vs Calculated with weight visualization
+            plt.subplot(3, 1, 1)
+            if enable_peak_weighting:
+                # Color points by weight for peak weighting visualization
+                scatter = plt.scatter(exp_temp, exp_spec_heat, c=point_weights, cmap='viridis', 
+                                   alpha=0.7, label='Experimental', s=30)
+                plt.colorbar(scatter, label='Weight')
+                plt.axvline(x=peak_temp, color='orange', linestyle='--', alpha=0.7, label=f'Peak at {peak_temp:.2f}K')
+                if peak_weight_factor > 1.0:
+                    peak_temp_min = peak_temp / peak_width_factor
+                    peak_temp_max = peak_temp * peak_width_factor
+                    plt.axvspan(peak_temp_min, peak_temp_max, alpha=0.2, color='orange', label='Peak region')
+            else:
+                plt.scatter(exp_temp, exp_spec_heat, color='blue', alpha=0.7, label='Experimental')
+            
+            plt.plot(exp_temp, calc_interp, color='red', linewidth=2, label='Calculated (interpolated)')
+            plt.xlabel('Temperature (K)')
+            plt.ylabel('Specific Heat (J/mol·K)')
+            title = f'Dataset {i+1}: h={h_field}'
+            if enable_peak_weighting:
+                title += f' (Peak-weighted fit)'
+            plt.title(title)
+            plt.xscale('log')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Plot 2: Residuals (weighted if peak weighting is enabled)
+            plt.subplot(3, 1, 2)
+            residuals = exp_spec_heat - calc_interp
+            if enable_peak_weighting:
+                weighted_residuals = residuals * np.sqrt(point_weights)
+                plt.scatter(exp_temp, weighted_residuals, c=point_weights, cmap='viridis', alpha=0.7)
+                plt.ylabel('Weighted Residual')
+                plt.title('Weighted Residuals')
+            else:
+                plt.scatter(exp_temp, residuals, color='green', alpha=0.7)
+                plt.ylabel('Residual (Exp - Calc)')
+                plt.title('Residuals')
+            plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            plt.xlabel('Temperature (K)')
+            plt.xscale('log')
+            plt.grid(True, alpha=0.3)
+            
+            # Plot 3: Peak region detail or relative residuals
+            plt.subplot(3, 1, 3)
+            if enable_peak_weighting and peak_weight_factor > 1.0:
+                # Show peak region detail
+                peak_temp_min = peak_temp / peak_width_factor
+                peak_temp_max = peak_temp * peak_width_factor
+                peak_mask = (exp_temp >= peak_temp_min) & (exp_temp <= peak_temp_max)
+                if np.any(peak_mask):
+                    plt.scatter(exp_temp[peak_mask], exp_spec_heat[peak_mask], 
+                              color='blue', alpha=0.7, label='Experimental (Peak region)', s=50)
+                    plt.plot(exp_temp[peak_mask], calc_interp[peak_mask], 
+                            color='red', linewidth=2, label='Calculated (Peak region)')
+                    plt.axvline(x=peak_temp, color='orange', linestyle='--', alpha=0.7, 
+                              label=f'Peak at {peak_temp:.2f}K')
+                    plt.xlabel('Temperature (K)')
+                    plt.ylabel('Specific Heat (J/mol·K)')
+                    plt.title('Peak Region Detail')
+                    plt.legend()
+                    plt.grid(True, alpha=0.3)
+            else:
+                # Show relative residuals
+                relative_residuals = residuals / (exp_spec_heat + 1e-10)
+                plt.scatter(exp_temp, relative_residuals * 100, color='purple', alpha=0.7)
+                plt.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+                plt.xlabel('Temperature (K)')
+                plt.ylabel('Relative Residual (%)')
+                plt.title('Relative Residuals')
+                plt.xscale('log')
+                plt.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plot_file = os.path.join(work_dir, f'dataset_{i+1}_comparison.png')
+            plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            logging.info(f"Saved comparison plot for dataset {i+1} to {plot_file}")
+
+        # Calculate weighted chi-squared for this dataset
+        residuals = exp_spec_heat - calc_interp
+        relative_residuals = residuals / (exp_spec_heat + 1e-10)
         
-        # Apply weight and add to total
+        if enable_peak_weighting:
+            # Apply point weights to chi-squared calculation
+            weighted_chi_squared_terms = point_weights * (relative_residuals ** 2)
+            dataset_chi_squared = np.sum(weighted_chi_squared_terms)
+        else:
+            # Standard chi-squared calculation
+            dataset_chi_squared = np.sum(relative_residuals ** 2)
+        
+        # Apply dataset weight and add to total
         weighted_chi_squared = weight * dataset_chi_squared
         total_chi_squared += weighted_chi_squared
         
-        logging.info(f"Dataset {i+1} (h={h_field}, σ={sigma:.4f}): Chi-squared={dataset_chi_squared:.4f}, Weighted={weighted_chi_squared:.4f}")
+        log_msg = f"Dataset {i+1} (h={h_field}, σ={sigma:.4f})"
+        if enable_peak_weighting:
+            log_msg += f": Peak at {peak_temp:.2f}K"
+        log_msg += f", Chi-squared={dataset_chi_squared:.4f}, Weighted={weighted_chi_squared:.4f}"
+        logging.info(log_msg)
     
     param_str = f"Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}"
     if fit_broadening and len(params) > 3:
@@ -273,7 +440,8 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     if fit_broadening:
         sigmas = best_params[3:3+n_datasets] if len(best_params) > 3 else [0.0] * n_datasets
     else:
-        sigmas = [2, 1, 1, 1]
+        # sigmas = [5, 0.4771, 0.4771, 0.4771]
+        sigmas = [0, 0, 0, 0]
     
     # Extract g_renorm if fitted
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
@@ -292,12 +460,15 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
         h_field = dataset['h']
         sigma = sigmas[i] if i < len(sigmas) else 0.0
         
+        # Get dataset-specific temperature range if available
+        temp_range = {k: dataset[k] for k in ['temp_min', 'temp_max'] if k in dataset}
+        
         # Plot experimental data
         plt.scatter(exp_temp, exp_spec_heat, color=color, alpha=0.7, 
                    label=f'Exp Data (h={h_field})', zorder=5)
         
         # Calculate and plot fitted data
-        calc_temp, calc_spec_heat = run_nlce(best_params, fixed_params, exp_temp, work_dir, h_field=h_field)
+        calc_temp, calc_spec_heat = run_nlce(best_params, fixed_params, exp_temp, work_dir, h_field=h_field, temp_range=temp_range)
         
         if len(calc_temp) > 0:
             # Apply Gaussian broadening if sigma > 0
@@ -890,6 +1061,14 @@ def main():
     # Plotting options
     parser.add_argument('--plot_only', action='store_true', help='Only plot initial parameters without optimization')
 
+    # Peak fitting parameters
+    parser.add_argument('--enable_peak_weighting', action='store_true', 
+                        help='Enable peak-weighted fitting to prioritize peak position')
+    parser.add_argument('--peak_width_factor', type=float, default=2.0, 
+                        help='Factor defining peak region width (peak_temp/factor to peak_temp*factor)')
+    parser.add_argument('--peak_weight_factor', type=float, default=5.0, 
+                        help='Extra weight factor for points in peak region')
+
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin instead of specific heat')
 
     args = parser.parse_args()
@@ -940,8 +1119,14 @@ def main():
         "ED_method": args.ED_method,
         "ED_path": args.ed_executable,
         "fit_broadening": args.fit_broadening,
-        "fit_g_renorm": args.fit_g_renorm
+        "fit_g_renorm": args.fit_g_renorm,
+        "enable_peak_weighting": args.enable_peak_weighting,
+        "peak_width_factor": args.peak_width_factor,
+        "peak_weight_factor": args.peak_weight_factor
     }
+
+    print(f"Fixed parameters: {fixed_params}")
+    logging.info(f"Fixed parameters: {fixed_params}")
 
     try:
         # Load experimental data
@@ -1097,12 +1282,16 @@ def main():
                 )
             else:
                 # Use traditional scipy.optimize.minimize
+                print(f"Using scipy.optimize.minimize with method {args.method}")
+                logging.info(f"Using scipy.optimize.minimize with method {args.method}")
+                print(f"Fixed parameters: {fixed_params}")
+                logging.info(f"Fixed parameters: {fixed_params}")
                 result = minimize(
                     calc_chi_squared,
                     initial_params,
                     args=(fixed_params, exp_datasets, work_dir),
                     method=args.method,
-                    bounds=bounds if args.method in ['L-BFGS-B', 'TNC', 'SLSQP', 'COBYLA'] else None,
+                    bounds=bounds if args.method in ['L-BFGS-B', 'TNC', 'SLSQP', 'COBYLA', 'Nelder-Mead'] else None,
                     constraints=constraints if args.method in ['SLSQP', 'COBYLA', 'trust-constr'] else None,
                     options={'maxiter': args.max_iter, 'disp': True, 'ftol': args.tolerance}
                 )
