@@ -433,57 +433,249 @@ def plot_heatmaps_from_processed_data(data_dir):
     plot_outdir = os.path.join(data_dir, 'plots')
     os.makedirs(plot_outdir, exist_ok=True)
     
-    # Plot QFI scatter plots
+    # Plot QFI heatmaps and scatter plots
     for species, data_points in all_qfi_data.items():
         if not data_points:
             continue
             
-        # Extract data
-        jpm_vals = np.array([point[0] for point in data_points])
-        beta_vals = np.array([point[1] for point in data_points])
-        qfi_vals = np.array([point[2] for point in data_points]) 
+        # Extract data and split into positive and negative Jpm
+        data_array = np.array(data_points)
+        jpm_vals = data_array[:, 0]
+        beta_vals = data_array[:, 1]
+        qfi_vals = data_array[:, 2]
         
-        # Plot scatter
-        plt.figure(figsize=(12, 8))
-        scatter = plt.scatter(jpm_vals, beta_vals, c=qfi_vals, cmap='viridis', s=50, edgecolors='black')
-        plt.colorbar(scatter, label='QFI')
+        # Split data
+        pos_mask = jpm_vals > 0
+        neg_mask = jpm_vals < 0
         
-        plt.xlabel('Jpm')
-        plt.ylabel('Beta (β)')
-        plt.yscale('log')
-        plt.title(f'QFI vs (Jpm, Beta) for {species}')
+        # Create figure with subplots
+        fig = plt.figure(figsize=(20, 15))
         
-        scatter_filename = os.path.join(plot_outdir, f'qfi_scatter_{species}.png')
-        plt.savefig(scatter_filename, dpi=300, bbox_inches='tight')
+        # Scatter plot for Jpm > 0
+        ax1 = plt.subplot(3, 2, 1)
+        if np.any(pos_mask):
+            scatter1 = ax1.scatter(jpm_vals[pos_mask], beta_vals[pos_mask], 
+                                 c=qfi_vals[pos_mask], cmap='viridis', s=50, edgecolors='black')
+            plt.colorbar(scatter1, ax=ax1, label='QFI')
+        ax1.set_xlabel('Jpm')
+        ax1.set_ylabel('Beta (β)')
+        ax1.set_yscale('log')
+        ax1.set_title(f'QFI Scatter (Jpm > 0) - {species}')
+        
+        # Scatter plot for Jpm < 0
+        ax2 = plt.subplot(3, 2, 2)
+        if np.any(neg_mask):
+            scatter2 = ax2.scatter(jpm_vals[neg_mask], beta_vals[neg_mask], 
+                                 c=qfi_vals[neg_mask], cmap='viridis', s=50, edgecolors='black')
+            plt.colorbar(scatter2, ax=ax2, label='QFI')
+        ax2.set_xlabel('Jpm')
+        ax2.set_ylabel('Beta (β)')
+        ax2.set_yscale('log')
+        ax2.set_title(f'QFI Scatter (Jpm < 0) - {species}')
+        
+        # Interpolated heatmap for Jpm > 0
+        ax3 = plt.subplot(3, 2, 3)
+        if np.any(pos_mask):
+            jpm_pos = jpm_vals[pos_mask]
+            beta_pos = beta_vals[pos_mask]
+            qfi_pos = qfi_vals[pos_mask]
+            
+            # Create grid
+            jpm_grid_pos = np.linspace(jpm_pos.min(), jpm_pos.max(), 200)
+            beta_grid_pos = np.logspace(np.log10(beta_pos.min()), np.log10(beta_pos.max()), 200)
+            JPM_pos, BETA_pos = np.meshgrid(jpm_grid_pos, beta_grid_pos)
+            
+            # Interpolate with high smoothness
+            QFI_pos = griddata((jpm_pos, beta_pos), qfi_pos, (JPM_pos, BETA_pos), method='cubic')
+            
+            im1 = ax3.imshow(QFI_pos, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_pos.min(), jpm_pos.max(), 
+                                 np.log10(beta_pos.min()), np.log10(beta_pos.max())],
+                           interpolation='bicubic')
+            plt.colorbar(im1, ax=ax3, label='QFI')
+        ax3.set_xlabel('Jpm')
+        ax3.set_ylabel('log10(Beta)')
+        ax3.set_title(f'QFI Heatmap (Jpm > 0) - {species}')
+        
+        # Interpolated heatmap for Jpm < 0
+        ax4 = plt.subplot(3, 2, 4)
+        if np.any(neg_mask):
+            jpm_neg = jpm_vals[neg_mask]
+            beta_neg = beta_vals[neg_mask]
+            qfi_neg = qfi_vals[neg_mask]
+            
+            # Create grid
+            jpm_grid_neg = np.linspace(jpm_neg.min(), jpm_neg.max(), 200)
+            beta_grid_neg = np.logspace(np.log10(beta_neg.min()), np.log10(beta_neg.max()), 200)
+            JPM_neg, BETA_neg = np.meshgrid(jpm_grid_neg, beta_grid_neg)
+            
+            # Interpolate with high smoothness
+            QFI_neg = griddata((jpm_neg, beta_neg), qfi_neg, (JPM_neg, BETA_neg), method='cubic')
+            
+            im2 = ax4.imshow(QFI_neg, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_neg.min(), jpm_neg.max(), 
+                                 np.log10(beta_neg.min()), np.log10(beta_neg.max())],
+                           interpolation='bicubic')
+            plt.colorbar(im2, ax=ax4, label='QFI')
+        ax4.set_xlabel('Jpm')
+        ax4.set_ylabel('log10(Beta)')
+        ax4.set_title(f'QFI Heatmap (Jpm < 0) - {species}')
+        
+        # Combined heatmap
+        ax5 = plt.subplot(3, 1, 3)
+        if len(data_points) > 0:
+            # Create combined grid
+            jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
+            beta_min, beta_max = beta_vals.min(), beta_vals.max()
+            
+            jpm_grid_combined = np.linspace(jpm_min, jpm_max, 400)
+            beta_grid_combined = np.logspace(np.log10(beta_min), np.log10(beta_max), 400)
+            JPM_combined, BETA_combined = np.meshgrid(jpm_grid_combined, beta_grid_combined)
+            
+            # Interpolate combined data
+            QFI_combined = griddata((jpm_vals, beta_vals), qfi_vals, 
+                                  (JPM_combined, BETA_combined), method='cubic')
+            
+            im3 = ax5.imshow(QFI_combined, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_min, jpm_max, np.log10(beta_min), np.log10(beta_max)],
+                           interpolation='bicubic')
+            plt.colorbar(im3, ax=ax5, label='QFI')
+            
+            # Add vertical line at Jpm = 0
+            ax5.axvline(x=0, color='white', linestyle='--', linewidth=2, alpha=0.7)
+            
+        ax5.set_xlabel('Jpm')
+        ax5.set_ylabel('log10(Beta)')
+        ax5.set_title(f'QFI Combined Heatmap - {species}')
+        
+        plt.tight_layout()
+        combined_filename = os.path.join(plot_outdir, f'qfi_analysis_{species}.png')
+        plt.savefig(combined_filename, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved QFI scatter plot for {species} to {scatter_filename}")
+        print(f"Saved QFI analysis for {species} to {combined_filename}")
     
-    # Plot derivative scatter plots
+    # Plot derivative heatmaps and scatter plots
     for species, data_points in all_derivative_data.items():
         if not data_points:
             continue
             
-        # Extract data
-        jpm_vals = np.array([point[0] for point in data_points])
-        beta_vals = np.array([point[1] for point in data_points])
-        deriv_vals = np.array([point[2] for point in data_points])
+        # Extract data and split into positive and negative Jpm
+        data_array = np.array(data_points)
+        jpm_vals = data_array[:, 0]
+        beta_vals = data_array[:, 1]
+        deriv_vals = data_array[:, 2]
         
-        # Plot scatter
-        plt.figure(figsize=(12, 8))
-        scatter = plt.scatter(jpm_vals, beta_vals, c=deriv_vals, cmap='viridis', s=50, edgecolors='black')
-        plt.colorbar(scatter, label='dQFI/dβ')
-
-        plt.xlabel('Jpm')
-        plt.ylabel('Beta (β)')
-        plt.yscale('log')
-        plt.title(f'dQFI/dβ vs (Jpm, Beta) for {species}')
+        # Split data
+        pos_mask = jpm_vals > 0
+        neg_mask = jpm_vals < 0
         
-        scatter_filename = os.path.join(plot_outdir, f'qfi_derivative_scatter_{species}.png')
-        plt.savefig(scatter_filename, dpi=300, bbox_inches='tight')
+        # Create figure with subplots
+        fig = plt.figure(figsize=(20, 15))
+        
+        # Scatter plot for Jpm > 0
+        ax1 = plt.subplot(3, 2, 1)
+        if np.any(pos_mask):
+            scatter1 = ax1.scatter(jpm_vals[pos_mask], beta_vals[pos_mask], 
+                                 c=deriv_vals[pos_mask], cmap='viridis', s=50, edgecolors='black')
+            plt.colorbar(scatter1, ax=ax1, label='dQFI/dβ')
+        ax1.set_xlabel('Jpm')
+        ax1.set_ylabel('Beta (β)')
+        ax1.set_yscale('log')
+        ax1.set_title(f'dQFI/dβ Scatter (Jpm > 0) - {species}')
+        
+        # Scatter plot for Jpm < 0
+        ax2 = plt.subplot(3, 2, 2)
+        if np.any(neg_mask):
+            scatter2 = ax2.scatter(jpm_vals[neg_mask], beta_vals[neg_mask], 
+                                 c=deriv_vals[neg_mask], cmap='viridis', s=50, edgecolors='black')
+            plt.colorbar(scatter2, ax=ax2, label='dQFI/dβ')
+        ax2.set_xlabel('Jpm')
+        ax2.set_ylabel('Beta (β)')
+        ax2.set_yscale('log')
+        ax2.set_title(f'dQFI/dβ Scatter (Jpm < 0) - {species}')
+        
+        # Interpolated heatmap for Jpm > 0
+        ax3 = plt.subplot(3, 2, 3)
+        if np.any(pos_mask):
+            jpm_pos = jpm_vals[pos_mask]
+            beta_pos = beta_vals[pos_mask]
+            deriv_pos = deriv_vals[pos_mask]
+            
+            # Create grid
+            jpm_grid_pos = np.linspace(jpm_pos.min(), jpm_pos.max(), 200)
+            beta_grid_pos = np.logspace(np.log10(beta_pos.min()), np.log10(beta_pos.max()), 200)
+            JPM_pos, BETA_pos = np.meshgrid(jpm_grid_pos, beta_grid_pos)
+            
+            # Interpolate with high smoothness
+            DERIV_pos = griddata((jpm_pos, beta_pos), deriv_pos, (JPM_pos, BETA_pos), method='cubic')
+            
+            im1 = ax3.imshow(DERIV_pos, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_pos.min(), jpm_pos.max(), 
+                                 np.log10(beta_pos.min()), np.log10(beta_pos.max())],
+                           interpolation='bicubic')
+            plt.colorbar(im1, ax=ax3, label='dQFI/dβ')
+        ax3.set_xlabel('Jpm')
+        ax3.set_ylabel('log10(Beta)')
+        ax3.set_title(f'dQFI/dβ Heatmap (Jpm > 0) - {species}')
+        
+        # Interpolated heatmap for Jpm < 0
+        ax4 = plt.subplot(3, 2, 4)
+        if np.any(neg_mask):
+            jpm_neg = jpm_vals[neg_mask]
+            beta_neg = beta_vals[neg_mask]
+            deriv_neg = deriv_vals[neg_mask]
+            
+            # Create grid
+            jpm_grid_neg = np.linspace(jpm_neg.min(), jpm_neg.max(), 200)
+            beta_grid_neg = np.logspace(np.log10(beta_neg.min()), np.log10(beta_neg.max()), 200)
+            JPM_neg, BETA_neg = np.meshgrid(jpm_grid_neg, beta_grid_neg)
+            
+            # Interpolate with high smoothness
+            DERIV_neg = griddata((jpm_neg, beta_neg), deriv_neg, (JPM_neg, BETA_neg), method='cubic')
+            
+            im2 = ax4.imshow(DERIV_neg, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_neg.min(), jpm_neg.max(), 
+                                 np.log10(beta_neg.min()), np.log10(beta_neg.max())],
+                           interpolation='bicubic')
+            plt.colorbar(im2, ax=ax4, label='dQFI/dβ')
+        ax4.set_xlabel('Jpm')
+        ax4.set_ylabel('log10(Beta)')
+        ax4.set_title(f'dQFI/dβ Heatmap (Jpm < 0) - {species}')
+        
+        # Combined heatmap
+        ax5 = plt.subplot(3, 1, 3)
+        if len(data_points) > 0:
+            # Create combined grid
+            jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
+            beta_min, beta_max = beta_vals.min(), beta_vals.max()
+            
+            jpm_grid_combined = np.linspace(jpm_min, jpm_max, 400)
+            beta_grid_combined = np.logspace(np.log10(beta_min), np.log10(beta_max), 400)
+            JPM_combined, BETA_combined = np.meshgrid(jpm_grid_combined, beta_grid_combined)
+            
+            # Interpolate combined data
+            DERIV_combined = griddata((jpm_vals, beta_vals), deriv_vals, 
+                                    (JPM_combined, BETA_combined), method='cubic')
+            
+            im3 = ax5.imshow(DERIV_combined, aspect='auto', origin='lower', cmap='viridis',
+                           extent=[jpm_min, jpm_max, np.log10(beta_min), np.log10(beta_max)],
+                           interpolation='bicubic')
+            plt.colorbar(im3, ax=ax5, label='dQFI/dβ')
+            
+            # Add vertical line at Jpm = 0
+            ax5.axvline(x=0, color='white', linestyle='--', linewidth=2, alpha=0.7)
+            
+        ax5.set_xlabel('Jpm')
+        ax5.set_ylabel('log10(Beta)')
+        ax5.set_title(f'dQFI/dβ Combined Heatmap - {species}')
+        
+        plt.tight_layout()
+        combined_filename = os.path.join(plot_outdir, f'qfi_derivative_analysis_{species}.png')
+        plt.savefig(combined_filename, dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"Saved derivative scatter plot for {species} to {scatter_filename}")
+        print(f"Saved derivative analysis for {species} to {combined_filename}")
     
-    print("Scatter plot generation from processed data complete!")
+    print("Heatmap generation from processed data complete!")
 
 
 if __name__ == "__main__":
@@ -492,7 +684,7 @@ if __name__ == "__main__":
     across_QFI = sys.argv[2] if len(sys.argv) > 2 else 'False'
     across_QFI = across_QFI.lower() == 'true'
     if across_QFI:
-        parse_QFI_across_Jpm(data_dir)
+        # parse_QFI_across_Jpm(data_dir)
         plot_heatmaps_from_processed_data(data_dir)
     else:
         parse_QFI_data(data_dir)
