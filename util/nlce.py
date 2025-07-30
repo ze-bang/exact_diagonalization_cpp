@@ -177,7 +177,10 @@ def main():
 
     parser.add_argument('--symmetrized', action='store_true', help='Use symmetrized Hamiltonian')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
-    
+
+    # Random transverse field
+    parser.add_argument('--random_field_width', type=float, default=0, help='Width of the random transverse field')
+
     args = parser.parse_args()
     
     # Create base directory
@@ -259,7 +262,8 @@ def main():
                 str(args.field_dir[1]),
                 str(args.field_dir[2]),
                 cluster_ham_dir,
-                file_path
+                file_path,
+                str(args.random_field_width),
             ]
             
             try:

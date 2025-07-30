@@ -156,7 +156,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             
             f.write(f"{site_id} {matrix_index} {sub_idx} {pos[0]:.6f} {pos[1]:.6f} {pos[2]:.6f}\n")
 
-def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, h, field_dir):
+def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, h, field_dir, random_field_width=0):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     
@@ -214,8 +214,27 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
         i = site_id
         
         # Zeeman term
-        local_field = h * 5.5 * np.dot(field_dir, z_local[site_id % 4])
+        local_field = h * 5.5 * 0.67048 * np.dot(field_dir, z_local[site_id % 4])
         transfer.append([2, node_mapping[i], -local_field, 0])
+
+        # Add random transverse field from a Lorentzian distribution
+        # The transverse field is coupled to Sx = 0.5 * (S+ + S-)
+        # We need a parameter for the width of the distribution, let's assume a default value for now.
+        # For a real application, this should be an input parameter.
+        transverse_field_width = float(random_field_width) # Example width (gamma) of the Lorentzian distribution
+
+        if transverse_field_width > 0:
+            # Sample from a folded Cauchy (Lorentzian) distribution
+            # np.random.standard_cauchy() samples from a Cauchy distribution with location=0, scale=1
+            # We scale it by the width and take the absolute value for a strictly positive field.
+            random_h_x = np.abs(transverse_field_width * np.random.standard_cauchy())
+        else:
+            random_h_x = 0.0
+
+        # Sx component is 0.5 * (S+ + S-), so we add terms for S+ (op 0) and S- (op 1)
+        # The coupling is -h_x * Sx = -0.5*h_x*S+ - 0.5*h_x*S-
+        transfer.append([0, node_mapping[i], -0.5 * random_h_x, 0]) # S+ term
+        transfer.append([1, node_mapping[i], -0.5 * random_h_x, 0]) # S- term
         
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
@@ -400,6 +419,7 @@ def main():
     field_dir = [float(sys.argv[5]), float(sys.argv[6]), float(sys.argv[7])]
     output_dir = sys.argv[8]
     cluster_filepath = sys.argv[9]
+    transverse_field_width = sys.argv[10] if len(sys.argv) > 10 else 0  # Default width for random field
     
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
@@ -413,8 +433,8 @@ def main():
     nn_list, positions, sublattice_indices = create_nn_lists(edges, node_mapping, vertices)
     
     # Prepare Hamiltonian
-    prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, h, field_dir)
-    
+    prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, h, field_dir, transverse_field_width)
+
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)
     

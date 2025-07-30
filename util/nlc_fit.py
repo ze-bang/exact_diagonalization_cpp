@@ -7,6 +7,7 @@ from scipy.optimize import minimize, NonlinearConstraint, differential_evolution
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
+from multiprocessing import Pool
 
 # Bayesian optimization imports
 try:
@@ -23,6 +24,7 @@ import logging
 import tempfile
 import shutil
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 #!/usr/bin/env python3
 import matplotlib.pyplot as plt
@@ -112,110 +114,215 @@ def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     
     return broadened_spec_heat
 
+def _run_single_nlce(args):
+    """Helper function to run a single NLCE instance for multiprocessing."""
+    run_idx, n_runs, cmd, work_dir, fixed_params = args
+    
+    run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
+    os.makedirs(run_work_dir, exist_ok=True)
+    
+    # Update command with run-specific base directory and shared cluster directory
+    cluster_dir = os.path.join(work_dir, f'clusters_order_{fixed_params["max_order"]}')
+    cmd_updated = cmd + ['--base_dir', run_work_dir]
+    
+    try:
+        if n_runs > 1:
+            logging.info(f"Starting NLCE run {run_idx+1}/{n_runs}")
+        
+        # logging.info(f"Command: {' '.join(cmd_updated)}")
+        subprocess.run(cmd_updated, check=True, capture_output=True)
+        
+        nlc_dir = os.path.join(run_work_dir, f'nlc_results_order_{fixed_params["max_order"]}')
+        spec_heat_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
+        
+        if not os.path.exists(spec_heat_file):
+            logging.error(f"Specific heat file not found for run {run_idx+1}: {spec_heat_file}")
+            return None, None
+        
+        calc_data = np.loadtxt(spec_heat_file)
+        return calc_data[:, 0], calc_data[:, 1]
+        
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running NLCE (run {run_idx+1}): {e}")
+        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
+        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
+        return None, None
+
+def get_symmetry_equivalent_field_dirs(field_dir):
+    """
+    Generate all cubic symmetry-equivalent field directions for a given field_dir.
+    For [1,1,1], returns all 8 [±1,±1,±1] directions (normalized).
+    """
+    # Only handle [1,1,1] and [1,0,0] style directions for now
+    field_dir = np.array(field_dir, dtype=float)
+    # Check if field_dir is close to [1,1,1] (within tolerance)
+    print("Checking field direction:", field_dir)
+    if np.allclose(np.abs(field_dir), [1/np.sqrt(3)]*3, atol=1e-6) or np.allclose(np.abs(field_dir), [1,1,1], atol=1e-6):
+        # All 8 permutations of [±1,±1,±1]
+        print("Generating symmetry-equivalent field directions for [1,1,1] style direction")
+        dirs = []
+        for sx in [-1, 1]:
+            for sy in [-1, 1]:
+                for sz in [-1, 1]:
+                    v = np.array([sx, sy, sz], dtype=float)
+                    v /= np.linalg.norm(v)
+                    dirs.append(v)
+        return dirs
+    elif np.allclose(np.abs(field_dir), [1,0,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,1,0], atol=1e-6) or np.allclose(np.abs(field_dir), [0,0,1], atol=1e-6):
+        # All 6 permutations of [±1,0,0], [0,±1,0], [0,0,±1]
+        dirs = []
+        for i in range(3):
+            for sign in [-1, 1]:
+                v = np.zeros(3)
+                v[i] = sign
+                dirs.append(v)
+        return dirs
+    else:
+        # Default: just return the input direction normalized
+        v = field_dir / np.linalg.norm(field_dir)
+        return [v]
+
+
 def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
     # Extract J parameters (first 3) - other parameters are handled in calc_chi_squared
+    print("Running NLCE with parameters:", params)
+
     Jxx, Jyy, Jzz = params[:3]
     
     # Use provided h_field if given, otherwise use the one from fixed_params
     h_value = h_field if h_field is not None else fixed_params["h"]
+    field_dir = fixed_params["field_dir"]
     
-    # Apply g_renorm scaling if it's being fitted (4th parameter if not fitting broadening, or after broadening params)
-    if fixed_params.get("fit_g_renorm", False):
-        n_datasets = fixed_params.get("n_datasets", 1)
-        fit_broadening = fixed_params.get("fit_broadening", False)
+    # If h_value is nonzero, average over all symmetry-equivalent field directions
+    if h_value != 0:
+        field_dirs = get_symmetry_equivalent_field_dirs(field_dir)
+    else:
+        field_dirs = [field_dir]
+    all_calc_temp = []
+    all_calc_spec_heat = []
+    print("Symmetry-equivalent field directions:", field_dirs)
+    for sym_field_dir in field_dirs:
+        # Determine temperature range
+        temp_min = temp_range['temp_min'] if temp_range and 'temp_min' in temp_range else fixed_params["temp_min"]
+        temp_max = temp_range['temp_max'] if temp_range and 'temp_max' in temp_range else fixed_params["temp_max"]
         
-        if fit_broadening:
-            # g_renorm is after J params and sigma params
-            g_renorm_idx = 3 + n_datasets
+        # Determine number of runs for averaging (only when fitting random transverse field)
+        fit_random_transverse_field = fixed_params.get("fit_random_transverse_field", False)
+        # Get random_transverse_field parameter from params if present
+        if fit_random_transverse_field:
+            # The index depends on whether broadening is fitted
+            n_datasets = fixed_params.get("n_datasets", 1)
+            idx = 3 + n_datasets if fixed_params.get("fit_broadening", False) else 3
+            random_transverse_field = params[idx] if len(params) > idx else 0.0
         else:
-            # g_renorm is the 4th parameter (index 3)
-            g_renorm_idx = 3
-        
-        if len(params) > g_renorm_idx:
-            g_renorm = params[g_renorm_idx]
-            h_value *= g_renorm
-    
-    # Determine temperature range
-    temp_min = temp_range['temp_min'] if temp_range and 'temp_min' in temp_range else fixed_params["temp_min"]
-    temp_max = temp_range['temp_max'] if temp_range and 'temp_max' in temp_range else fixed_params["temp_max"]
-    
-    # Create command for nlce.py
-    if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
-        cmd = [
-            'python3', 
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
-            '--max_order', str(fixed_params["max_order"]),
-            '--Jxx', f'{Jxx:.12f}',
-            '--Jyy', f'{Jyy:.12f}',
-            '--Jzz', f'{Jzz:.12f}',
-            '--h', f'{h_value:.12f}',
-            '--ed_executable', str(fixed_params["ED_path"]),
-            '--field_dir', f'{fixed_params["field_dir"][0]:.12f}', f'{fixed_params["field_dir"][1]:.12f}', f'{fixed_params["field_dir"][2]:.12f}',
-            '--base_dir', work_dir,
-            '--temp_min', f'{temp_min:.8f}',
-            '--temp_max', f'{temp_max:.8f}',
-            '--temp_bins', str(fixed_params["temp_bins"]),
-            '--thermo',
-            '--SI_units',
-            '--symmetrized'
-        ]
-    elif fixed_params["ED_method"] == 'mTPQ':
-        cmd = [
-            'python3', 
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
-            '--max_order', str(fixed_params["max_order"]),
-            '--Jxx', str(Jxx),
-            '--Jyy', str(Jyy),
-            '--Jzz', str(Jzz),
-            '--h', str(h_value),
-            '--ed_executable', str(fixed_params["ED_path"]),
-            '--field_dir', str(fixed_params["field_dir"][0]), str(fixed_params["field_dir"][1]), str(fixed_params["field_dir"][2]),
-            '--base_dir', work_dir,
-            '--temp_min', str(temp_min),
-            '--temp_max', str(temp_max),
-            '--temp_bins', str(fixed_params["temp_bins"]),
-            '--thermo',
-            '--SI_units',
-            '--method=mTPQ'
-        ]
-    
-    cmd.append('--skip_cluster_gen')
-    if fixed_params.get("skip_ham_prep", False):
-        cmd.append('--skip_ham_prep')
-    
-    if fixed_params.get("measure_spin", False):
-        cmd.append('--measure_spin')
-    
-    
+            random_transverse_field = 0.0
+        n_runs = fixed_params.get("random_field_n_runs", 10) if fit_random_transverse_field and random_transverse_field > 0 else 1
 
-    
-    try:
-        logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}")
-        logging.info(f"Command: {' '.join(cmd)}")
-        subprocess.run(cmd, check=True, capture_output=True)
-        
-        # Find the specific heat output file
-        nlc_dir = os.path.join(work_dir, f'nlc_results_order_{fixed_params["max_order"]}')
-        spec_heat_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
-        
-        if not os.path.exists(spec_heat_file):
-            logging.error(f"Specific heat file not found: {spec_heat_file}")
-            return np.array([]), np.array([])
-        
-        calc_data = np.loadtxt(spec_heat_file)
-        calc_temp = calc_data[:, 0]  # Temperature
-        calc_spec_heat = calc_data[:, 1]  # Specific heat
-        
-        return calc_temp, calc_spec_heat
-        
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error running NLCE: {e}")
-        logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
-        logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-        logging.info("NLCE calculation failed, trying with lanczos")
+        # Base command for nlce.py
+        if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
+            cmd = [
+                'python3', 
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+                '--max_order', str(fixed_params["max_order"]),
+                '--Jxx', f'{Jxx:.12f}',
+                '--Jyy', f'{Jyy:.12f}',
+                '--Jzz', f'{Jzz:.12f}',
+                '--h', f'{h_value:.12f}',
+                '--ed_executable', str(fixed_params["ED_path"]),
+                '--field_dir', f'{sym_field_dir[0]:.12f}', f'{sym_field_dir[1]:.12f}', f'{sym_field_dir[2]:.12f}',
+                '--temp_min', f'{temp_min:.8f}',
+                '--temp_max', f'{temp_max:.8f}',
+                '--temp_bins', str(fixed_params["temp_bins"]),
+                '--thermo',
+                '--SI_units'
+            ]
+            
+            # Only add symmetrization if not fitting random transverse field
+            if not fixed_params.get("fit_random_transverse_field", False):
+                cmd.append('--symmetrized')
+        elif fixed_params["ED_method"] == 'mTPQ':
+            cmd = [
+                'python3', 
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'nlce.py'),
+                '--max_order', str(fixed_params["max_order"]),
+                '--Jxx', str(Jxx),
+                '--Jyy', str(Jyy),
+                '--Jzz', str(Jzz),
+                '--h', str(h_value),
+                '--ed_executable', str(fixed_params["ED_path"]),
+                '--field_dir', str(sym_field_dir[0]), str(sym_field_dir[1]), str(sym_field_dir[2]),
+                '--temp_min', str(temp_min),
+                '--temp_max', str(temp_max),
+                '--temp_bins', str(fixed_params["temp_bins"]),
+                '--thermo',
+                '--SI_units',
+                '--method=mTPQ'
+            ]
 
+        cmd.append('--skip_cluster_gen')
+        if fixed_params.get("fit_random_transverse_field", False):
+            cmd.append('--euler_resum')
+        if fixed_params.get("skip_ham_prep", False):
+            cmd.append('--skip_ham_prep')
+        if fixed_params.get("measure_spin", False):
+            cmd.append('--measure_spin')
+        if random_transverse_field > 0:
+            cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
+        if n_runs > 1:
+            num_workers = fixed_params.get("num_workers", os.cpu_count())
+            logging.info(f"Running {n_runs} NLCE instances in parallel with {num_workers} workers (symmetry field_dir: {sym_field_dir})")
+            pool_args = [(i, n_runs, cmd, work_dir, fixed_params) for i in range(n_runs)]
+            with Pool(processes=num_workers) as pool:
+                results = pool.map(_run_single_nlce, pool_args)
+            calc_temp_list = [res[0] for res in results if res[0] is not None]
+            calc_spec_heat_list = [res[1] for res in results if res[1] is not None]
+        else:
+            logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}, field_dir={sym_field_dir}")
+            cmd.extend(['--base_dir', work_dir])
+            try:
+                # logging.info(f"Command: {' '.join(cmd)}")
+                subprocess.run(cmd, check=True, capture_output=True)
+                nlc_dir = os.path.join(work_dir, f'nlc_results_order_{fixed_params["max_order"]}')
+                spec_heat_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
+                if not os.path.exists(spec_heat_file):
+                    logging.error(f"Specific heat file not found: {spec_heat_file}")
+                    continue
+                calc_data = np.loadtxt(spec_heat_file)
+                calc_temp_list = [calc_data[:, 0]]
+                calc_spec_heat_list = [calc_data[:, 1]]
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Error running NLCE: {e}")
+                logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
+                logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
+                logging.info("NLCE calculation failed, trying with lanczos")
+                continue
+        # Average over n_runs for this field_dir
+        if len(calc_spec_heat_list) == 0:
+            logging.error(f"All NLCE runs failed for field_dir {sym_field_dir}")
+            continue
+        elif len(calc_spec_heat_list) == 1:
+            all_calc_temp.append(calc_temp_list[0])
+            all_calc_spec_heat.append(calc_spec_heat_list[0])
+        else:
+            final_calc_temp = calc_temp_list[0]
+            averaged_spec_heat = np.zeros_like(calc_spec_heat_list[0])
+            for spec_heat in calc_spec_heat_list:
+                averaged_spec_heat += spec_heat
+            averaged_spec_heat /= len(calc_spec_heat_list)
+            all_calc_temp.append(final_calc_temp)
+            all_calc_spec_heat.append(averaged_spec_heat)
+    # Now average over all symmetry-equivalent field directions
+    if len(all_calc_spec_heat) == 0:
+        logging.error("All NLCE runs failed for all symmetry-equivalent field directions")
         return np.array([]), np.array([])
+    # Use the temperature grid from the first successful run
+    final_calc_temp = all_calc_temp[0]
+    averaged_spec_heat = np.zeros_like(all_calc_spec_heat[0])
+    for spec_heat in all_calc_spec_heat:
+        averaged_spec_heat += spec_heat
+    averaged_spec_heat /= len(all_calc_spec_heat)
+    return final_calc_temp, averaged_spec_heat
 
 def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     """Interpolate calculated data to match experimental temperature points"""
@@ -257,9 +364,15 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     
     # Extract g_renorm parameter if fitting
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
+    fit_random_transverse_field = fixed_params.get("fit_random_transverse_field", False)
+    
     if fit_g_renorm:
-        if fit_broadening:
+        if fit_broadening and fit_random_transverse_field:
+            g_renorm_idx = 3 + n_datasets + 1
+        elif fit_broadening:
             g_renorm_idx = 3 + n_datasets
+        elif fit_random_transverse_field:
+            g_renorm_idx = 3 + 1
         else:
             g_renorm_idx = 3
         g_renorm = params[g_renorm_idx] if len(params) > g_renorm_idx else 1.0
@@ -1019,14 +1132,19 @@ def main():
     parser.add_argument('--initial_Jzz', type=float, default=1.0, help='Initial guess for Jzz coupling')
     parser.add_argument('--initial_sigma', type=float, default=0.1, help='Initial guess for Gaussian broadening width')
     parser.add_argument('--initial_g_renorm', type=float, default=1.0, help='Initial guess for g-factor renormalization')
+    parser.add_argument('--initial_random_transverse_field', type=float, default=0.0, help='Initial guess for random transverse field')
     parser.add_argument('--bound_min', type=float, default=-10.0, help='Lower bound for J parameters')
     parser.add_argument('--bound_max', type=float, default=10.0, help='Upper bound for J parameters')
     parser.add_argument('--sigma_bound_min', type=float, default=0.0, help='Lower bound for sigma parameters')
     parser.add_argument('--sigma_bound_max', type=float, default=10.0, help='Upper bound for sigma parameters')
     parser.add_argument('--g_renorm_bound_min', type=float, default=0.8, help='Lower bound for g_renorm parameter')
     parser.add_argument('--g_renorm_bound_max', type=float, default=1.2, help='Upper bound for g_renorm parameter')
+    parser.add_argument('--random_transverse_field_bound_min', type=float, default=0.0, help='Lower bound for random transverse field parameter')
+    parser.add_argument('--random_transverse_field_bound_max', type=float, default=10.0, help='Upper bound for random transverse field parameter')
     parser.add_argument('--fit_broadening', action='store_true', help='Include Gaussian broadening as fitting parameters')
     parser.add_argument('--fit_g_renorm', action='store_true', help='Include g-factor renormalization as fitting parameter')
+    parser.add_argument('--fit_random_transverse_field', action='store_true', help='Include random transverse field as fitting parameter')
+    parser.add_argument('--random_field_n_runs', type=int, default=10, help='Number of NLCE runs to average when fitting random transverse field')
     
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=3, help='Maximum order for NLCE calculation')
@@ -1044,6 +1162,8 @@ def main():
                                 'dual_annealing', 'bayesian_gp', 'bayesian_forest', 'adaptive_bayesian',
                                 'multi_fidelity_bayesian', 'Nelder-Mead', 'L-BFGS-B', 'SLSQP', 'COBYLA'],
                         help='Optimization method (auto tries multiple global methods including Bayesian)')
+    parser.add_argument('--num_workers', type=int, default=os.cpu_count(), 
+                        help='Number of parallel workers for random field averaging')
     parser.add_argument('--n_starts', type=int, default=10, help='Number of random starts for multi-start optimization')
     parser.add_argument('--popsize', type=int, default=15, help='Population size for differential evolution')
     parser.add_argument('--n_calls', type=int, default=100, help='Number of function calls for Bayesian optimization')
@@ -1092,12 +1212,61 @@ def main():
 
     # Generate clusters once before optimization starts to avoid redundant generation
     if not args.skip_cluster_gen:
+        # Check if we need multiple runs (for random transverse field fitting)
+        n_runs = args.random_field_n_runs if args.fit_random_transverse_field else 1
+        
+        # Parallel cluster generation using subprocess
+        
+        def generate_clusters_subprocess(run_idx):
+            """Generate clusters for a single run using subprocess"""
+            run_work_dir = os.path.join(work_dir, f'run_{run_idx}')
+            os.makedirs(run_work_dir, exist_ok=True)
+            
+            cluster_gen_cmd = [
+                'python3',
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
+                '--max_order', str(args.max_order),
+                '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}'),
+            ]
+            
+            try:
+                result = subprocess.run(cluster_gen_cmd, check=True, capture_output=True, text=True)
+                return run_idx, True, f"Clusters successfully generated in run_{run_idx}"
+            except subprocess.CalledProcessError as e:
+                return run_idx, False, f"Error in run_{run_idx}: {e.stderr}"
+        
+        logging.info(f"Generating pyrochlore clusters up to order {args.max_order} in {n_runs} directories (parallel)")
+        
+        # Use ThreadPoolExecutor for parallel subprocess execution
+        max_workers = min(args.num_workers, n_runs)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
+            
+            # Process results as they complete
+            successful = 0
+            failed = 0
+            for future in as_completed(futures):
+                run_idx, success, message = future.result()
+                if success:
+                    successful += 1
+                    logging.info(message)
+                else:
+                    failed += 1
+                    logging.error(message)
+            
+            logging.info(f"Cluster generation completed: {successful} successful, {failed} failed")
+            
+            if failed > 0:
+                logging.warning("Some cluster generations failed, but continuing with optimization")
+            
+        # Single run - generate clusters in main work directory
         logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
         cluster_gen_cmd = [
             'python3',
             os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
             '--max_order', str(args.max_order),
-            '--output_dir', work_dir+'/clusters_order_'+str(args.max_order)+'/',
+            '--output_dir', os.path.join(work_dir, f'clusters_order_{args.max_order}'),
         ]
         try:
             subprocess.run(cluster_gen_cmd, check=True)
@@ -1105,6 +1274,7 @@ def main():
         except subprocess.CalledProcessError as e:
             logging.error(f"Error generating clusters: {e}")
             logging.error("Continuing without pre-generating clusters")
+
     
     # Define fixed parameters for NLCE
     fixed_params = {
@@ -1120,6 +1290,9 @@ def main():
         "ED_path": args.ed_executable,
         "fit_broadening": args.fit_broadening,
         "fit_g_renorm": args.fit_g_renorm,
+        "fit_random_transverse_field": args.fit_random_transverse_field,
+        "random_field_n_runs": args.random_field_n_runs,
+        "num_workers": args.num_workers,
         "enable_peak_weighting": args.enable_peak_weighting,
         "peak_width_factor": args.peak_width_factor,
         "peak_weight_factor": args.peak_weight_factor
@@ -1197,6 +1370,10 @@ def main():
         if args.fit_broadening:
             initial_params.extend([args.initial_sigma] * len(exp_datasets))
         
+        # Add random transverse field parameter if fitting
+        if args.fit_random_transverse_field:
+            initial_params.append(args.initial_random_transverse_field)
+        
         # Add g_renorm parameter if fitting
         if args.fit_g_renorm:
             initial_params.append(args.initial_g_renorm)
@@ -1210,6 +1387,10 @@ def main():
         if args.fit_broadening:
             bounds.extend([(args.sigma_bound_min, args.sigma_bound_max)])
             bounds.extend([(args.sigma_bound_min/2, args.sigma_bound_max/2)] * (len(exp_datasets)-1))
+
+        # Add random transverse field bounds if fitting
+        if args.fit_random_transverse_field:
+            bounds.append((args.random_transverse_field_bound_min, args.random_transverse_field_bound_max))
 
         # Add g_renorm bounds if fitting
         if args.fit_g_renorm:
@@ -1237,9 +1418,17 @@ def main():
             if args.fit_broadening and len(initial_params) > 3:
                 sigma_str = ", ".join([f"σ{i+1}={initial_params[3+i]:.4f}" for i in range(len(exp_datasets))])
                 logging.info(f"Initial broadening parameters: {sigma_str}")
+            if args.fit_random_transverse_field:
+                random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
+                if len(initial_params) > random_field_idx:
+                    logging.info(f"Initial random transverse field parameter: {initial_params[random_field_idx]:.4f}")
             if args.fit_g_renorm:
-                if args.fit_broadening:
+                if args.fit_broadening and args.fit_random_transverse_field:
+                    g_renorm_idx = 3 + len(exp_datasets) + 1
+                elif args.fit_broadening:
                     g_renorm_idx = 3 + len(exp_datasets)
+                elif args.fit_random_transverse_field:
+                    g_renorm_idx = 3 + 1
                 else:
                     g_renorm_idx = 3
                 if len(initial_params) > g_renorm_idx:
@@ -1311,9 +1500,17 @@ def main():
         if args.fit_broadening and len(best_params) > 3:
             sigma_str = ", ".join([f"σ{i+1}={best_params[3+i]:.4f}" for i in range(len(exp_datasets))])
             logging.info(f"Best broadening parameters: {sigma_str}")
+        if args.fit_random_transverse_field:
+            random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
+            if len(best_params) > random_field_idx:
+                logging.info(f"Best random transverse field parameter: {best_params[random_field_idx]:.4f}")
         if args.fit_g_renorm:
-            if args.fit_broadening:
+            if args.fit_broadening and args.fit_random_transverse_field:
+                g_renorm_idx = 3 + len(exp_datasets) + 1
+            elif args.fit_broadening:
                 g_renorm_idx = 3 + len(exp_datasets)
+            elif args.fit_random_transverse_field:
+                g_renorm_idx = 3 + 1
             else:
                 g_renorm_idx = 3
             if len(best_params) > g_renorm_idx:
@@ -1352,9 +1549,17 @@ def main():
             if args.fit_broadening and len(best_params) > 3:
                 for i in range(len(exp_datasets)):
                     f.write(f"sigma_{i+1} = {best_params[3+i]:.8f}\n")
+            if args.fit_random_transverse_field:
+                random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
+                if len(best_params) > random_field_idx:
+                    f.write(f"random_transverse_field = {best_params[random_field_idx]:.8f}\n")
             if args.fit_g_renorm:
-                if args.fit_broadening:
+                if args.fit_broadening and args.fit_random_transverse_field:
+                    g_renorm_idx = 3 + len(exp_datasets) + 1
+                elif args.fit_broadening:
                     g_renorm_idx = 3 + len(exp_datasets)
+                elif args.fit_random_transverse_field:
+                    g_renorm_idx = 3 + 1
                 else:
                     g_renorm_idx = 3
                 if len(best_params) > g_renorm_idx:
@@ -1392,10 +1597,20 @@ def main():
                 broadening_params[f'sigma_{i+1}'] = float(best_params[3+i])
             results_dict['broadening_parameters'] = broadening_params
         
+        # Add random transverse field parameter if it was fitted
+        if args.fit_random_transverse_field:
+            random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
+            if len(best_params) > random_field_idx:
+                results_dict['random_transverse_field'] = float(best_params[random_field_idx])
+        
         # Add g_renorm parameter if it was fitted
         if args.fit_g_renorm:
-            if args.fit_broadening:
+            if args.fit_broadening and args.fit_random_transverse_field:
+                g_renorm_idx = 3 + len(exp_datasets) + 1
+            elif args.fit_broadening:
                 g_renorm_idx = 3 + len(exp_datasets)
+            elif args.fit_random_transverse_field:
+                g_renorm_idx = 3 + 1
             else:
                 g_renorm_idx = 3
             if len(best_params) > g_renorm_idx:
