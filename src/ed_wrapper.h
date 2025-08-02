@@ -125,8 +125,8 @@ struct EDParameters {
     double omega_min = -10.0; // Minimum frequency for spectral function
     double omega_max = 10.0; // Maximum frequency for spectral function
     int num_points = 1000; // Number of points for spectral function
-    double t_end = 100.0; // End time for time evolution
-    double dt = 0.1; // Time step for time evolution
+    double t_end = 50.0; // End time for time evolution
+    double dt = 0.01; // Time step for time evolution
 
     // Required lattice parameters
     int num_sites = 0; // Number of sites in the system

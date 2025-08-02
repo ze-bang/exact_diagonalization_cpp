@@ -83,7 +83,7 @@ def parse_QFI_data(data_dir):
             std_error = np.std(all_real_values, axis=0) / np.sqrt(len(all_data))
 
             # Apply Lorentzian filter to the time-domain data
-            gamma = 0.05  # Broadening parameter: larger values -> more smoothing
+            gamma = 0.1  # Broadening parameter: larger values -> more smoothing
             lorentzian_filter = np.exp(-gamma * np.abs(reference_time))
             mean_real = mean_real * lorentzian_filter
 
@@ -94,9 +94,9 @@ def parse_QFI_data(data_dir):
             mean_fft[len(mean_real)//2+1:] = mean_real[len(mean_real)//2+1:]
 
 
-            reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0])/(2*np.pi))
+            reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0]))
 
-            mean_fft = np.abs(np.fft.fft(mean_fft, norm="ortho"))
+            mean_fft = np.abs(np.fft.fft(mean_fft, norm="ortho"))  / 16
 
             # mean_fft *= 1/(2*np.pi)  # Apply the factor (1 - exp(-ω*β))/ (2π) to the Fourier transform
 
@@ -114,15 +114,14 @@ def parse_QFI_data(data_dir):
 
 
             integrand = s_omega * np.tanh(beta * omega / 2.0) * (1- np.exp(-beta * omega))
-            d_omega = omega[1] - omega[0]
-            qfi = np.sum(integrand) * d_omega / 16
+            qfi = np.trapz(integrand, omega)
 
             # Plot the spectral function
             plt.figure(figsize=(10, 6))
             plt.plot(omega, s_omega, label=f'Beta={beta} QFI={qfi:.4f}')
             plt.xlabel('Frequency (rad/s)')
             plt.ylabel('Spectral Function')
-            plt.xlim(0, np.max(omega))
+            plt.xlim(0, 1)
             plt.title(f'Spectral Function for {species} at Beta={beta}')
             plt.grid(True)
             plt.legend()
@@ -158,11 +157,14 @@ def parse_QFI_data(data_dir):
         # Plot QFI vs beta
         plt.figure(figsize=(10, 6))
         plt.plot(qfi_beta_array[:, 0], qfi_beta_array[:, 1], 'o-')
+        # plt.axvline(x=3.054, color='red', linestyle='--', alpha=0.7, label='β = 3.054')
+        # plt.axvline(x=18.738, color='blue', linestyle='--', alpha=0.7, label='β = 18.738')
         plt.xlabel('Beta (β)')
         plt.ylabel('QFI')
         plt.title(f'QFI vs. Beta for {species}')
         plt.xscale('log')
         plt.grid(True)
+        plt.legend()
 
         qfi_plot_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.png')
         plt.savefig(qfi_plot_filename, dpi=300)
@@ -183,11 +185,14 @@ def parse_QFI_data(data_dir):
             # Plot the derivative
             plt.figure(figsize=(10, 6))
             plt.plot(mid_betas, qfi_derivative, 'o-')
+            # plt.axvline(x=3.054, color='red', linestyle='--', alpha=0.7, label='β = 3.054')
+            # plt.axvline(x=18.738, color='blue', linestyle='--', alpha=0.7, label='β = 18.738')
             plt.xlabel('Beta (β)')
             plt.ylabel('dQFI/dβ')
             plt.title(f'Derivative of QFI vs. Beta for {species}')
             plt.xscale('log')
             plt.grid(True)
+            plt.legend()
 
             derivative_plot_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_beta_{species}.png')
             plt.savefig(derivative_plot_filename, dpi=300)
