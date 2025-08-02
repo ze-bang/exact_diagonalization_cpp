@@ -1,7 +1,8 @@
 import numpy as np
+from scipy.signal import find_peaks
 import matplotlib.pyplot as plt
 
-directory = './XYX_pbc/Jpm=0.045/output/'
+directory = '0_flux_super_16_sites/output/'
 
 # Load data from file
 data_file = directory + '/eigenvalues.txt'
@@ -66,29 +67,44 @@ def calculate_thermodynamic_quantities(temperatures, eigenvalues, SI=False):
 
 
 temperature = np.logspace(-4, 2, 100)  # Temperature range from 1e-5 to 100
+beta = 1.0 / temperature  # Inverse temperature
 
 results = calculate_thermodynamic_quantities(temperature, data)
 
+# Find local maxima in specific heat
+peaks, _ = find_peaks(results['specific_heat'])
 
 # Create figure and axes
 plt.figure(figsize=(10, 6))
 
 # Plot the data
-plt.plot(temperature, results['specific_heat'], '-', color='blue', linewidth=2, label='Specific Heat')
+plt.plot(beta, results['specific_heat'], '-', color='blue', linewidth=2, label='Specific Heat')
+
+# Mark and label peak positions
+for peak_idx in peaks:
+    peak_beta = beta[peak_idx]
+    peak_value = results['specific_heat'][peak_idx]
+    plt.plot(peak_beta, peak_value, 'ro', markersize=8)
+    plt.annotate(f'Peak\nβ={peak_beta:.3f}\nC={peak_value:.3f}', 
+                xy=(peak_beta, peak_value), 
+                xytext=(peak_beta*0.8, peak_value*1.1),
+                fontsize=10,
+                ha='center',
+                arrowprops=dict(arrowstyle='->', color='red', lw=1.5))
 
 # exp_data = np.loadtxt('./specific_heat_Pr2Zr2O7.txt', comments='#')
 # Plot experimental data
 # plt.plot(exp_data[:, 0], exp_data[:, 1], 'o', color='red', markersize=5, label='Experimental Data')
-# plt.plot(temperature, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')
+# plt.plot(beta, results['energy'], '-', color='orange', linewidth=2, label='Specific Heat')
 
 
-# Set x-axis to log scale since temperature values span several orders of magnitude
+# Set x-axis to log scale since beta values span several orders of magnitude
 plt.xscale('log')
 
 # Add labels and title
-plt.xlabel('Temperature (log scale)', fontsize=14)
+plt.xlabel('Inverse Temperature β (log scale)', fontsize=14)
 plt.ylabel('Specific Heat', fontsize=14)
-plt.title('Specific Heat vs Temperature', fontsize=16)
+plt.title('Specific Heat vs Inverse Temperature', fontsize=16)
 
 # Add grid for better readability
 plt.grid(True, linestyle='--', alpha=0.7)

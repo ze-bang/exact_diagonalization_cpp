@@ -1541,8 +1541,8 @@ def main():
             f.write(f"# Best-fit parameters for specific heat\n")
             f.write(f"# Optimization method: {args.method}\n")
             f.write(f"# Final chi-squared: {result.fun:.6f}\n")
-            f.write(f"# Success: {result.success}\n")
-            f.write(f"# Message: {result.message}\n")
+            f.write(f"# Success: {getattr(result, 'success', None)}\n")
+            f.write(f"# Message: {getattr(result, 'message', '')}\n")
             f.write(f"Jxx = {best_params[0]:.8f}\n")
             f.write(f"Jyy = {best_params[1]:.8f}\n")
             f.write(f"Jzz = {best_params[2]:.8f}\n")
@@ -1564,7 +1564,7 @@ def main():
                     g_renorm_idx = 3
                 if len(best_params) > g_renorm_idx:
                     f.write(f"g_renorm = {best_params[g_renorm_idx]:.8f}\n")
-            
+        
         # Save detailed results
         results_file = os.path.join(args.output_dir, 'optimization_results.json')
         results_dict = {
@@ -1575,8 +1575,8 @@ def main():
                 'Jzz': float(best_params[2])
             },
             'chi_squared': float(result.fun),
-            'success': bool(result.success),
-            'message': str(result.message),
+            'success': getattr(result, 'success', None),
+            'message': getattr(result, 'message', ''),
             'nfev': getattr(result, 'nfev', None),
             'nit': getattr(result, 'nit', None)
         }
