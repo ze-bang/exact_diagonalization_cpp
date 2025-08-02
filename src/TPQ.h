@@ -1262,7 +1262,7 @@ void microcanonical_tpq(
     }
 
 
-    const int num_temp_points = 10;
+    const int num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
     double log_min = std::log10(1);   // Start from β = 1
     double log_max = std::log10(1000); // End at β = 1000
