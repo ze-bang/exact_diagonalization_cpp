@@ -2011,7 +2011,7 @@ public:
             double phase = -Q_vector[0] * positions[i][0] + 
                           -Q_vector[1] * positions[i][1] + 
                           -Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
+            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
         }
         // Add transforms for each site with appropriate phase factor
         for (int site = 0; site < num_site; ++site) {

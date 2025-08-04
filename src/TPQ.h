@@ -1212,177 +1212,6 @@ void computeObservableDynamics_U_t(
 }
 
 
-/**
- * Standard TPQ (microcanonical) implementation
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param max_iter Maximum number of iterations
- * @param num_samples Number of random samples
- * @param temp_interval Interval for calculating physical quantities
- * @param eigenvalues Optional output vector for final state energies
- * @param dir Output directory
- * @param compute_spectrum Whether to compute spectrum
- */
-void microcanonical_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    int N, 
-    int max_iter,
-    int num_samples,
-    int temp_interval,
-    std::vector<double>& eigenvalues,
-    std::string dir = "",
-    bool compute_spectrum = false,
-    double LargeValue = 1e5,
-    bool compute_observables = false,
-    std::vector<Operator> observables = {},
-    std::vector<std::string> observable_names = {},
-    double omega_min = -20.0,
-    double omega_max = 20.0,
-    int num_points = 10000,
-    double t_end = 50.0,
-    double dt = 0.01,
-    float spin_length = 0.5,
-    bool measure_sz = false,
-    int sublattice_size = 1
-) {
-    // Create output directory if needed
-    if (!dir.empty()) {
-        ensureDirectoryExists(dir);
-    }
-    
-    int num_sites = static_cast<int>(std::log2(N));
-
-    eigenvalues.clear();
-
-    // Create Sz operators
-    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
-
-    std::function<void(const Complex*, Complex*, int)> U_t;
-    std::function<void(const Complex*, Complex*, int)> U_nt;   
-    if (compute_observables) {
-        U_t = create_time_evolution_operator(H, dt, 10);
-        U_nt = create_time_evolution_operator(H, -dt, 10);
-    }
-
-
-    const int num_temp_points = 20;
-    std::vector<double> measure_inv_temp(num_temp_points);
-    double log_min = std::log10(1);   // Start from β = 1
-    double log_max = std::log10(1000); // End at β = 1000
-    for (int i = 0; i < num_temp_points; ++i) {
-        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
-    }
-
-    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
-
-    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
-    // For each random sample
-    for (int sample = 0; sample < num_samples; sample++) {
-        std::vector<bool> temp_measured(num_temp_points, false);
-        std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
-        
-        // Setup filenames
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
-        
-        // Generate initial random state
-        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
-        ComplexVector v1 = generateTPQVector(N, seed);
-        
-        // Apply hamiltonian to get v0 = H|v1⟩
-        ComplexVector v0(N);
-        H(v1.data(), v0.data(), N);
-
-        // For each element, compute v0 = (L-H)|v1⟩ = Lv1 - v0
-        for (int i = 0; i < N; i++) {
-            v0[i] = (LargeValue * num_sites * v1[i]) - v0[i];
-        }
-
-        
-        // Write initial state (infinite temperature)
-        double inv_temp = 0.0;
-        int step = 1;
-        
-        // Calculate energy and variance for step 1
-        auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
-        double nsite = N; // This should be the actual number of sites, approximating as N for now
-        inv_temp = (2.0) / (LargeValue* num_sites - energy1);
-
-        double first_norm = cblas_dznrm2(N, v0.data(), 1);
-        Complex scale_factor = Complex(1.0/first_norm, 0.0);
-
-        cblas_zscal(N, &scale_factor, v0.data(), 1);
-
-        double current_norm = first_norm;
-        
-        writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
-        
-        {
-            std::ofstream norm_out(norm_file, std::ios::app);
-            norm_out << std::setprecision(16) << inv_temp << " " 
-                     << current_norm << " " << first_norm << " " << step << std::endl;
-        }
-        
-        // Main TPQ loop
-        for (step = 2; step <= max_iter; step++) {
-            // Report progress
-            if (step % (max_iter/10) == 0 || step == max_iter) {
-                std::cout << "  Step " << step << " of " << max_iter << std::endl;
-            }
-            
-            // Compute v1 = H|v0⟩
-            H(v0.data(), v1.data(), N);
-            
-            // For each element, compute v0 = (L-H)|v0⟩ = L*v0 - v1
-            for (int i = 0; i < N; i++) {
-                v0[i] = (LargeValue * num_sites * v0[i]) - v1[i];
-            }
-
-            current_norm = cblas_dznrm2(N, v0.data(), 1);
-            scale_factor = Complex(1.0/current_norm, 0.0);
-            cblas_zscal(N, &scale_factor, v0.data(), 1);
-            
-            // Calculate energy and variance
-            auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
-            
-            // Update inverse temperature
-            inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
-            
-            // Write data
-            writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
-            
-            {
-                std::ofstream norm_out(norm_file, std::ios::app);
-                norm_out << std::setprecision(16) << inv_temp << " " 
-                         << current_norm << " " << first_norm << " " << step << std::endl;
-            }
-            
-            energy1 = energy_step;
-
-            // Write fluctuation data at specified intervals
-            if (step % temp_interval == 0 || step == max_iter) {
-                if (measure_sz){
-                    writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
-                }
-            }
-            // If inv_temp is at one of the specified inverse temperature points, compute observables
-            for (int i = 0; i < num_temp_points; ++i) {
-                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
-                    std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
-                    if (compute_observables) {
-                        computeObservableDynamics_U_t(U_t, U_nt, v0, observables, observable_names, N, dir, sample, inv_temp, omega_min, omega_max, num_points, t_end, dt);
-                    }
-                    temp_measured[i] = true; // Mark this temperature as measured
-                }
-            }
-        }
-        
-        // Store final energy for this sample
-        eigenvalues.push_back(energy1);
-    }
-}
-
 
 /**
  * Calculate spectrum function from TPQ state
@@ -1883,11 +1712,11 @@ void computeSpinStructureFactorKrylov(
     
     // Define spin combinations once
     constexpr std::array<std::pair<int, int>, 5> spin_combinations = {{
-        {0, 1}, // S+(q) * S-(-q)  
+        {0, 0}, // S+(q) * S-(-q)  
         {2, 2}, // Sz(q) * Sz(-q)
-        {0, 0}, // S+(q) * S+(-q)
+        {0, 1}, // S+(q) * S+(-q)
         {0, 2}, // S+(q) * Sz(-q)
-        {2, 0}  // Sz(q) * S+(-q)
+        {2, 1}  // Sz(q) * S+(-q)
     }};
     
     constexpr std::array<const char*, 5> combination_names = {
@@ -1910,11 +1739,8 @@ void computeSpinStructureFactorKrylov(
                   << ": Q = [" << Q_vector[0] << ", " << Q_vector[1] << ", " << Q_vector[2] << "]" << std::endl;
         
         // Pre-compute negative Q vector
-        std::vector<double> neg_Q_vector = {-Q_vector[0], -Q_vector[1], -Q_vector[2]};
+        const std::vector<double> neg_Q_vector = {-Q_vector[0], -Q_vector[1], -Q_vector[2]};
         
-        // Cache operators for reuse across spin combinations when possible
-        std::unique_ptr<SumOperator> cached_S_q_ops[3];
-        std::unique_ptr<SumOperator> cached_S_minus_q_ops[3];
         
         for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); combo_idx++) {
             int op_type_1 = spin_combinations[combo_idx].first;   // First operator type
@@ -1922,20 +1748,11 @@ void computeSpinStructureFactorKrylov(
             std::string op_name = std::string(combination_names[combo_idx]) + "_" + q_label;
             
             std::cout << "  Computing " << op_name << " correlations..." << std::endl;
-            
-            // Reuse or create operators
-            if (!cached_S_q_ops[op_type_1]) {
-                cached_S_q_ops[op_type_1] = std::make_unique<SumOperator>(
-                    num_sites, spin_length, op_type_1, Q_vector, positions_file);
-            }
-            if (!cached_S_minus_q_ops[op_type_2]) {
-                cached_S_minus_q_ops[op_type_2] = std::make_unique<SumOperator>(
-                    num_sites, spin_length, op_type_2, neg_Q_vector, positions_file);
-            }
-            
-            SumOperator& S_q_op = *cached_S_q_ops[op_type_1];
-            SumOperator& S_minus_q_op = *cached_S_minus_q_ops[op_type_2];
-            
+
+
+            SumOperator S_q_op(num_sites, spin_length, op_type_1, Q_vector, positions_file);
+            SumOperator S_minus_q_op(num_sites, spin_length, op_type_2, neg_Q_vector, positions_file);
+
             // Apply S^α(-q) to initial state: |φ⟩ = S^α(-q)|ψ⟩
             S_minus_q_op.apply(tpq_state.data(), S_minus_q_psi.data(), N);
             
@@ -1946,6 +1763,10 @@ void computeSpinStructureFactorKrylov(
             Complex initial_corr;
             cblas_zdotc_sub(N, S_q_psi.data(), 1, S_minus_q_psi.data(), 1, &initial_corr);
             time_correlation[0] = initial_corr;
+
+            std::cout << "    Initial correlation C(0) = " 
+                      << initial_corr.real() << " + i*" 
+                      << initial_corr.imag() << std::endl;
             
             // Initialize evolution states
             std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
@@ -2058,6 +1879,198 @@ void computeTPQSpinStructureFactorKrylov(
 }
 
 
+
+/**
+ * Standard TPQ (microcanonical) implementation
+ * 
+ * @param H Hamiltonian operator function
+ * @param N Dimension of the Hilbert space
+ * @param max_iter Maximum number of iterations
+ * @param num_samples Number of random samples
+ * @param temp_interval Interval for calculating physical quantities
+ * @param eigenvalues Optional output vector for final state energies
+ * @param dir Output directory
+ * @param compute_spectrum Whether to compute spectrum
+ */
+void microcanonical_tpq(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N, 
+    int max_iter,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& eigenvalues,
+    std::string dir = "",
+    bool compute_spectrum = false,
+    double LargeValue = 1e5,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1
+) {
+    // Create output directory if needed
+    if (!dir.empty()) {
+        ensureDirectoryExists(dir);
+    }
+    
+    int num_sites = static_cast<int>(std::log2(N));
+
+    eigenvalues.clear();
+
+    // Create Sz operators
+    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+
+    std::function<void(const Complex*, Complex*, int)> U_t;
+    std::function<void(const Complex*, Complex*, int)> U_nt;
+    std::vector<std::vector<double>> momentum_positions;
+    if (compute_observables) {
+        momentum_positions = {{0,0,0},
+                             {0,0,4*M_PI},
+                             {0,0,2*M_PI}};
+    }
+
+    std::string position_file;
+    if (!dir.empty()) {
+        size_t last_slash_pos = dir.find_last_of('/');
+        if (last_slash_pos != std::string::npos) {
+            // Check if the last character is a slash, if so, find the previous one
+            if (last_slash_pos == dir.length() - 1) {
+                last_slash_pos = dir.find_last_of('/', last_slash_pos - 1);
+            }
+            if (last_slash_pos != std::string::npos) {
+                position_file = dir.substr(0, last_slash_pos) + "/positions.dat";
+            } else {
+                position_file = "positions.dat"; // In case dir is just a name without slashes
+            }
+        } else {
+            position_file = "positions.dat"; // Relative path
+        }
+    }
+
+
+
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);   // Start from β = 1
+    double log_max = std::log10(1000); // End at β = 1000
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
+
+    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
+
+    std::cout << "Setting LargeValue: " << LargeValue << std::endl;
+    // For each random sample
+    for (int sample = 0; sample < num_samples; sample++) {
+        std::vector<bool> temp_measured(num_temp_points, false);
+        std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
+        
+        // Setup filenames
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+        
+        // Generate initial random state
+        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+        ComplexVector v1 = generateTPQVector(N, seed);
+        
+        // Apply hamiltonian to get v0 = H|v1⟩
+        ComplexVector v0(N);
+        H(v1.data(), v0.data(), N);
+
+        // For each element, compute v0 = (L-H)|v1⟩ = Lv1 - v0
+        for (int i = 0; i < N; i++) {
+            v0[i] = (LargeValue * num_sites * v1[i]) - v0[i];
+        }
+
+        
+        // Write initial state (infinite temperature)
+        double inv_temp = 0.0;
+        int step = 1;
+        
+        // Calculate energy and variance for step 1
+        auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
+        double nsite = N; // This should be the actual number of sites, approximating as N for now
+        inv_temp = (2.0) / (LargeValue* num_sites - energy1);
+
+        double first_norm = cblas_dznrm2(N, v0.data(), 1);
+        Complex scale_factor = Complex(1.0/first_norm, 0.0);
+
+        cblas_zscal(N, &scale_factor, v0.data(), 1);
+
+        double current_norm = first_norm;
+        
+        writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, step);
+        
+        {
+            std::ofstream norm_out(norm_file, std::ios::app);
+            norm_out << std::setprecision(16) << inv_temp << " " 
+                     << current_norm << " " << first_norm << " " << step << std::endl;
+        }
+        
+        // Main TPQ loop
+        for (step = 2; step <= max_iter; step++) {
+            // Report progress
+            if (step % (max_iter/10) == 0 || step == max_iter) {
+                std::cout << "  Step " << step << " of " << max_iter << std::endl;
+            }
+            
+            // Compute v1 = H|v0⟩
+            H(v0.data(), v1.data(), N);
+            
+            // For each element, compute v0 = (L-H)|v0⟩ = L*v0 - v1
+            for (int i = 0; i < N; i++) {
+                v0[i] = (LargeValue * num_sites * v0[i]) - v1[i];
+            }
+
+            current_norm = cblas_dznrm2(N, v0.data(), 1);
+            scale_factor = Complex(1.0/current_norm, 0.0);
+            cblas_zscal(N, &scale_factor, v0.data(), 1);
+            
+            // Calculate energy and variance
+            auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
+            
+            // Update inverse temperature
+            inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
+            
+            // Write data
+            writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
+            
+            {
+                std::ofstream norm_out(norm_file, std::ios::app);
+                norm_out << std::setprecision(16) << inv_temp << " " 
+                         << current_norm << " " << first_norm << " " << step << std::endl;
+            }
+            
+            energy1 = energy_step;
+
+            // Write fluctuation data at specified intervals
+            if (step % temp_interval == 0 || step == max_iter) {
+                if (measure_sz){
+                    writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                }
+            }
+            // If inv_temp is at one of the specified inverse temperature points, compute observables
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                    std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
+                    if (compute_observables) {
+                        computeSpinStructureFactorKrylov(H, v0, momentum_positions, position_file, N, num_sites, spin_length, dir, sample, inv_temp);
+                    }
+                    temp_measured[i] = true; // Mark this temperature as measured
+                }
+            }
+        }
+        
+        // Store final energy for this sample
+        eigenvalues.push_back(energy1);
+    }
+}
 
 
 #endif // TPQ_H
