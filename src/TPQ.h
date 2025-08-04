@@ -17,6 +17,10 @@
 #include <ctime>
 #include <chrono>
 #include <sys/stat.h>
+#include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Sparse>
+#include <unsupported/Eigen/MatrixFunctions>
 #include "observables.h"
 #include "construct_ham.h"
 #include <memory>
@@ -456,7 +460,6 @@ void time_evolve_tpq_state(
  */
 std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
     std::function<void(const Complex*, Complex*, int)> H,
-    int N,
     double delta_t,
     int n_max = 10,
     bool normalize = true
@@ -499,8 +502,10 @@ std::function<void(const Complex*, Complex*, int)> create_time_evolution_operato
         // Normalize if requested
         if (normalize) {
             double norm = cblas_dznrm2(size, result.data(), 1);
-            Complex scale_factor = Complex(1.0/norm, 0.0);
-            cblas_zscal(size, &scale_factor, result.data(), 1);
+            if (norm > 0.0) {
+                Complex scale_factor = Complex(1.0/norm, 0.0);
+                cblas_zscal(size, &scale_factor, result.data(), 1);
+            }
         }
         
         // Copy result to output
@@ -724,7 +729,7 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
         
         // For each operator
         for (int op = 0; op < num_operators; op++) {
-            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
+            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)0
             U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
             
             // Calculate O†|ψ(t)>
@@ -1257,8 +1262,8 @@ void microcanonical_tpq(
     std::function<void(const Complex*, Complex*, int)> U_t;
     std::function<void(const Complex*, Complex*, int)> U_nt;   
     if (compute_observables) {
-        U_t = create_time_evolution_operator(H, N, dt, 10);
-        U_nt = create_time_evolution_operator(H, N, -dt, 10);
+        U_t = create_time_evolution_operator(H, dt, 10);
+        U_nt = create_time_evolution_operator(H, -dt, 10);
     }
 
 
@@ -1455,6 +1460,603 @@ void calculate_spectrum_from_tpq(
     spectrum_file.close();
     std::cout << "Spectrum calculation complete. Written to " << out_file << std::endl;
 }
+
+/**
+ * Krylov-based time evolution using Lanczos method
+ * This is much more accurate and stable than Taylor expansion
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector (will be modified)
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param krylov_dim Dimension of Krylov subspace (typically 20-50)
+ * @param normalize Whether to normalize the state after evolution
+ */
+void time_evolve_tpq_krylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int krylov_dim = 30,
+    bool normalize = true
+) {
+    // Ensure Krylov dimension doesn't exceed system size
+    krylov_dim = std::min(krylov_dim, N);
+    
+    // Pre-allocate all memory to avoid repeated allocations
+    static thread_local std::vector<ComplexVector> krylov_vectors;
+    static thread_local std::vector<double> alpha;
+    static thread_local std::vector<double> beta;
+    static thread_local ComplexVector w;
+    static thread_local int last_N = 0;
+    static thread_local int last_krylov_dim = 0;
+    
+    // Resize only if dimensions changed
+    if (last_N != N || last_krylov_dim < krylov_dim) {
+        krylov_vectors.resize(krylov_dim);
+        for (auto& vec : krylov_vectors) {
+            vec.resize(N);
+        }
+        alpha.resize(krylov_dim);
+        beta.resize(krylov_dim - 1);
+        w.resize(N);
+        last_N = N;
+        last_krylov_dim = krylov_dim;
+    }
+    
+    // Initialize first Krylov vector as normalized input state
+    double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+    if (norm < 1e-14) {
+        // Handle zero state
+        return;
+    }
+    
+    Complex scale_factor = Complex(1.0/norm, 0.0);
+    cblas_zcopy(N, tpq_state.data(), 1, krylov_vectors[0].data(), 1);
+    cblas_zscal(N, &scale_factor, krylov_vectors[0].data(), 1);
+    
+    // Lanczos iteration with improved numerical stability
+    int effective_dim = krylov_dim;
+    constexpr double ortho_threshold = 1e-10;
+    constexpr double breakdown_threshold = 1e-14;
+    
+    for (int j = 0; j < krylov_dim - 1; j++) {
+        // Apply Hamiltonian: w = H * v_j
+        H(krylov_vectors[j].data(), w.data(), N);
+        
+        // Compute alpha_j = Re(<v_j | H | v_j>) - use BLAS for efficiency
+        Complex alpha_complex;
+        cblas_zdotc_sub(N, krylov_vectors[j].data(), 1, w.data(), 1, &alpha_complex);
+        alpha[j] = alpha_complex.real();
+        
+        // w = w - alpha_j * v_j
+        Complex neg_alpha = Complex(-alpha[j], 0.0);
+        cblas_zaxpy(N, &neg_alpha, krylov_vectors[j].data(), 1, w.data(), 1);
+        
+        // Full reorthogonalization for better stability
+        // This is more expensive but necessary for numerical accuracy
+        for (int i = 0; i <= j; i++) {
+            Complex overlap;
+            cblas_zdotc_sub(N, krylov_vectors[i].data(), 1, w.data(), 1, &overlap);
+            if (std::abs(overlap) > ortho_threshold) {
+                Complex neg_overlap = -overlap;
+                cblas_zaxpy(N, &neg_overlap, krylov_vectors[i].data(), 1, w.data(), 1);
+            }
+        }
+        
+        // Compute beta_{j} = ||w||
+        beta[j] = cblas_dznrm2(N, w.data(), 1);
+        
+        // Check for breakdown
+        if (beta[j] < breakdown_threshold) {
+            effective_dim = j + 1;
+            break;
+        }
+        
+        // v_{j+1} = w / beta_{j}
+        Complex inv_beta = Complex(1.0/beta[j], 0.0);
+        cblas_zcopy(N, w.data(), 1, krylov_vectors[j+1].data(), 1);
+        cblas_zscal(N, &inv_beta, krylov_vectors[j+1].data(), 1);
+    }
+    
+    // Handle the last alpha
+    if (effective_dim == krylov_dim) {
+        H(krylov_vectors[effective_dim-1].data(), w.data(), N);
+        Complex alpha_complex;
+        cblas_zdotc_sub(N, krylov_vectors[effective_dim-1].data(), 1, w.data(), 1, &alpha_complex);
+        alpha[effective_dim-1] = alpha_complex.real();
+    }
+    
+    // Use Eigen's optimized routines for the small tridiagonal problem
+    Eigen::MatrixXd H_krylov(effective_dim, effective_dim);
+    
+    // Build tridiagonal matrix efficiently
+    H_krylov.setZero();
+    for (int i = 0; i < effective_dim; i++) {
+        H_krylov(i, i) = alpha[i];
+    }
+    for (int i = 0; i < effective_dim - 1; i++) {
+        H_krylov(i, i+1) = beta[i];
+        H_krylov(i+1, i) = beta[i];
+    }
+    
+    // Compute eigendecomposition (more stable than matrix exponential)
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(H_krylov);
+    const auto& eigenvalues = solver.eigenvalues();
+    const auto& eigenvectors = solver.eigenvectors();
+    // Apply time evolution using eigendecomposition
+    // exp(-i*H*t)|ψ⟩ = V * exp(-i*D*t) * V^† * |e_0⟩
+    Eigen::VectorXcd coeffs(effective_dim);
+    for (int i = 0; i < effective_dim; i++) {
+        coeffs(i) = std::exp(Complex(0, -eigenvalues(i) * delta_t)) * eigenvectors(i, 0) * norm;
+    }
+    
+    // Reconstruct state in original basis
+    std::fill(tpq_state.begin(), tpq_state.end(), Complex(0, 0));
+    
+    // Use BLAS-3 operation for better cache efficiency
+    for (int i = 0; i < effective_dim; i++) {
+        Complex coeff(0, 0);
+        for (int j = 0; j < effective_dim; j++) {
+            coeff += eigenvectors(j, i) * coeffs(j);
+        }
+        cblas_zaxpy(N, &coeff, krylov_vectors[i].data(), 1, tpq_state.data(), 1);
+    }
+    
+    // Normalize if requested
+    if (normalize) {
+        double final_norm = cblas_dznrm2(N, tpq_state.data(), 1);
+        if (final_norm > 1e-14) {
+            Complex final_scale = Complex(1.0/final_norm, 0.0);
+            cblas_zscal(N, &final_scale, tpq_state.data(), 1);
+        }
+    }
+}
+
+/**
+ * Chebyshev polynomial-based time evolution
+ * Excellent for systems with bounded spectra
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector (will be modified)
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param E_min Minimum eigenvalue of H (estimate)
+ * @param E_max Maximum eigenvalue of H (estimate)
+ * @param num_terms Number of Chebyshev polynomials to use
+ * @param normalize Whether to normalize the state after evolution
+ */
+void time_evolve_tpq_chebyshev(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    double E_min,
+    double E_max,
+    int num_terms = 100,
+    bool normalize = true
+) {
+    // Scale Hamiltonian to [-1, 1] range for Chebyshev expansion
+    double E_center = (E_max + E_min) / 2.0;
+    double E_scale = (E_max - E_min) / 2.0;
+    
+    // Scaled time parameter
+    double tau = delta_t * E_scale;
+    
+    // Create scaled Hamiltonian operator: H_scaled = (H - E_center * I) / E_scale
+    auto H_scaled = [&](const Complex* input, Complex* output, int size) {
+        H(input, output, size);
+        // output = (H - E_center * I) * input / E_scale
+        Complex center_factor = Complex(-E_center / E_scale, 0.0);
+        Complex scale_factor = Complex(1.0 / E_scale, 0.0);
+        
+        cblas_zscal(size, &scale_factor, output, 1);
+        cblas_zaxpy(size, &center_factor, input, 1, output, 1);
+    };
+    
+    // Initialize result and Chebyshev polynomials
+    ComplexVector result(N, Complex(0, 0));
+    ComplexVector T_prev(N), T_curr(N), T_next(N);
+    
+    // T_0(H_scaled) |ψ⟩ = |ψ⟩
+    std::copy(tpq_state.begin(), tpq_state.end(), T_prev.begin());
+    
+    // First term: J_0(-iτ) * T_0
+    double J_0 = std::cyl_bessel_j(0, tau);
+    Complex coeff_0 = Complex(J_0, 0.0);
+    cblas_zaxpy(N, &coeff_0, T_prev.data(), 1, result.data(), 1);
+    
+    if (num_terms > 1) {
+        // T_1(H_scaled) |ψ⟩ = H_scaled |ψ⟩
+        H_scaled(tpq_state.data(), T_curr.data(), N);
+        
+        // Second term: 2 * J_1(-iτ) * (-i) * T_1
+        double J_1 = std::cyl_bessel_j(1, tau);
+        Complex coeff_1 = Complex(0, -2.0 * J_1);
+        cblas_zaxpy(N, &coeff_1, T_curr.data(), 1, result.data(), 1);
+        
+        // Higher order terms using Chebyshev recurrence
+        for (int n = 2; n < num_terms; n++) {
+            // T_n = 2 * H_scaled * T_{n-1} - T_{n-2}
+            H_scaled(T_curr.data(), T_next.data(), N);
+            Complex two = Complex(2.0, 0.0);
+            Complex neg_one = Complex(-1.0, 0.0);
+            
+            cblas_zscal(N, &two, T_next.data(), 1);
+            cblas_zaxpy(N, &neg_one, T_prev.data(), 1, T_next.data(), 1);
+            
+            // Add contribution: 2 * J_n(-iτ) * (-i)^n * T_n
+            double J_n = std::cyl_bessel_j(n, tau);
+            Complex i_power = std::pow(Complex(0, -1), n);
+            Complex coeff_n = 2.0 * J_n * i_power;
+            
+            cblas_zaxpy(N, &coeff_n, T_next.data(), 1, result.data(), 1);
+            
+            // Cycle for next iteration
+            std::swap(T_prev, T_curr);
+            std::swap(T_curr, T_next);
+        }
+    }
+    
+    // Apply phase factor from center shift: exp(-i * E_center * delta_t)
+    Complex phase = std::exp(Complex(0, -E_center * delta_t));
+    cblas_zscal(N, &phase, result.data(), 1);
+    
+    // Replace state with evolved result
+    std::swap(tpq_state, result);
+    
+    // Normalize if requested
+    if (normalize) {
+        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
+    }
+}
+
+/**
+ * 4th-order Runge-Kutta time evolution
+ * Best for time-dependent Hamiltonians or when high accuracy is needed
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector (will be modified)
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param normalize Whether to normalize the state after evolution
+ */
+void time_evolve_tpq_rk4(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    bool normalize = true
+) {
+    ComplexVector k1(N), k2(N), k3(N), k4(N);
+    ComplexVector temp_state(N);
+    Complex neg_i = Complex(0, -1);
+    Complex half = Complex(0.5, 0);
+    
+    // k1 = -i * H * ψ(t)
+    H(tpq_state.data(), k1.data(), N);
+    cblas_zscal(N, &neg_i, k1.data(), 1);
+    
+    // temp_state = ψ(t) + (Δt/2) * k1
+    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
+    Complex dt_half = Complex(delta_t / 2.0, 0);
+    cblas_zaxpy(N, &dt_half, k1.data(), 1, temp_state.data(), 1);
+    
+    // k2 = -i * H * (ψ(t) + (Δt/2) * k1)
+    H(temp_state.data(), k2.data(), N);
+    cblas_zscal(N, &neg_i, k2.data(), 1);
+    
+    // temp_state = ψ(t) + (Δt/2) * k2
+    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
+    cblas_zaxpy(N, &dt_half, k2.data(), 1, temp_state.data(), 1);
+    
+    // k3 = -i * H * (ψ(t) + (Δt/2) * k2)
+    H(temp_state.data(), k3.data(), N);
+    cblas_zscal(N, &neg_i, k3.data(), 1);
+    
+    // temp_state = ψ(t) + Δt * k3
+    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
+    Complex dt = Complex(delta_t, 0);
+    cblas_zaxpy(N, &dt, k3.data(), 1, temp_state.data(), 1);
+    
+    // k4 = -i * H * (ψ(t) + Δt * k3)
+    H(temp_state.data(), k4.data(), N);
+    cblas_zscal(N, &neg_i, k4.data(), 1);
+    
+    // ψ(t + Δt) = ψ(t) + (Δt/6) * (k1 + 2*k2 + 2*k3 + k4)
+    Complex dt_sixth = Complex(delta_t / 6.0, 0);
+    Complex two_dt_sixth = Complex(delta_t / 3.0, 0);
+    
+    cblas_zaxpy(N, &dt_sixth, k1.data(), 1, tpq_state.data(), 1);
+    cblas_zaxpy(N, &two_dt_sixth, k2.data(), 1, tpq_state.data(), 1);
+    cblas_zaxpy(N, &two_dt_sixth, k3.data(), 1, tpq_state.data(), 1);
+    cblas_zaxpy(N, &dt_sixth, k4.data(), 1, tpq_state.data(), 1);
+    
+    // Normalize if requested
+    if (normalize) {
+        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+        Complex scale_factor = Complex(1.0/norm, 0.0);
+        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
+    }
+}
+
+/**
+ * Adaptive time evolution with automatic method selection
+ * Chooses the best method based on system size and accuracy requirements
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector (will be modified)
+ * @param N Dimension of the Hilbert space
+ * @param delta_t Time step
+ * @param accuracy_level Accuracy level: 1=fast, 2=balanced, 3=high accuracy
+ * @param normalize Whether to normalize the state after evolution
+ */
+void time_evolve_tpq_adaptive(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int accuracy_level = 2,
+    bool normalize = true
+) {
+    if (accuracy_level == 1) {
+        // Fast: Use improved Taylor with higher order
+        time_evolve_tpq_state(H, tpq_state, N, delta_t, 50, normalize);
+    } else if (accuracy_level == 2) {
+        // Balanced: Use Krylov method
+        int krylov_dim = std::min(30, N/2);
+        time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
+    } else {
+        // High accuracy: Use RK4 for small systems, Krylov for large
+        if (N < 1000) {
+            time_evolve_tpq_rk4(H, tpq_state, N, delta_t, normalize);
+        } else {
+            int krylov_dim = std::min(50, N/2);
+            time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
+        }
+    }
+}
+
+/**
+ * Compute S(q)S(-q) time evolution using Krylov method with momentum-dependent operators
+ * 
+ * This function creates SumOperators for each momentum vector and spin component,
+ * then computes the time correlation function C^α(q,t) = ⟨ψ|S^α(-q,0)S^α(q,t)|ψ⟩
+ * using the Krylov-based time evolution method for high accuracy.
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state vector
+ * @param momentum_positions List of momentum vectors [Qx, Qy, Qz]
+ * @param positions_file Path to file containing site positions
+ * @param N Dimension of the Hilbert space
+ * @param num_sites Number of lattice sites
+ * @param spin_length Spin quantum number
+ * @param dir Output directory
+ * @param sample Current sample index
+ * @param inv_temp Inverse temperature
+ * @param omega_min Minimum frequency
+ * @param omega_max Maximum frequency
+ * @param num_points Number of frequency points
+ * @param t_end Maximum evolution time
+ * @param dt Time step
+ * @param krylov_dim Dimension of Krylov subspace for time evolution
+ */
+void computeSpinStructureFactorKrylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& tpq_state,
+    const std::vector<std::vector<double>>& momentum_positions,
+    const std::string& positions_file,
+    int N,
+    int num_sites,
+    float spin_length,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    double omega_min = -10.0,
+    double omega_max = 10.0,
+    int num_points = 1000,
+    double t_end = 100.0,
+    double dt = 0.01,
+    int krylov_dim = 30
+) {
+    // Save the current TPQ state for later analysis
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+    save_tpq_state(tpq_state, state_file);
+
+    std::cout << "Computing spin structure factor S(q)S(-q) using Krylov method for sample " << sample 
+              << ", beta = " << inv_temp << ", for " << momentum_positions.size() << " momentum points" << std::endl;
+    
+    // Ensure Krylov dimension doesn't exceed system size
+    krylov_dim = std::min(krylov_dim, N/2);
+    
+    int num_steps = static_cast<int>(t_end / dt) + 1;
+    
+    // Pre-allocate reusable buffers to avoid repeated allocations
+    ComplexVector evolved_psi(N);
+    ComplexVector evolved_S_minus_q_psi(N);
+    ComplexVector S_q_psi(N);
+    ComplexVector S_minus_q_psi(N);
+    ComplexVector S_q_evolved_psi(N);
+    std::vector<Complex> time_correlation(num_steps);
+    
+    // Define spin combinations once
+    constexpr std::array<std::pair<int, int>, 5> spin_combinations = {{
+        {0, 1}, // S+(q) * S-(-q)  
+        {2, 2}, // Sz(q) * Sz(-q)
+        {0, 0}, // S+(q) * S+(-q)
+        {0, 2}, // S+(q) * Sz(-q)
+        {2, 0}  // Sz(q) * S+(-q)
+    }};
+    
+    constexpr std::array<const char*, 5> combination_names = {
+        "SpSm", "SzSz", "SpSp", "SpSz", "SzSp"
+    };
+    
+    // Process each momentum point
+    for (size_t q_idx = 0; q_idx < momentum_positions.size(); q_idx++) {
+        const auto& Q_vector = momentum_positions[q_idx];
+        
+        // Create momentum label for filenames
+        std::stringstream q_label_ss;
+        q_label_ss << "q_" << q_idx 
+                   << "_Qx" << Q_vector[0] 
+                   << "_Qy" << Q_vector[1] 
+                   << "_Qz" << Q_vector[2];
+        std::string q_label = q_label_ss.str();
+        
+        std::cout << "Processing momentum point " << (q_idx + 1) << "/" << momentum_positions.size() 
+                  << ": Q = [" << Q_vector[0] << ", " << Q_vector[1] << ", " << Q_vector[2] << "]" << std::endl;
+        
+        // Pre-compute negative Q vector
+        std::vector<double> neg_Q_vector = {-Q_vector[0], -Q_vector[1], -Q_vector[2]};
+        
+        // Cache operators for reuse across spin combinations when possible
+        std::unique_ptr<SumOperator> cached_S_q_ops[3];
+        std::unique_ptr<SumOperator> cached_S_minus_q_ops[3];
+        
+        for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); combo_idx++) {
+            int op_type_1 = spin_combinations[combo_idx].first;   // First operator type
+            int op_type_2 = spin_combinations[combo_idx].second;  // Second operator type
+            std::string op_name = std::string(combination_names[combo_idx]) + "_" + q_label;
+            
+            std::cout << "  Computing " << op_name << " correlations..." << std::endl;
+            
+            // Reuse or create operators
+            if (!cached_S_q_ops[op_type_1]) {
+                cached_S_q_ops[op_type_1] = std::make_unique<SumOperator>(
+                    num_sites, spin_length, op_type_1, Q_vector, positions_file);
+            }
+            if (!cached_S_minus_q_ops[op_type_2]) {
+                cached_S_minus_q_ops[op_type_2] = std::make_unique<SumOperator>(
+                    num_sites, spin_length, op_type_2, neg_Q_vector, positions_file);
+            }
+            
+            SumOperator& S_q_op = *cached_S_q_ops[op_type_1];
+            SumOperator& S_minus_q_op = *cached_S_minus_q_ops[op_type_2];
+            
+            // Apply S^α(-q) to initial state: |φ⟩ = S^α(-q)|ψ⟩
+            S_minus_q_op.apply(tpq_state.data(), S_minus_q_psi.data(), N);
+            
+            // Calculate initial correlation: C(0) = ⟨ψ|S^β(q)S^α(-q)|ψ⟩
+            S_q_op.apply(tpq_state.data(), S_q_psi.data(), N);
+            
+            // Use BLAS for dot product
+            Complex initial_corr;
+            cblas_zdotc_sub(N, S_q_psi.data(), 1, S_minus_q_psi.data(), 1, &initial_corr);
+            time_correlation[0] = initial_corr;
+            
+            // Initialize evolution states
+            std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
+            std::copy(S_minus_q_psi.begin(), S_minus_q_psi.end(), evolved_S_minus_q_psi.begin());
+            
+            // Time evolution loop using Krylov method
+            for (int step = 1; step < num_steps; step++) {
+                // Evolve states using Krylov method
+                time_evolve_tpq_krylov(H, evolved_psi, N, dt, krylov_dim, true);
+                time_evolve_tpq_krylov(H, evolved_S_minus_q_psi, N, dt, krylov_dim, true);
+                
+                // Apply S^β(q) to evolved state
+                S_q_op.apply(evolved_psi.data(), S_q_evolved_psi.data(), N);
+                
+                // Calculate correlation using BLAS
+                Complex corr_t;
+                cblas_zdotc_sub(N, S_q_evolved_psi.data(), 1, evolved_S_minus_q_psi.data(), 1, &corr_t);
+                time_correlation[step] = corr_t;
+                
+                if (step % 100 == 0) {
+                    std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
+                    std::cout << "    Current correlation: " 
+                              << time_correlation[step].real() << " + i*" 
+                              << time_correlation[step].imag() << " at t = " << step * dt << std::endl;
+                }
+            }
+            
+            // Save time correlation data
+            std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
+                       "_beta" + std::to_string(inv_temp);
+            
+            std::string time_corr_file = base_name + "_time_correlation.dat";
+            
+            // Write time correlation to file
+            std::ofstream time_corr_out(time_corr_file);
+            if (time_corr_out.is_open()) {
+                time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
+                time_corr_out << std::setprecision(16);
+                for (int step = 0; step < num_steps; step++) {
+                    double t = step * dt;
+                    time_corr_out << t << " " 
+                        << time_correlation[step].real() << " " 
+                        << time_correlation[step].imag() << std::endl;
+                }
+                time_corr_out.close();
+            }
+        }
+        std::cout << "Completed momentum point " << (q_idx + 1) << " of " << momentum_positions.size() << std::endl;
+    }
+    
+    std::cout << "Spin structure factor calculation using Krylov method complete for sample " << sample << std::endl;
+}
+
+/**
+ * Wrapper function to compute spin structure factor using Krylov method during TPQ calculation
+ * 
+ * This function provides an easy interface to compute S(q)S(-q) correlations with the
+ * high-accuracy Krylov time evolution method.
+ * 
+ * @param H Hamiltonian operator function
+ * @param tpq_state Current TPQ state
+ * @param positions_file Path to lattice positions file
+ * @param lattice_type Type of lattice for momentum point generation
+ * @param N Dimension of Hilbert space
+ * @param num_sites Number of lattice sites
+ * @param spin_length Spin quantum number
+ * @param dir Output directory
+ * @param sample Sample index
+ * @param inv_temp Current inverse temperature
+ * @param custom_momentum_points Optional custom momentum vectors
+ * @param krylov_dim Dimension of Krylov subspace (default: 30)
+ */
+void computeTPQSpinStructureFactorKrylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& tpq_state,
+    const std::string& positions_file,
+    int N,
+    int num_sites, 
+    float spin_length,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    const std::vector<std::vector<double>>& custom_momentum_points = {},
+    int krylov_dim = 30
+) {
+    // Use custom momentum points if provided, otherwise generate standard ones
+    std::vector<std::vector<double>> momentum_points;
+    if (!custom_momentum_points.empty()) {
+        momentum_points = custom_momentum_points;
+        std::cout << "Using " << momentum_points.size() << " custom momentum points" << std::endl;
+    } else {
+        momentum_points = {{0.0, 0.0, 0.0}}; // Default to zero momentum if none provided
+    }
+    
+    // Compute the spin structure factor using Krylov method
+    computeSpinStructureFactorKrylov(
+        H,
+        tpq_state,
+        momentum_points,
+        positions_file,
+        N, num_sites, spin_length,
+        dir, sample, inv_temp,
+        -10.0,      // omega_min
+        10.0,       // omega_max
+        2000,       // num_points  
+        50.0,       // t_end
+        0.01,       // dt
+        krylov_dim  // Krylov dimension
+    );
+}
+
 
 
 

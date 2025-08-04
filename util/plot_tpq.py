@@ -94,7 +94,7 @@ def parse_QFI_data(data_dir):
             mean_fft[len(mean_real)//2+1:] = mean_real[len(mean_real)//2+1:]
 
 
-            reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0]))
+            reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0]))*2*np.pi
 
             mean_fft = np.abs(np.fft.fft(mean_fft, norm="ortho"))  / 16
 
@@ -121,7 +121,7 @@ def parse_QFI_data(data_dir):
             plt.plot(omega, s_omega, label=f'Beta={beta} QFI={qfi:.4f}')
             plt.xlabel('Frequency (rad/s)')
             plt.ylabel('Spectral Function')
-            plt.xlim(0, 1)
+            plt.xlim(0, 3)
             plt.title(f'Spectral Function for {species} at Beta={beta}')
             plt.grid(True)
             plt.legend()
