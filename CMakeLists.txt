@@ -156,6 +156,9 @@ add_executable(ED ${SOURCES})
 # Add test executable
 add_executable(TEST ${SRC_DIR}/test_observables.cpp)
 
+# Add TPQ_DSSF executable
+add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
+
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
@@ -182,11 +185,20 @@ target_link_libraries(TEST
     ${ARPACK_LIBRARY}
 )
 
+# Link libraries for TPQ_DSSF executable
+target_link_libraries(TPQ_DSSF
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${ARPACK_LIBRARY}
+)
+
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
         target_link_libraries(ED MKL::MKL)
         target_link_libraries(TEST MKL::MKL)
+        target_link_libraries(TPQ_DSSF MKL::MKL)
     else()
         # Link traditional MKL (already linked via BLAS_LIBRARIES)
         # No additional linking needed since MKL is detected as BLAS/LAPACK
@@ -206,7 +218,9 @@ endif()
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
-            endif()
+    target_link_libraries(TEST ${MPI_CXX_LIBRARIES})
+    target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
+endif()
 
 # Install targets
 install(TARGETS ED DESTINATION bin)

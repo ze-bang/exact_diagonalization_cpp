@@ -1688,7 +1688,9 @@ void computeSpinStructureFactorKrylov(
     int num_points = 1000,
     double t_end = 100.0,
     double dt = 0.01,
-    int krylov_dim = 30
+    int krylov_dim = 30,
+    std::array<std::pair<int, int>, 5> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
+    std::array<const char*, 5> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
 ) {
     // Save the current TPQ state for later analysis
     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
@@ -1709,19 +1711,6 @@ void computeSpinStructureFactorKrylov(
     ComplexVector S_minus_q_psi(N);
     ComplexVector S_q_evolved_psi(N);
     std::vector<Complex> time_correlation(num_steps);
-    
-    // Define spin combinations once
-    constexpr std::array<std::pair<int, int>, 5> spin_combinations = {{
-        {0, 0}, // S+(q) * S-(-q)  
-        {2, 2}, // Sz(q) * Sz(-q)
-        {0, 1}, // S+(q) * S+(-q)
-        {0, 2}, // S+(q) * Sz(-q)
-        {2, 1}  // Sz(q) * S+(-q)
-    }};
-    
-    constexpr std::array<const char*, 5> combination_names = {
-        "SpSm", "SzSz", "SpSp", "SpSz", "SzSp"
-    };
     
     // Process each momentum point
     for (size_t q_idx = 0; q_idx < momentum_positions.size(); q_idx++) {
@@ -1749,7 +1738,6 @@ void computeSpinStructureFactorKrylov(
             
             std::cout << "  Computing " << op_name << " correlations..." << std::endl;
 
-
             SumOperator S_q_op(num_sites, spin_length, op_type_1, Q_vector, positions_file);
             SumOperator S_minus_q_op(num_sites, spin_length, op_type_2, neg_Q_vector, positions_file);
 
@@ -1772,6 +1760,23 @@ void computeSpinStructureFactorKrylov(
             std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
             std::copy(S_minus_q_psi.begin(), S_minus_q_psi.end(), evolved_S_minus_q_psi.begin());
             
+            // Open file for writing time correlation data
+            std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
+                       "_beta" + std::to_string(inv_temp);
+            std::string time_corr_file = base_name + "_time_correlation.dat";
+            
+            std::ofstream time_corr_out(time_corr_file);
+            if (time_corr_out.is_open()) {
+                time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
+                time_corr_out << std::setprecision(16);
+                
+                // Write initial time point
+                time_corr_out << 0.0 << " " 
+                    << time_correlation[0].real() << " " 
+                    << time_correlation[0].imag() << std::endl;
+                time_corr_out.flush(); // Ensure data is written to disk
+            }
+            
             // Time evolution loop using Krylov method
             for (int step = 1; step < num_steps; step++) {
                 // Evolve states using Krylov method
@@ -1786,6 +1791,19 @@ void computeSpinStructureFactorKrylov(
                 cblas_zdotc_sub(N, S_q_evolved_psi.data(), 1, evolved_S_minus_q_psi.data(), 1, &corr_t);
                 time_correlation[step] = corr_t;
                 
+                // Write current time point to file
+                if (time_corr_out.is_open()) {
+                    double t = step * dt;
+                    time_corr_out << t << " " 
+                        << time_correlation[step].real() << " " 
+                        << time_correlation[step].imag() << std::endl;
+                    
+                    // Flush every 100 steps to ensure data is written
+                    if (step % 100 == 0) {
+                        time_corr_out.flush();
+                    }
+                }
+                
                 if (step % 100 == 0) {
                     std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
                     std::cout << "    Current correlation: " 
@@ -1794,24 +1812,10 @@ void computeSpinStructureFactorKrylov(
                 }
             }
             
-            // Save time correlation data
-            std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
-                       "_beta" + std::to_string(inv_temp);
-            
-            std::string time_corr_file = base_name + "_time_correlation.dat";
-            
-            // Write time correlation to file
-            std::ofstream time_corr_out(time_corr_file);
+            // Close the file
             if (time_corr_out.is_open()) {
-                time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
-                time_corr_out << std::setprecision(16);
-                for (int step = 0; step < num_steps; step++) {
-                    double t = step * dt;
-                    time_corr_out << t << " " 
-                        << time_correlation[step].real() << " " 
-                        << time_correlation[step].imag() << std::endl;
-                }
                 time_corr_out.close();
+                std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
             }
         }
         std::cout << "Completed momentum point " << (q_idx + 1) << " of " << momentum_positions.size() << std::endl;
@@ -1850,7 +1854,9 @@ void computeTPQSpinStructureFactorKrylov(
     int sample,
     double inv_temp,
     const std::vector<std::vector<double>>& custom_momentum_points = {},
-    int krylov_dim = 30
+    int krylov_dim = 30,
+    std::array<std::pair<int, int>, 5> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
+    std::array<const char*, 5> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
 ) {
     // Use custom momentum points if provided, otherwise generate standard ones
     std::vector<std::vector<double>> momentum_points;
@@ -1874,7 +1880,9 @@ void computeTPQSpinStructureFactorKrylov(
         2000,       // num_points  
         50.0,       // t_end
         0.01,       // dt
-        krylov_dim  // Krylov dimension
+        krylov_dim,  // Krylov dimension
+        spin_combinations, // spin combinations
+        combination_names // combination names
     );
 }
 
