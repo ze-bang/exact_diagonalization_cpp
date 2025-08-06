@@ -64,7 +64,6 @@ void save_eigenvalues(const std::string& dir, const std::vector<double>& evals) 
     outfile.write(reinterpret_cast<const char*>(evals.data()), n_evals * sizeof(double));
 }
 
-
 /**
  * @brief Solves a standard eigenvalue problem (A*x = lambda*x) using the ARPACK library.
  *
@@ -201,6 +200,32 @@ void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N, in
         complex_eigenvalues[i] = d[i];
     }
 
+    // Compute residuals for convergence assessment
+    std::vector<double> residuals(n_conv);
+    if (compute_eigenvectors) {
+        ComplexVector temp(N);
+        for (int i = 0; i < n_conv; ++i) {
+            // Get eigenvector
+            ComplexVector evec(N);
+            std::copy(&z[i * N], &z[i * N + N], evec.begin());
+            
+            // Compute A*v
+            H(evec.data(), temp.data(), N);
+            
+            // Compute A*v - lambda*v
+            for (int j = 0; j < N; ++j) {
+                temp[j] -= d[i] * evec[j];
+            }
+            
+            // Compute ||A*v - lambda*v||
+            double residual = 0.0;
+            for (int j = 0; j < N; ++j) {
+                residual += std::norm(temp[j]);
+            }
+            residuals[i] = std::sqrt(residual);
+        }
+    }
+
     // Sort eigenvalues by real part (as is common in physics)
     std::vector<size_t> p(n_conv);
     std::iota(p.begin(), p.end(), 0);
@@ -209,8 +234,12 @@ void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N, in
     });
 
     std::vector<double> sorted_eigenvalues(n_conv);
+    std::vector<double> sorted_residuals(n_conv);
     for(int i=0; i<n_conv; ++i) {
         sorted_eigenvalues[i] = eigenvalues[p[i]];
+        if (compute_eigenvectors) {
+            sorted_residuals[i] = residuals[p[i]];
+        }
     }
     eigenvalues = sorted_eigenvalues;
 
@@ -243,6 +272,28 @@ void arpack_eigs(std::function<void(const Complex*, Complex*, int)> H, int N, in
     }
     if(eigenvalues.size() > 10) std::cout << "...";
     std::cout << std::endl;
+
+    // Output convergence information
+    if (compute_eigenvectors) {
+        std::cout << "Residuals (||A*v - lambda*v||): ";
+        for(int i=0; i<std::min((int)sorted_residuals.size(), 10); ++i) {
+            std::cout << std::scientific << std::setprecision(2) << sorted_residuals[i] << " ";
+        }
+        if(sorted_residuals.size() > 10) std::cout << "...";
+        std::cout << std::endl;
+        
+        // Check convergence
+        double max_residual = *std::max_element(sorted_residuals.begin(), sorted_residuals.end());
+        std::cout << "Maximum residual: " << std::scientific << std::setprecision(6) << max_residual << std::endl;
+        std::cout << "Tolerance requested: " << std::scientific << std::setprecision(6) << tol << std::endl;
+        if (max_residual < tol) {
+            std::cout << "Convergence: SATISFIED" << std::endl;
+        } else {
+            std::cout << "Convergence: NOT FULLY SATISFIED" << std::endl;
+        }
+    } else {
+        std::cout << "Note: Residuals computed only when eigenvectors are requested." << std::endl;
+    }
 }
 
 /**
