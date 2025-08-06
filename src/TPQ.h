@@ -1689,8 +1689,8 @@ void computeSpinStructureFactorKrylov(
     double t_end = 100.0,
     double dt = 0.01,
     int krylov_dim = 30,
-    std::array<std::pair<int, int>, 5> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
-    std::array<const char*, 5> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
+    std::vector<std::pair<int, int>> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
+    std::vector<const char*> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
 ) {
     // Save the current TPQ state for later analysis
     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
@@ -1855,8 +1855,8 @@ void computeTPQSpinStructureFactorKrylov(
     double inv_temp,
     const std::vector<std::vector<double>>& custom_momentum_points = {},
     int krylov_dim = 30,
-    std::array<std::pair<int, int>, 5> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
-    std::array<const char*, 5> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
+    std::vector<std::pair<int, int>> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
+    std::vector<const char*> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
 ) {
     // Use custom momentum points if provided, otherwise generate standard ones
     std::vector<std::vector<double>> momentum_points;

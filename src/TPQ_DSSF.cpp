@@ -22,9 +22,11 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc != 5) {
+    if (argc != 6) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim>" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim> <spin_combinations>" << std::endl;
+            std::cerr << "spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
+            std::cerr << "Example: \"0,0;2,2;0,1\" for SpSp, SzSz, SpSm combinations" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -34,6 +36,67 @@ int main(int argc, char* argv[]) {
     int num_sites = std::stoi(argv[2]);
     float spin_length = std::stof(argv[3]);
     int krylov_dim = std::stoi(argv[4]);
+    std::string spin_combinations_str = argv[5];
+
+    // Parse spin combinations
+    std::vector<std::pair<int, int>> spin_combinations;
+    std::stringstream ss(spin_combinations_str);
+    std::string pair_str;
+    
+    while (std::getline(ss, pair_str, ';')) {
+        std::stringstream pair_ss(pair_str);
+        std::string op1_str, op2_str;
+        
+        if (std::getline(pair_ss, op1_str, ',') && std::getline(pair_ss, op2_str)) {
+            try {
+                int op1 = std::stoi(op1_str);
+                int op2 = std::stoi(op2_str);
+                
+                if (op1 >= 0 && op1 <= 2 && op2 >= 0 && op2 <= 2) {
+                    spin_combinations.push_back({op1, op2});
+                } else {
+                    if (rank == 0) {
+                        std::cerr << "Warning: Invalid spin operator " << op1 << "," << op2 
+                                  << ". Operators must be 0, 1, or 2." << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                if (rank == 0) {
+                    std::cerr << "Warning: Failed to parse spin combination: " << pair_str << std::endl;
+                }
+            }
+        }
+    }
+    
+    if (spin_combinations.empty()) {
+        if (rank == 0) {
+            std::cerr << "Error: No valid spin combinations provided. Using default SzSz." << std::endl;
+        }
+        spin_combinations = {{2, 2}};
+    }
+
+    auto spin_combination_name = [](int op) {
+        switch (op) {
+            case 2:
+                return "Sz";
+            case 0:
+                return "Sp";
+            case 1:
+                return "Sm";
+            default:
+                return "Unknown";
+        }
+    };
+
+    std::vector<const char*> spin_combination_names;
+    for (const auto& pair : spin_combinations) {
+        int first = pair.first;
+        first = first == 2 ? 2 : 1 - first; // Convert 0->1(Sp), 1->0(Sm)
+        std::string combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(pair.second));
+        char* name = new char[combined_name.size() + 1];
+        std::strcpy(name, combined_name.c_str());
+        spin_combination_names.push_back(name);
+    }
 
     // Regex to match tpq_state_i_beta=*.dat files where i is the sample index
     std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
@@ -70,7 +133,9 @@ int main(int argc, char* argv[]) {
     
     // Define momentum points
     const std::vector<std::vector<double>> momentum_points = {
-        {0.0, 0.0, 0.0}
+        {0.0, 0.0, 0.0},
+        {0.0, 0.0, 4*M_PI},
+        {0.0, 0.0, 2*M_PI}
     };
     
     // Create output directory (only rank 0)
@@ -179,7 +244,6 @@ int main(int argc, char* argv[]) {
         ensureDirectoryExists(output_dir);
         
         // Compute spin structure factor
-        std::array<std::pair<int, int>, 5> spin_combinations = {{{0, 0}, {2, 2}, {0, 0}, {0, 0}, {0, 0}}};
         computeTPQSpinStructureFactorKrylov(
             H,                      // Hamiltonian function
             tpq_state,             // TPQ state
@@ -193,7 +257,7 @@ int main(int argc, char* argv[]) {
             momentum_points,       // Custom momentum points
             krylov_dim,            // Krylov dimension
             spin_combinations,     // Spin combinations
-            {"SpSm", "SzSz"}      // Combination names
+            spin_combination_names  // Combination names
         );
         
         local_processed_count++;
