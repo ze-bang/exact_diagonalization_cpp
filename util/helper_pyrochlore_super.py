@@ -22,7 +22,7 @@ def generate_super_pyrochlore_cluster(dim1, dim2, dim3, use_pbc=False):
         node_mapping: Dictionary mapping original IDs to matrix indices
     """
     # Tetrahedron centers
-    tetra_centers = -np.array([
+    tetra_centers = np.array([
         [0, 0, 0],
         [0, 0.5, 0.5],
         [0.5, 0, 0.5],
@@ -234,7 +234,7 @@ def get_neighbors(i, j, k, t, s, dim1, dim2, dim3, use_pbc=False):
 
 def get_sublattice_index(vertex_id):
     """Return the sublattice index within the unit cell (0-15)"""
-    return vertex_id % 16
+    return vertex_id % 4
 
 def create_nn_lists(edges, node_mapping, vertices):
     """
@@ -297,7 +297,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             f.write("\n")
     
     # Write site positions and sublattice indices
-    with open(f"{output_dir}/{cluster_name}_site_info.dat", 'w') as f:
+    with open(f"{output_dir}/positions.dat", 'w') as f:
         f.write("# Site information for cluster: " + cluster_name + "\n")
         f.write("# site_id, matrix_index, sublattice_index, x, y, z\n\n")
         

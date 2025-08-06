@@ -10,6 +10,38 @@ import pandas as pd
 import seaborn as sns
 from scipy.interpolate import griddata
 from mpi4py import MPI
+# Function to apply broadening in time domain
+def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
+    """
+    Apply broadening to time correlation data before FFT
+    
+    Parameters:
+    t_values: Time array
+    data: Complex correlation data
+    broadening_type: 'gaussian' or 'lorentzian'
+    sigma: Width parameter for Gaussian broadening
+    gamma: Width parameter for Lorentzian broadening
+    
+    Returns:
+    broadened_data: Data with broadening applied
+    """
+    if broadening_type == 'gaussian' and sigma is not None:
+        # Apply Gaussian broadening: multiply by exp(-t²/(2σ²))
+        broadening_factor = np.exp(-t_values**2 / (2 * sigma**2))
+        broadened_data = data * broadening_factor
+        print(f"Applied Gaussian broadening in time domain with σ = {sigma:.4f}")
+        
+    elif broadening_type == 'lorentzian' and gamma is not None:
+        # Apply Lorentzian broadening: multiply by exp(-γ|t|)
+        broadening_factor = np.exp(-gamma * np.abs(t_values))
+        broadened_data = data * broadening_factor
+        print(f"Applied Lorentzian broadening in time domain with γ = {gamma:.4f}")
+        
+    else:
+        broadened_data = data
+        print("No time domain broadening applied")
+    
+    return broadened_data, broadening_factor if 'broadening_factor' in locals() else np.ones_like(data)
 
 def extract_beta(filename):
     """Extract beta value from filename."""
@@ -66,61 +98,104 @@ def parse_QFI_data(data_dir):
                     # Load the data (time, real, imag)
                     data = np.loadtxt(file_path, comments='#')
                     time = data[:, 0]
-                    val = data[:, 1] + 1j * data[:, 2]
+                    real_part = data[:, 1]
+                    imag_part = data[:, 2]
+                    val = real_part + 1j * imag_part
                     all_data.append((time, val))
                 except Exception as e:
                     print(f"    Error reading {file_path}: {e}")
                     
-            reference_time = all_data[0][0]
-
             if not all_data:
                 print(f"    No valid data for beta={beta}")
                 continue
 
-            # Calculate mean and standard error
-            all_real_values = np.vstack([data[1] for data in all_data])
-            mean_real = np.mean(all_real_values, axis=0)
-            std_error = np.std(all_real_values, axis=0) / np.sqrt(len(all_data))
+            reference_time = all_data[0][0]
 
-            # Apply Lorentzian filter to the time-domain data
-            gamma = 0.1  # Broadening parameter: larger values -> more smoothing
-            lorentzian_filter = np.exp(-gamma * np.abs(reference_time))
-            mean_real = mean_real * lorentzian_filter
+            # Calculate mean correlation function
+            all_complex_values = np.vstack([data[1] for data in all_data])
+            mean_correlation = np.mean(all_complex_values, axis=0)
 
-            mean_fft = np.zeros_like(mean_real)
+            # Determine time step
+            dt = reference_time[1] - reference_time[0] if len(reference_time) > 1 else 1.0
+            N = len(mean_correlation)
 
-            mean_fft[0] = mean_real[len(mean_real)//2]
-            mean_fft[1:len(mean_real)//2] = mean_real[0:len(mean_real)//2-1]
-            mean_fft[len(mean_real)//2+1:] = mean_real[len(mean_real)//2+1:]
+            # Check if data is already ordered from negative to positive time
+            if reference_time[0] < 0 and reference_time[-1] > 0:
+                # Data is already time-ordered from negative to positive
+                t_full = reference_time
+                C_full = mean_correlation
+                print(f"    Using pre-ordered time data from {t_full.min():.2f} to {t_full.max():.2f}")
+                
+                # For FFT, we need to reorder from time-ordered to frequency-ordered
+                C_fft_input = np.fft.ifftshift(C_full)
+                
+            else:
+                # Assume data is for t >= 0, construct negative times using C(-t) = C(t)*
+                t_pos = reference_time
+                C_pos = mean_correlation
+                
+                # Construct data for t < 0 using C(-t) = C(t)*
+                t_neg = -t_pos[1:][::-1]  # Exclude t=0 to avoid duplication
+                C_neg = np.conj(C_pos[1:][::-1])
+                
+                # Combine to create full time evolution
+                t_full = np.concatenate((t_neg, t_pos))
+                C_full = np.concatenate((C_neg, C_pos))
+                
+                print(f"    Constructed negative time evolution, range: {t_full.min():.2f} to {t_full.max():.2f}")
+                
+                # Reorder for FFT
+                C_fft_input = np.fft.ifftshift(C_full)
+            
+            # Apply time domain broadening (Lorentzian)
+            gamma = 0.1  # Broadening parameter
+            t_fft_ordered = np.fft.ifftshift(t_full)
+            C_fft_input_broadened, time_broadening_factor = apply_time_broadening(
+                t_fft_ordered, C_fft_input, 'lorentzian', gamma=gamma)
+            
+            # Take complex conjugate for FFT convention (matching the reference code)
+            C_fft_input_broadened = np.conj(C_fft_input_broadened)
 
+            # Compute FFT to get spectral function
+            C_w = np.fft.fft(C_fft_input_broadened)
+            S_w = dt * np.fft.fftshift(C_w) / (2 * np.pi)  / 16
+            
+            # Frequency axis
+            omega = np.fft.fftshift(np.fft.fftfreq(len(C_fft_input_broadened), d=dt)) * 2 * np.pi
 
-            reference_freq = np.fft.fftfreq(len(mean_real), d=(reference_time[1]-reference_time[0]))*2*np.pi
+            # Take real part of spectral function
+            S_omega_real = S_w.real
 
-            mean_fft = np.abs(np.fft.fft(mean_fft, norm="ortho"))  / 16
+            # Calculate integral of S(ω) before truncation
+            integral_before = np.trapz(S_omega_real, omega)
+            
+            # Extract positive frequencies only
+            positive_freq_mask = omega >= 0
+            omega_pos = omega[positive_freq_mask]
+            s_omega_pos = S_omega_real[positive_freq_mask]
+            
+            # Calculate integral of S(ω) after truncation (positive frequencies only)
+            integral_after = np.trapz(s_omega_pos, omega_pos)
+            
+            # Calculate compensation factor
+            compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
+            
+            # Apply compensation to the truncated spectral function
+            s_omega_pos_compensated = s_omega_pos * compensation_factor
+            
+            print(f"    Beta={beta}: Integral before truncation: {integral_before:.6f}")
+            print(f"    Beta={beta}: Integral after truncation: {integral_after:.6f}")
+            print(f"    Beta={beta}: Compensation factor: {compensation_factor:.6f}")
 
-            # mean_fft *= 1/(2*np.pi)  # Apply the factor (1 - exp(-ω*β))/ (2π) to the Fourier transform
-
-            # Sort by frequency
-            sort_indices = np.argsort(reference_freq)
-            reference_freq = reference_freq[sort_indices]
-            mean_fft = mean_fft[sort_indices]
-            mean_fft = np.flip(mean_fft)  # Ensure positive values
-
-
-            # Calculate QFI
-            positive_freq_mask = reference_freq > 0
-            omega = reference_freq[positive_freq_mask]
-            s_omega = mean_fft[positive_freq_mask]
-
-
-            integrand = s_omega 
-            qfi = np.trapz(integrand, omega)
+            # Calculate QFI using compensated positive frequencies
+            integrand = s_omega_pos_compensated * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
+            qfi = 4*np.trapz(integrand, omega_pos)
 
             # Plot the spectral function
             plt.figure(figsize=(10, 6))
-            plt.plot(omega, s_omega, label=f'Beta={beta} QFI={qfi:.4f}')
+            plt.scatter(omega_pos, s_omega_pos, label=f'Beta={beta} QFI={qfi:.4f}')
             plt.xlabel('Frequency (rad/s)')
-            plt.ylabel('Spectral Function')
+            plt.ylabel('Spectral Function S(ω)')
             plt.xlim(0, 3)
             plt.title(f'Spectral Function for {species} at Beta={beta}')
             plt.grid(True)
@@ -130,12 +205,11 @@ def parse_QFI_data(data_dir):
             plot_filename = os.path.join(outdir, f'spectral_function_{species}_beta_{beta}.png')
             plt.savefig(plot_filename, dpi=300)
             plt.close()
-            
 
             all_species_qfi_data[species].append((beta, qfi))
 
-            # Optional: Save processed spectral data for each beta
-            data_out = np.column_stack((reference_freq, mean_fft))
+            # Save processed spectral data for each beta
+            data_out = np.column_stack((omega, S_omega_real))
             data_filename = os.path.join(outdir, f'spectral_beta_{beta}.dat')
             np.savetxt(data_filename, data_out, header='freq spectral_function')
 
@@ -157,8 +231,6 @@ def parse_QFI_data(data_dir):
         # Plot QFI vs beta
         plt.figure(figsize=(10, 6))
         plt.plot(qfi_beta_array[:, 0], qfi_beta_array[:, 1], 'o-')
-        # plt.axvline(x=3.054, color='red', linestyle='--', alpha=0.7, label='β = 3.054')
-        # plt.axvline(x=18.738, color='blue', linestyle='--', alpha=0.7, label='β = 18.738')
         plt.xlabel('Beta (β)')
         plt.ylabel('QFI')
         plt.title(f'QFI vs. Beta for {species}')
@@ -176,7 +248,6 @@ def parse_QFI_data(data_dir):
             qfis = qfi_beta_array[:, 1]
             
             # Use central differences for the derivative
-            # We'll have one less point for the derivative
             mid_betas = (betas[:-1] + betas[1:]) / 2
             delta_beta = np.diff(betas)
             delta_qfi = np.diff(qfis)
@@ -185,8 +256,6 @@ def parse_QFI_data(data_dir):
             # Plot the derivative
             plt.figure(figsize=(10, 6))
             plt.plot(mid_betas, qfi_derivative, 'o-')
-            # plt.axvline(x=3.054, color='red', linestyle='--', alpha=0.7, label='β = 3.054')
-            # plt.axvline(x=18.738, color='blue', linestyle='--', alpha=0.7, label='β = 18.738')
             plt.xlabel('Beta (β)')
             plt.ylabel('dQFI/dβ')
             plt.title(f'Derivative of QFI vs. Beta for {species}')

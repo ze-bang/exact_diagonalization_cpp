@@ -245,7 +245,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             f.write("\n")
     
     # Write site positions and sublattice indices
-    with open(f"{output_dir}/{cluster_name}_site_info.dat", 'w') as f:
+    with open(f"{output_dir}/positions.dat", 'w') as f:
         f.write("# Site information for cluster: " + cluster_name + "\n")
         f.write("# site_id, matrix_index, sublattice_index, x, y, z\n\n")
         
