@@ -82,14 +82,15 @@ int main(int argc, char* argv[]) {
     // Synchronize all processes
     MPI_Barrier(MPI_COMM_WORLD);
     
-    // Collect all tpq_state files (only rank 0)
+    // Collect all tpq_state files from the output subdirectory (only rank 0)
     std::vector<std::string> tpq_files;
     std::vector<int> sample_indices;
     std::vector<double> beta_values;
     std::vector<std::string> beta_strings;
     
     if (rank == 0) {
-        for (const auto& entry : fs::directory_iterator(directory)) {
+        std::string tpq_directory = directory + "/output";
+        for (const auto& entry : fs::directory_iterator(tpq_directory)) {
             if (!entry.is_regular_file()) continue;
             
             std::string filename = entry.path().filename().string();
@@ -211,3 +212,4 @@ int main(int argc, char* argv[]) {
     MPI_Finalize();
     return 0;
 }
+
