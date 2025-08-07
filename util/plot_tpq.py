@@ -170,7 +170,7 @@ def parse_QFI_data(data_dir):
             integral_before = np.trapz(S_omega_real, omega)
             
             # Extract positive frequencies only
-            positive_freq_mask = omega >= 0
+            positive_freq_mask = omega > 0
             omega_pos = omega[positive_freq_mask]
             s_omega_pos = S_omega_real[positive_freq_mask]
             
@@ -180,6 +180,7 @@ def parse_QFI_data(data_dir):
             # Calculate compensation factor
             compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
             
+            print("Processing for species:", species)
             # Apply compensation to the truncated spectral function
             s_omega_pos_compensated = s_omega_pos * compensation_factor
             
