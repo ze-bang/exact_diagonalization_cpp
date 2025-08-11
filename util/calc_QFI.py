@@ -10,6 +10,7 @@ import pandas as pd
 import seaborn as sns
 from scipy.interpolate import griddata
 from mpi4py import MPI
+
 # Function to apply broadening in time domain
 def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
     """
@@ -43,55 +44,60 @@ def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None
     
     return broadened_data, broadening_factor if 'broadening_factor' in locals() else np.ones_like(data)
 
-def extract_beta(filename):
-    """Extract beta value from filename."""
-    match = re.search(r'beta=(\d+)', filename)
-    if match:
-        return float(match.group(1))
-    return None
-
-def parse_filename(filename):
-    """Extracts species and beta from filename."""
+def parse_filename_new(filename):
+    """Extracts species (including momentum), beta from new filename format."""
     basename = os.path.basename(filename)
-    # Regex to capture the species from time_corr_rand0_(species)_beta=(value).dat
-    match = re.search(r'time_corr_rand0_(.*?)_beta=([\d\.]+?)\.dat', basename)
+    # New pattern: SmSp_q_0_Qx0_Qy0_Qz0_sample0_beta1.437492_time_correlation.dat
+    # Extract species_momentum and beta
+    match = re.search(r'(.+?)_sample\d+_beta([\d\.]+)_time_correlation\.dat', basename)
     if match:
-        species = match.group(1)
+        species_with_momentum = match.group(1)
         beta = float(match.group(2))
-        return species, beta
+        return species_with_momentum, beta
     return None, None
 
-def parse_QFI_data(data_dir):
-    # List all relevant files matching the pattern for any species
-    files = glob.glob(os.path.join(data_dir, 'time_corr_rand0_*.dat'))
-    print(f"Found {len(files)} files matching the pattern.")
-    # Group files by species, then by beta
+def parse_QFI_data_new(structure_factor_dir):
+    """Parse QFI data from the new directory structure."""
+    # Find all beta subdirectories
+    beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
+    print(f"Found {len(beta_dirs)} beta directories.")
+    
+    # Group files by species (including momentum), then by beta
     species_data = defaultdict(lambda: defaultdict(list))
     species_names = set()
-    for file_path in files:
-        species, _ = parse_filename(file_path)
-        if species:
-            species_names.add(species)
-
-    print("Species found:")
+    
+    for beta_dir in beta_dirs:
+        # Extract beta value from directory name
+        beta_match = re.search(r'beta_([\d\.]+)', os.path.basename(beta_dir))
+        if not beta_match:
+            continue
+        beta_value = float(beta_match.group(1))
+        
+        # Find all time correlation files in this beta directory
+        files = glob.glob(os.path.join(beta_dir, '*_time_correlation.dat'))
+        
+        for file_path in files:
+            species_with_momentum, file_beta = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                # Use the beta from directory name as primary, file beta as verification
+                species_data[species_with_momentum][beta_value].append(file_path)
+    
+    print("Species (with momentum) found:")
     for name in sorted(list(species_names)):
         print(name)
-    for file_path in files:
-        species, beta = parse_filename(file_path)
-        if species is not None and beta is not None:
-            species_data[species][beta].append(file_path)
-
+    
     # Prepare for QFI vs beta plots for each species
     all_species_qfi_data = defaultdict(list)
-
+    
     # Process each species
     for species, beta_groups in species_data.items():
         print(f"Processing species: {species}")
-
+        
         # Process each beta group for the current species
         for beta, file_list in beta_groups.items():
             print(f"  Processing beta={beta} with {len(file_list)} files")
-
+            
             all_data = []
             for file_path in file_list:
                 try:
@@ -99,26 +105,26 @@ def parse_QFI_data(data_dir):
                     data = np.loadtxt(file_path, comments='#')
                     time = data[:, 0]
                     real_part = data[:, 1]
-                    imag_part = data[:, 2]
+                    imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
                     val = real_part + 1j * imag_part
                     all_data.append((time, val))
                 except Exception as e:
                     print(f"    Error reading {file_path}: {e}")
-                    
+            
             if not all_data:
                 print(f"    No valid data for beta={beta}")
                 continue
-
+            
             reference_time = all_data[0][0]
-
+            
             # Calculate mean correlation function
             all_complex_values = np.vstack([data[1] for data in all_data])
             mean_correlation = np.mean(all_complex_values, axis=0)
-
+            
             # Determine time step
             dt = reference_time[1] - reference_time[0] if len(reference_time) > 1 else 1.0
             N = len(mean_correlation)
-
+            
             # Check if data is already ordered from negative to positive time
             if reference_time[0] < 0 and reference_time[-1] > 0:
                 # Data is already time-ordered from negative to positive
@@ -148,24 +154,24 @@ def parse_QFI_data(data_dir):
                 C_fft_input = np.fft.ifftshift(C_full)
             
             # Apply time domain broadening (Lorentzian)
-            gamma = 0.1  # Broadening parameter
+            gamma = 0.3  # Broadening parameter
             t_fft_ordered = np.fft.ifftshift(t_full)
             C_fft_input_broadened, time_broadening_factor = apply_time_broadening(
                 t_fft_ordered, C_fft_input, 'lorentzian', gamma=gamma)
             
             # Take complex conjugate for FFT convention (matching the reference code)
             C_fft_input_broadened = np.conj(C_fft_input_broadened)
-
+            
             # Compute FFT to get spectral function
             C_w = np.fft.fft(C_fft_input_broadened)
-            S_w = dt * np.fft.fftshift(C_w) / (2 * np.pi)  / 16
+            S_w = dt * np.fft.fftshift(C_w) / (2 * np.pi) 
             
             # Frequency axis
             omega = np.fft.fftshift(np.fft.fftfreq(len(C_fft_input_broadened), d=dt)) * 2 * np.pi
-
+            
             # Take real part of spectral function
             S_omega_real = S_w.real
-
+            
             # Calculate integral of S(ω) before truncation
             integral_before = np.trapz(S_omega_real, omega)
             
@@ -182,16 +188,16 @@ def parse_QFI_data(data_dir):
             
             print("Processing for species:", species)
             # Apply compensation to the truncated spectral function
-            s_omega_pos_compensated = s_omega_pos * 1
+            s_omega_pos_compensated = s_omega_pos * compensation_factor
             
             print(f"    Beta={beta}: Integral before truncation: {integral_before:.6f}")
             print(f"    Beta={beta}: Integral after truncation: {integral_after:.6f}")
             print(f"    Beta={beta}: Compensation factor: {compensation_factor:.6f}")
-
+            
             # Calculate QFI using compensated positive frequencies
             integrand = s_omega_pos_compensated * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
             qfi = 4*np.trapz(integrand, omega_pos)
-
+            
             # Plot the spectral function
             plt.figure(figsize=(10, 6))
             plt.scatter(omega_pos, s_omega_pos, label=f'Beta={beta} QFI={qfi:.4f}')
@@ -201,34 +207,34 @@ def parse_QFI_data(data_dir):
             plt.title(f'Spectral Function for {species} at Beta={beta}')
             plt.grid(True)
             plt.legend()
-            outdir = os.path.join(data_dir, 'processed_data', species)
+            outdir = os.path.join(structure_factor_dir, 'processed_data', species)
             os.makedirs(outdir, exist_ok=True)
             plot_filename = os.path.join(outdir, f'spectral_function_{species}_beta_{beta}.png')
             plt.savefig(plot_filename, dpi=300)
             plt.close()
-
+            
             all_species_qfi_data[species].append((beta, qfi))
-
+            
             # Save processed spectral data for each beta
             data_out = np.column_stack((omega, S_omega_real))
             data_filename = os.path.join(outdir, f'spectral_beta_{beta}.dat')
             np.savetxt(data_filename, data_out, header='freq spectral_function')
-
+    
     # Plot QFI vs Beta for each species
-    plot_outdir = os.path.join(data_dir, 'plots')
+    plot_outdir = os.path.join(structure_factor_dir, 'plots')
     os.makedirs(plot_outdir, exist_ok=True)
-
+    
     for species, qfi_data in all_species_qfi_data.items():
         if not qfi_data:
             continue
-
+        
         qfi_data.sort()
         qfi_beta_array = np.array(qfi_data)
-
+        
         # Save QFI data
         qfi_data_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.dat')
         np.savetxt(qfi_data_filename, qfi_beta_array, header='beta qfi')
-
+        
         # Plot QFI vs beta
         plt.figure(figsize=(10, 6))
         plt.plot(qfi_beta_array[:, 0], qfi_beta_array[:, 1], 'o-')
@@ -238,11 +244,11 @@ def parse_QFI_data(data_dir):
         plt.xscale('log')
         plt.grid(True)
         plt.legend()
-
+        
         qfi_plot_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.png')
         plt.savefig(qfi_plot_filename, dpi=300)
         plt.close()
-
+        
         # Calculate and plot the derivative of QFI with respect to beta
         if len(qfi_beta_array) > 1:
             betas = qfi_beta_array[:, 0]
@@ -253,7 +259,7 @@ def parse_QFI_data(data_dir):
             delta_beta = np.diff(betas)
             delta_qfi = np.diff(qfis)
             qfi_derivative = delta_qfi / delta_beta
-
+            
             # Plot the derivative
             plt.figure(figsize=(10, 6))
             plt.plot(mid_betas, qfi_derivative, 'o-')
@@ -263,19 +269,18 @@ def parse_QFI_data(data_dir):
             plt.xscale('log')
             plt.grid(True)
             plt.legend()
-
+            
             derivative_plot_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_beta_{species}.png')
             plt.savefig(derivative_plot_filename, dpi=300)
             plt.close()
-
+            
             # Save derivative data
             derivative_data = np.column_stack((mid_betas, qfi_derivative))
             derivative_data_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_beta_{species}.dat')
             np.savetxt(derivative_data_filename, derivative_data, header='beta dQFI/dbeta')
-
+    
     print("Processing complete!")
     return all_species_qfi_data
-
 
 def parse_QFI_across_Jpm(data_dir):
     
@@ -308,9 +313,16 @@ def parse_QFI_across_Jpm(data_dir):
             continue
         jpm_value = float(match.group(1))
         
+        # Path to structure_factor_results directory
+        structure_factor_dir = os.path.join(subdir, 'structure_factor_results')
+        
+        if not os.path.exists(structure_factor_dir):
+            print(f"[Rank {rank}] Structure factor directory not found: {structure_factor_dir}")
+            continue
+        
         print(f"[Rank {rank}] Processing directory: {subdir} for Jpm={jpm_value}")
         # Run the QFI analysis for the current Jpm value
-        species_qfi_data = parse_QFI_data(os.path.join(subdir, 'output'))
+        species_qfi_data = parse_QFI_data_new(structure_factor_dir)
         local_jpm_qfi_data[jpm_value] = species_qfi_data
     
     # Gather all results at rank 0
@@ -434,7 +446,6 @@ def parse_QFI_across_Jpm(data_dir):
     else:
         return None
 
-
 def plot_heatmaps_from_processed_data(data_dir):
     """Plot heatmaps by reading processed QFI data from subdirectories."""
     
@@ -452,7 +463,7 @@ def plot_heatmaps_from_processed_data(data_dir):
             continue
         jpm_value = float(match.group(1))
         
-        plots_dir = os.path.join(subdir, 'output', 'plots')
+        plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
         if not os.path.exists(plots_dir):
             continue
             
@@ -762,5 +773,5 @@ if __name__ == "__main__":
         parse_QFI_across_Jpm(data_dir)
         plot_heatmaps_from_processed_data(data_dir)
     else:
-        parse_QFI_data(data_dir)
+        parse_QFI_data_new(data_dir)
     print("All processing complete.")

@@ -26,7 +26,7 @@
 #include <memory>
 
 // Forward declaration for CUDA wrapper
-#ifdef __CUDACC__
+#if defined(WITH_CUDA)
 #include "TPQ_cuda.cuh"
 #endif
 
@@ -1441,6 +1441,24 @@ void time_evolve_tpq_krylov(
         }
     }
 }
+
+#if defined(WITH_CUDA)
+// GPU overload: evolve state on GPU using a device-side matvec callback
+inline void time_evolve_tpq_krylov(
+    GpuMatvec H_dev,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int krylov_dim,
+    bool normalize,
+    CudaContext& ctx
+){
+    DeviceVector d_state(N);
+    copyHostToDevice(d_state, tpq_state.data(), N);
+    time_evolve_tpq_krylov_cuda(H_dev, d_state.ptr, N, delta_t, krylov_dim, normalize, ctx);
+    copyDeviceToHost(tpq_state.data(), d_state, N);
+}
+#endif
 
 /**
  * Chebyshev polynomial-based time evolution

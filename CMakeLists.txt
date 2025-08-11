@@ -117,6 +117,7 @@ include_directories(SYSTEM ${EIGEN3_INCLUDE_DIR})
 if(WITH_CUDA)
     find_package(CUDAToolkit REQUIRED)
     add_definitions(-DWITH_CUDA)
+    add_definitions(-DTPQ_HAVE_CUDA)
     message(STATUS "CUDA Toolkit found: ${CUDAToolkit_VERSION}")
     message(STATUS "CUDA Toolkit include directories: ${CUDAToolkit_INCLUDE_DIRS}")
 endif()
@@ -139,15 +140,42 @@ set(SOURCES
     ${SRC_DIR}/ed_run.cpp
 )
 
+# Header-only sources that should be included in compilation
+set(HEADER_SOURCES
+    ${SRC_DIR}/*.h
+)
+
 # Add CUDA sources if available and CUDA is enabled
 if(WITH_CUDA)
-    file(GLOB CUDA_SOURCES ${SRC_DIR}/*.cu)
-    if(CUDA_SOURCES)
-        list(APPEND SOURCES ${CUDA_SOURCES})
-        message(STATUS "Found CUDA source files: ${CUDA_SOURCES}")
-    else()
-        message(STATUS "No CUDA source files found in ${SRC_DIR}")
-    endif()
+    # Explicitly add our CUDA files
+    set(CUDA_SOURCES
+        ${SRC_DIR}/TPQ_cuda.cu
+        ${SRC_DIR}/TPQ_cuda_utils.cu
+    )
+    
+    # Check if the files exist and add them
+    foreach(cuda_file ${CUDA_SOURCES})
+        if(EXISTS ${cuda_file})
+            list(APPEND SOURCES ${cuda_file})
+            message(STATUS "Adding CUDA source: ${cuda_file}")
+        else()
+            message(WARNING "CUDA source file not found: ${cuda_file}")
+        endif()
+    endforeach()
+    
+    # Also search for any other .cu files
+    file(GLOB ADDITIONAL_CUDA_SOURCES ${SRC_DIR}/*.cu)
+    foreach(cuda_file ${ADDITIONAL_CUDA_SOURCES})
+        if(NOT ${cuda_file} IN_LIST SOURCES)
+            list(APPEND SOURCES ${cuda_file})
+            message(STATUS "Adding additional CUDA source: ${cuda_file}")
+        endif()
+    endforeach()
+    
+    # Create CUDA-only sources (without ed_run.cpp for tests)
+    set(CUDA_ONLY_SOURCES ${CUDA_SOURCES})
+else()
+    message(STATUS "CUDA disabled, skipping CUDA sources")
 endif()
 
 # Define executable
@@ -156,8 +184,27 @@ add_executable(ED ${SOURCES})
 # Add test executable
 add_executable(TEST ${SRC_DIR}/test_observables.cpp)
 
-# Add TPQ_DSSF executable
+# Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
+
+
+# Add CUDA example executable if CUDA is enabled and example exists
+if(WITH_CUDA)
+    set(CUDA_EXAMPLE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/tpq_cuda_example.cpp)
+    set(CUDA_TEST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/cuda_test.cpp)
+    
+    if(EXISTS ${CUDA_EXAMPLE_FILE})
+        add_executable(CUDA_EXAMPLE ${CUDA_EXAMPLE_FILE} ${SOURCES})
+        message(STATUS "Adding CUDA example executable")
+    else()
+        message(STATUS "CUDA example file not found at: ${CUDA_EXAMPLE_FILE}")
+    endif()
+    
+    if(EXISTS ${CUDA_TEST_FILE})
+        add_executable(CUDA_TEST ${CUDA_TEST_FILE} ${CUDA_ONLY_SOURCES})
+        message(STATUS "Adding CUDA test executable")
+    endif()
+endif()
 
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
@@ -185,20 +232,55 @@ target_link_libraries(TEST
     ${ARPACK_LIBRARY}
 )
 
-# Link libraries for TPQ_DSSF executable
-target_link_libraries(TPQ_DSSF
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${ARPACK_LIBRARY}
-)
+# Link libraries for TPQ_DSSF executable (only if it exists)
+if(TARGET TPQ_DSSF)
+    target_link_libraries(TPQ_DSSF
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
+
+# Link libraries for CUDA example if it exists
+if(TARGET CUDA_EXAMPLE)
+    target_link_libraries(CUDA_EXAMPLE
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
+
+# Link libraries for CUDA test if it exists
+if(TARGET CUDA_TEST)
+    target_link_libraries(CUDA_TEST
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
 
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
         target_link_libraries(ED MKL::MKL)
         target_link_libraries(TEST MKL::MKL)
-        target_link_libraries(TPQ_DSSF MKL::MKL)
+        
+        if(TARGET TPQ_DSSF)
+            target_link_libraries(TPQ_DSSF MKL::MKL)
+        endif()
+        
+        # Link MKL to CUDA example if it exists
+        if(TARGET CUDA_EXAMPLE)
+            target_link_libraries(CUDA_EXAMPLE MKL::MKL)
+        endif()
+        
+        # Link MKL to CUDA test if it exists
+        if(TARGET CUDA_TEST)
+            target_link_libraries(CUDA_TEST MKL::MKL)
+        endif()
     else()
         # Link traditional MKL (already linked via BLAS_LIBRARIES)
         # No additional linking needed since MKL is detected as BLAS/LAPACK
@@ -213,13 +295,63 @@ if(WITH_CUDA)
         CUDA::cusparse
         CUDA::curand
     )
+    
+    # Add CUDA libraries to other executables as well
+    target_link_libraries(TEST
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+    )
+    
+    if(TARGET TPQ_DSSF)
+        target_link_libraries(TPQ_DSSF
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+        )
+    endif()
+    
+    # Link CUDA libraries to example if it exists
+    if(TARGET CUDA_EXAMPLE)
+        target_link_libraries(CUDA_EXAMPLE
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+        )
+    endif()
+    
+    # Link CUDA libraries to test if it exists
+    if(TARGET CUDA_TEST)
+        target_link_libraries(CUDA_TEST
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+        )
+    endif()
 endif()
 
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
     target_link_libraries(TEST ${MPI_CXX_LIBRARIES})
-    target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
+    
+    if(TARGET TPQ_DSSF)
+        target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    # Link MPI to CUDA example if it exists
+    if(TARGET CUDA_EXAMPLE)
+        target_link_libraries(CUDA_EXAMPLE ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    # Link MPI to CUDA test if it exists
+    if(TARGET CUDA_TEST)
+        target_link_libraries(CUDA_TEST ${MPI_CXX_LIBRARIES})
+    endif()
 endif()
 
 # Install targets
@@ -278,6 +410,45 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
+    
+    # Set CUDA compile options for other targets if they have CUDA sources
+    if(TARGET TEST)
+        set_property(TARGET TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        target_compile_options(TEST PRIVATE 
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        )
+    endif()
+    
+    if(TARGET TPQ_DSSF)
+        set_property(TARGET TPQ_DSSF PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        target_compile_options(TPQ_DSSF PRIVATE 
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        )
+    endif()
+    
+    # Set CUDA compile options for CUDA example if it exists
+    if(TARGET CUDA_EXAMPLE)
+        set_property(TARGET CUDA_EXAMPLE PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        target_compile_options(CUDA_EXAMPLE PRIVATE 
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        )
+    endif()
+    
+    # Set CUDA compile options for CUDA test if it exists
+    if(TARGET CUDA_TEST)
+        set_property(TARGET CUDA_TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        target_compile_options(CUDA_TEST PRIVATE 
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        )
+    endif()
 endif()
 
 # Add OpenMP support if available
