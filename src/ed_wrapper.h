@@ -8,46 +8,42 @@
 #include "construct_ham.h"
 #include "observables.h"
 #include "finite_temperature_lanczos.h"
-                        // Skip thermal expectation observable post-processing for TPQ methods
-                        if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
-                            std::cout << "Skipping ED-based thermal expectation observable post-processing for TPQ method." << std::endl;
-                        } else {
-                            // Calculate thermal expectations at temperature points
-                            int num_temps = std::min(params.num_temp_bins, 20);
-                            double log_temp_min = std::log(params.temp_min);
-                            double log_temp_max = std::log(params.temp_max);
-                            double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, num_temps - 1);
+#include <sys/stat.h>
 
-                            for (int i = 0; i < num_temps; i++) {
-                                double T = std::exp(log_temp_min + i * log_temp_step);
-                                double beta = 1.0 / T;
-                                // Compute thermal expectation
-                                Complex expectation = calculate_thermal_expectation(
-                                    apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
-                                
-                                std::cout << "T: " << T << ", beta: " << beta << ", expectation: " 
-                                            << expectation.real() << " + " << expectation.imag() << "i" << std::endl;
+// #include "TPQ_cuda.cuh"
+#include "lanczos_cuda.cuh"
 
-                                // Write to file
-                                if (prefix == "one_body_correlations") {
-                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                                << std::setw(12) << std::setprecision(6) << beta << " "
-                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                                } else if (prefix == "two_body_correlations") {
-                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
-                                                << std::setw(12) << std::setprecision(6) << beta << " "
-                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
-                                                << std::setw(12) << std::setprecision(6) << Op2 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
-                                                << std::setw(12) << std::setprecision(6) << indx2 << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
-                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
-                                }
-                            }
-                        }
+std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for addition.");
+    }
+    std::vector<Complex> result(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        result[i] = a[i] + b[i];
+    }
+    return result;
+}
+std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
+    }
+    std::vector<Complex> result(a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        result[i] = a[i] - b[i];
+    }
+    return result;
+}
+
+std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+    if (a.size() != b.size()) {
+        throw std::invalid_argument("Vectors must be of the same size for addition.");
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        a[i] += b[i];
+    }
+    return a;
+}
+
 std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for subtraction.");
