@@ -182,7 +182,7 @@ def parse_QFI_data(data_dir):
             
             print("Processing for species:", species)
             # Apply compensation to the truncated spectral function
-            s_omega_pos_compensated = s_omega_pos * compensation_factor
+            s_omega_pos_compensated = s_omega_pos * 1
             
             print(f"    Beta={beta}: Integral before truncation: {integral_before:.6f}")
             print(f"    Beta={beta}: Integral after truncation: {integral_after:.6f}")
