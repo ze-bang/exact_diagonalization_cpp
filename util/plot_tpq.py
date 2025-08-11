@@ -181,7 +181,7 @@ def parse_QFI_data(data_dir):
             compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
             
             # Apply compensation to the truncated spectral function
-            s_omega_pos_compensated = s_omega_pos * compensation_factor
+            s_omega_pos_compensated = s_omega_pos * 1
             
             print(f"    Beta={beta}: Integral before truncation: {integral_before:.6f}")
             print(f"    Beta={beta}: Integral after truncation: {integral_after:.6f}")
