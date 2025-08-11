@@ -343,6 +343,7 @@ int main(int argc, char* argv[]) {
             case DiagonalizationMethod::FULL: std::cout << "Full Diagonalization"; break;
             case DiagonalizationMethod::mTPQ: std::cout << "microcanonical Thermal Pure Quantum (mTPQ)"; break;
             case DiagonalizationMethod::cTPQ: std::cout << "canonical Thermal Pure Quantum (cTPQ)"; break;
+            case DiagonalizationMethod::mTPQ_CUDA: std::cout << "microcanonical Thermal Pure Quantum (mTPQ_CUDA)"; break;
             case DiagonalizationMethod::OSS: std::cout << "Optimal spectrum solver"; break;
             default: std::cout << "Other"; break;
         }
@@ -355,7 +356,7 @@ int main(int argc, char* argv[]) {
                 standard_results = exact_diagonalization_from_directory(
                     directory, method, params, format
                 );
-                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
                     std::cout << "Thermal Pure Quantum (TPQ) method completed." << std::endl;
                     return 0;
                 }
@@ -393,7 +394,7 @@ int main(int argc, char* argv[]) {
 
             // If thermodynamic data computed, save it
             if (compute_thermo) {
-                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
                     // TPQ method handles thermodynamics internally
                 }
                 // Check if full spectrum is calculated
@@ -426,6 +427,9 @@ int main(int argc, char* argv[]) {
             }
             //Compute observables if requested
             if (params.calc_observables) {
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+                    std::cout << "Skipping ED-based observable post-processing for TPQ method (handled inside TPQ run)." << std::endl;
+                } else {
                 std::cout << "Calculating observables..." << std::endl;
                 // Find all observable files
                 std::vector<std::string> observable_files;
@@ -608,10 +612,14 @@ int main(int argc, char* argv[]) {
                     }
 
                 }
+                }
             }
 
                 // Calculate spin expectations if requested
             if (measure_spin) {
+                if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+                    std::cout << "Skipping ED-based spin expectation post-processing for TPQ method." << std::endl;
+                } else {
                 std::cout << "Calculating spin expectations..." << std::endl;
                 std::string obs_output_dir = params.output_dir + "/spin_expectations";
                 system(("mkdir -p " + obs_output_dir).c_str());
@@ -634,6 +642,7 @@ int main(int argc, char* argv[]) {
                         true,
                         false
                     );
+                }
             }
         }
         catch (const std::exception& e) {
@@ -662,7 +671,7 @@ int main(int argc, char* argv[]) {
                 directory, method, sym_params, format
             );
             
-            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
                 std::cout << "Thermal Pure Quantum (TPQ) method completed" << std::endl;
                 return 0;
             }
@@ -771,7 +780,7 @@ int main(int argc, char* argv[]) {
         }
         // If thermodynamic data computed, save it
         if (compute_thermo) {
-            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ) {
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
                 std::ofstream thermo_file(thermo_output + "/thermo_data.txt");
                 if (thermo_file.is_open()) {
                     thermo_file << "# Temperature Energy SpecificHeat Entropy FreeEnergy" << std::endl;
@@ -836,6 +845,9 @@ int main(int argc, char* argv[]) {
         }
         //Compute observables if requested
         if (params.calc_observables) {
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+                std::cout << "Skipping ED-based observable post-processing for TPQ method (symmetrized run)." << std::endl;
+            } else {
             std::cout << "Calculating observables..." << std::endl;
             // Find all observable files
             std::vector<std::string> observable_files;
@@ -1014,6 +1026,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "Saved quantum Fisher information to " << qfi_file << std::endl;
                 }
 
+            }
             }
         }
 

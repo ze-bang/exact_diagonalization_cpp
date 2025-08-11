@@ -2102,4 +2102,220 @@ void microcanonical_tpq(
 }
 
 
+#if defined(WITH_CUDA)
+// Device-side helper: energy and variance using GPU matvec and BLAS wrappers
+inline std::pair<double,double> calculateEnergyAndVariance_cuda(
+    GpuMatvec H_dev,
+    const DeviceVector& d_v,
+    int N,
+    CudaContext& ctx
+){
+    DeviceVector d_Hv(N);
+    DeviceVector d_H2v(N);
+    // H|v>
+    H_dev(d_v.ptr, d_Hv.ptr, N);
+    // energy = <v|H|v> (real for Hermitian H)
+    Complex e = dz_dotc_device(N, d_v.ptr, d_Hv.ptr, ctx);
+    double energy = e.real();
+    // H^2|v>
+    H_dev(d_Hv.ptr, d_H2v.ptr, N);
+    Complex h2 = dz_dotc_device(N, d_v.ptr, d_H2v.ptr, ctx);
+    double variance = h2.real() - energy * energy;
+    return {energy, variance};
+}
+
+// CUDA-optimized microcanonical TPQ main loop operating in device memory.
+// Uses GPU BLAS for norms/axpy/scal and a device matvec callback for H.
+inline void microcanonical_tpq_cuda(
+    GpuMatvec H_dev,
+    int N,
+    int max_iter,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& eigenvalues,
+    std::string dir = "",
+    bool compute_spectrum = false,
+    double LargeValue = 1e5,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1,
+    CudaContext* pCtx = nullptr
+){
+    // Create output directory if needed
+    if (!dir.empty()) { ensureDirectoryExists(dir); }
+
+    int num_sites = static_cast<int>(std::log2(N));
+    eigenvalues.clear();
+
+    // Pre-create host-side operator structures needed for fluctuation I/O
+    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+
+    // Temperature checkpoints (same as CPU path)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1);
+    double log_max = std::log10(1000);
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
+
+    CudaContext localCtx;
+    CudaContext& ctx = pCtx ? *pCtx : localCtx;
+
+    for (int sample = 0; sample < num_samples; ++sample) {
+        std::vector<bool> temp_measured(num_temp_points, false);
+        std::cout << "TPQ (CUDA) sample " << sample+1 << " of " << num_samples << std::endl;
+
+        // Setup filenames
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+
+        // Generate initial random state on host, then copy to device
+        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+        ComplexVector h_v1 = generateTPQVector(N, seed);
+
+        DeviceVector d_v0(N), d_v1(N), d_tmp(N);
+        copyHostToDevice(d_v1, h_v1.data(), N);
+
+        // d_tmp = H|v1>
+        H_dev(d_v1.ptr, d_tmp.ptr, N);
+        // d_v0 = (L*ns)*v1 - H|v1>
+        dz_copy_device(N, d_v1.ptr, d_v0.ptr, ctx);
+        dz_scal_device(N, Complex(LargeValue * num_sites, 0.0), d_v0.ptr, ctx);
+        dz_axpy_device(N, Complex(-1.0, 0.0), d_tmp.ptr, d_v0.ptr, ctx);
+
+        // Initial energy/variance and normalization
+        auto [energy1, variance1] = calculateEnergyAndVariance_cuda(H_dev, d_v0, N, ctx);
+        double inv_temp = (2.0) / (LargeValue * num_sites - energy1);
+        double first_norm = dz_nrm2_device(d_v0.ptr, N, ctx);
+        if (first_norm > 0.0) { dz_scal_device(N, Complex(1.0/first_norm, 0.0), d_v0.ptr, ctx); }
+
+        double current_norm = first_norm;
+        writeTPQData(ss_file, inv_temp, energy1, variance1, current_norm, /*step=*/1);
+        {
+            std::ofstream norm_out(norm_file, std::ios::app);
+            norm_out << std::setprecision(16) << inv_temp << " "
+                     << current_norm << " " << first_norm << " " << 1 << std::endl;
+        }
+
+        // Main TPQ loop
+        int step = 2;
+        for (; step <= max_iter; ++step) {
+            if (step % (std::max(1, max_iter/10)) == 0 || step == max_iter) {
+                std::cout << "  [CUDA] Step " << step << " of " << max_iter << std::endl;
+            }
+
+            // d_v1 = H|v0>
+            H_dev(d_v0.ptr, d_v1.ptr, N);
+
+            // d_v0 = (L*ns)*v0 - v1
+            dz_scal_device(N, Complex(LargeValue * num_sites, 0.0), d_v0.ptr, ctx);
+            dz_axpy_device(N, Complex(-1.0, 0.0), d_v1.ptr, d_v0.ptr, ctx);
+
+            // Normalize
+            current_norm = dz_nrm2_device(d_v0.ptr, N, ctx);
+            if (current_norm > 0.0) {
+                dz_scal_device(N, Complex(1.0/current_norm, 0.0), d_v0.ptr, ctx);
+            }
+
+            // Energy/variance and inverse temperature
+            auto [energy_step, variance_step] = calculateEnergyAndVariance_cuda(H_dev, d_v0, N, ctx);
+            inv_temp = (2.0 * step) / (LargeValue * num_sites - energy_step);
+
+            // Write outputs
+            writeTPQData(ss_file, inv_temp, energy_step, variance_step, current_norm, step);
+            {
+                std::ofstream norm_out(norm_file, std::ios::app);
+                norm_out << std::setprecision(16) << inv_temp << " "
+                         << current_norm << " " << first_norm << " " << step << std::endl;
+            }
+
+            energy1 = energy_step;
+
+            // Optional fluctuation measurements: copy to host only when needed
+            if ((measure_sz && (step % temp_interval == 0 || step == max_iter))) {
+                ComplexVector h_v0(N);
+                copyDeviceToHost(h_v0.data(), d_v0, N);
+                writeFluctuationData(flct_file, spin_corr, inv_temp, h_v0,
+                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+            }
+
+            // Save states near target inverse temperatures (for later observables)
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                    if (compute_observables) {
+                        ComplexVector h_v0(N);
+                        copyDeviceToHost(h_v0.data(), d_v0, N);
+                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        save_tpq_state(h_v0, state_file);
+                    }
+                    temp_measured[i] = true;
+                }
+            }
+        }
+
+        // Store final energy
+        eigenvalues.push_back(energy1);
+    }
+}
+
+// Unified entry: choose CPU or CUDA path at runtime. When CUDA is requested but not available,
+// it will fall back to CPU.
+inline void microcanonical_tpq_unified(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    int max_iter,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& eigenvalues,
+    std::string dir = "",
+    bool compute_spectrum = false,
+    double LargeValue = 1e5,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1,
+    bool use_cuda = false
+){
+    if (!use_cuda) {
+        // CPU path
+        microcanonical_tpq(H, N, max_iter, num_samples, temp_interval, eigenvalues, dir,
+                           compute_spectrum, LargeValue, compute_observables, observables, observable_names,
+                           omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size);
+        return;
+    }
+
+    // CUDA path: by default wrap host matvec (for convenience). For best performance,
+    // supply a native device-side matvec to microcanonical_tpq_cuda.
+    try {
+        CudaContext ctx;
+        GpuMatvec H_dev = wrap_host_matvec(H);
+        microcanonical_tpq_cuda(H_dev, N, max_iter, num_samples, temp_interval, eigenvalues, dir,
+                                compute_spectrum, LargeValue, compute_observables, observables, observable_names,
+                                omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size, &ctx);
+    } catch (const std::exception& e) {
+        std::cerr << "CUDA path failed (" << e.what() << "), falling back to CPU." << std::endl;
+        microcanonical_tpq(H, N, max_iter, num_samples, temp_interval, eigenvalues, dir,
+                           compute_spectrum, LargeValue, compute_observables, observables, observable_names,
+                           omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size);
+    }
+}
+#endif // WITH_CUDA
+
+
 #endif // TPQ_H

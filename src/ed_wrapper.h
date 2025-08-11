@@ -8,42 +8,46 @@
 #include "construct_ham.h"
 #include "observables.h"
 #include "finite_temperature_lanczos.h"
-#include <sys/stat.h>
+                        // Skip thermal expectation observable post-processing for TPQ methods
+                        if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::cTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+                            std::cout << "Skipping ED-based thermal expectation observable post-processing for TPQ method." << std::endl;
+                        } else {
+                            // Calculate thermal expectations at temperature points
+                            int num_temps = std::min(params.num_temp_bins, 20);
+                            double log_temp_min = std::log(params.temp_min);
+                            double log_temp_max = std::log(params.temp_max);
+                            double log_temp_step = (log_temp_max - log_temp_min) / std::max(1, num_temps - 1);
 
-// #include "TPQ_cuda.cuh"
-#include "lanczos_cuda.cuh"
+                            for (int i = 0; i < num_temps; i++) {
+                                double T = std::exp(log_temp_min + i * log_temp_step);
+                                double beta = 1.0 / T;
+                                // Compute thermal expectation
+                                Complex expectation = calculate_thermal_expectation(
+                                    apply_correlation_op, hilbert_space_dim, beta, params.output_dir + "/eigenvectors/");
+                                
+                                std::cout << "T: " << T << ", beta: " << beta << ", expectation: " 
+                                            << expectation.real() << " + " << expectation.imag() << "i" << std::endl;
 
-std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for addition.");
-    }
-    std::vector<Complex> result(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-        result[i] = a[i] + b[i];
-    }
-    return result;
-}
-std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for subtraction.");
-    }
-    std::vector<Complex> result(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-        result[i] = a[i] - b[i];
-    }
-    return result;
-}
-
-std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
-    if (a.size() != b.size()) {
-        throw std::invalid_argument("Vectors must be of the same size for addition.");
-    }
-    for (size_t i = 0; i < a.size(); ++i) {
-        a[i] += b[i];
-    }
-    return a;
-}
-
+                                // Write to file
+                                if (prefix == "one_body_correlations") {
+                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
+                                                << std::setw(12) << std::setprecision(6) << beta << " "
+                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
+                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
+                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
+                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
+                                } else if (prefix == "two_body_correlations") {
+                                    results_file << std::setw(12) << std::setprecision(6) << T << " "
+                                                << std::setw(12) << std::setprecision(6) << beta << " "
+                                                << std::setw(12) << std::setprecision(6) << Op1 << " "
+                                                << std::setw(12) << std::setprecision(6) << Op2 << " "
+                                                << std::setw(12) << std::setprecision(6) << indx1 << " "
+                                                << std::setw(12) << std::setprecision(6) << indx2 << " "
+                                                << std::setw(12) << std::setprecision(6) << expectation.real() << " "
+                                                << std::setw(12) << std::setprecision(6) << expectation.imag() << std::endl;
+                                }
+                            }
+                        }
 std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for subtraction.");
@@ -424,96 +428,97 @@ EDResults exact_diagonalization_core(
         //                 params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); // n_max order for Taylor expansion
         //     break;
 
-        // case DiagonalizationMethod::mTPQ_CUDA:
-        //     std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
-            
-        //     // Search for observable files and load them as operators
-        //     if (params.calc_observables) {
-        //         std::string base_dir;
-        //         if (!params.output_dir.empty()) {
-        //             size_t pos = params.output_dir.find_last_of("/\\");
-        //             base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
-        //         } else {
-        //             base_dir = ".";
-        //         }
-                
-        //         std::cout << "Searching for observable files in: " << base_dir << std::endl;
-                
-        //         // Create a temporary file to store the list of observable files
-        //         std::string temp_list_file = params.output_dir + "/observable_files.txt";
-        //         std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
-        //         system(find_command.c_str());
-                
-        //         // Read the list of observable files
-        //         std::ifstream file_list(temp_list_file);
-        //         if (file_list.is_open()) {
-        //             std::string observable_file;
-        //             int loaded_count = 0;
-                    
-        //             while (std::getline(file_list, observable_file)) {
-        //                 if (observable_file.empty()) continue;
-                        
-        //                 std::cout << "Loading observable from file: " << observable_file << std::endl;
-                        
-        //                 try {
-        //                     Operator obs_op(params.num_sites, params.spin_length);
-                            
-        //                     // Extract observable name from the filename
-        //                     std::string obs_name = "observable";
-        //                     size_t name_pos = observable_file.find("observables_");
-        //                     if (name_pos != std::string::npos) {
-        //                         size_t start = name_pos + 12; // Length of "observables_"
-        //                         size_t end = observable_file.find(".dat", start);
-        //                         if (end != std::string::npos) {
-        //                             obs_name = observable_file.substr(start, end - start);
-        //                         }
-        //                     } else {
-        //                         // Get the filename without path
-        //                         size_t last_slash = observable_file.find_last_of("/\\");
-        //                         if (last_slash != std::string::npos) {
-        //                             obs_name = observable_file.substr(last_slash + 11);
-        //                             // Remove .dat extension if present
-        //                             size_t dot_pos = obs_name.find(".dat");
-        //                             if (dot_pos != std::string::npos) {
-        //                                 obs_name = obs_name.substr(0, dot_pos);
-        //                             }
-        //                         }
-        //                     }
-                            
-        //                     // Determine file type and load accordingly
-        //                     if (observable_file.find("InterAll") != std::string::npos) {
-        //                         obs_op.loadFromInterAllFile(observable_file);
-        //                     } else {
-        //                         obs_op.loadFromFile(observable_file);
-        //                     }
-                            
-        //                     params.observables.push_back(obs_op);
-        //                     params.observable_names.push_back(obs_name);
-        //                     loaded_count++;
-        //                 }
-        //                 catch (const std::exception& e) {
-        //                     std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
-        //                 }
-        //             }
-                    
-        //             file_list.close();
-        //             std::remove(temp_list_file.c_str());
-                    
-        //             std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
-        //         }
-        //     }
+        case DiagonalizationMethod::mTPQ_CUDA:
+            std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
 
-        //     microcanonical_tpq_cuda_wrapper(H, hilbert_space_dim,
-        //                      params.max_iterations, params.num_samples,
-        //                      params.num_measure_freq,
-        //                      results.eigenvalues,
-        //                      params.output_dir,
-        //                      params.compute_eigenvectors,
-        //                      params.large_value,
-        //                      params.calc_observables, params.observables, params.observable_names,
-        //                     params.omega_min, params.omega_max,
-        //                     params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
-        //     break;
+            // Search for observable files and load them as operators
+            if (params.calc_observables) {
+                std::string base_dir;
+                if (!params.output_dir.empty()) {
+                    size_t pos = params.output_dir.find_last_of("/\\");
+                    base_dir = (pos != std::string::npos) ? params.output_dir.substr(0, pos) : ".";
+                } else {
+                    base_dir = ".";
+                }
+
+                std::cout << "Searching for observable files in: " << base_dir << std::endl;
+
+                // Create a temporary file to store the list of observable files
+                std::string temp_list_file = params.output_dir + "/observable_files.txt";
+                std::string find_command = "find \"" + base_dir + "\" -name \"observables*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
+
+                // Read the list of observable files
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string observable_file;
+                    int loaded_count = 0;
+
+                    while (std::getline(file_list, observable_file)) {
+                        if (observable_file.empty()) continue;
+
+                        std::cout << "Loading observable from file: " << observable_file << std::endl;
+
+                        try {
+                            Operator obs_op(params.num_sites, params.spin_length);
+
+                            // Extract observable name from the filename
+                            std::string obs_name = "observable";
+                            size_t name_pos = observable_file.find("observables_");
+                            if (name_pos != std::string::npos) {
+                                size_t start = name_pos + 12; // Length of "observables_"
+                                size_t end = observable_file.find(".dat", start);
+                                if (end != std::string::npos) {
+                                    obs_name = observable_file.substr(start, end - start);
+                                }
+                            } else {
+                                // Get the filename without path
+                                size_t last_slash = observable_file.find_last_of("/\\");
+                                if (last_slash != std::string::npos) {
+                                    obs_name = observable_file.substr(last_slash + 11);
+                                    // Remove .dat extension if present
+                                    size_t dot_pos = obs_name.find(".dat");
+                                    if (dot_pos != std::string::npos) {
+                                        obs_name = obs_name.substr(0, dot_pos);
+                                    }
+                                }
+                            }
+
+                            // Determine file type and load accordingly
+                            if (observable_file.find("InterAll") != std::string::npos) {
+                                obs_op.loadFromInterAllFile(observable_file);
+                            } else {
+                                obs_op.loadFromFile(observable_file);
+                            }
+
+                            params.observables.push_back(obs_op);
+                            params.observable_names.push_back(obs_name);
+                            loaded_count++;
+                        }
+                        catch (const std::exception& e) {
+                            std::cerr << "Error loading observable from " << observable_file << ": " << e.what() << std::endl;
+                        }
+                    }
+
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
+
+                    std::cout << "Loaded " << loaded_count << " observables for TPQ calculations" << std::endl;
+                }
+            }
+
+            microcanonical_tpq_unified(H, hilbert_space_dim,
+                             params.max_iterations, params.num_samples,
+                             params.num_measure_freq,
+                             results.eigenvalues,
+                             params.output_dir,
+                             params.compute_eigenvectors,
+                             params.large_value,
+                             params.calc_observables, params.observables, params.observable_names,
+                            params.omega_min, params.omega_max,
+                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size,
+                            /*use_cuda=*/true);
+            break;
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;
