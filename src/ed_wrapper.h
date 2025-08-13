@@ -85,7 +85,8 @@ enum class DiagonalizationMethod {
     LTLM,                   // Low Temperature Lanczos Method
     ARPACK_SM,                // ARPACK for eigenvalue problems
     ARPACK_LM,
-    ARPACK_SHIFT_INVERT   // ARPACK in shift-invert mode
+    ARPACK_SHIFT_INVERT,   // ARPACK in shift-invert mode
+    ARPACK_ADVANCED        // ARPACK advanced multi-attempt strategy
 };
 
 // Structure to hold exact diagonalization results
@@ -136,6 +137,25 @@ struct EDParameters {
 
     bool calc_observables = false; // Calculate custom observables
     bool measure_spin = false; // Measure spins
+
+    // ARPACK advanced options (used when method == ARPACK_ADVANCED)
+    // These mirror (a subset of) detail_arpack::ArpackAdvancedOptions
+    bool arpack_advanced_verbose = false;    // --arpack-verbose
+    std::string arpack_which = "SM";         // --arpack-which=SM|LM|SR|LR|... (Hermitian typical: SM/LM)
+    int arpack_ncv = -1;                     // --arpack-ncv=<int>
+    int arpack_max_restarts = 2;             // --arpack-max-restarts=<int>
+    double arpack_ncv_growth = 1.5;          // --arpack-ncv-growth=<double>
+    bool arpack_auto_enlarge_ncv = true;     // --arpack-no-auto-enlarge-ncv to disable
+    bool arpack_two_phase_refine = true;     // --arpack-no-two-phase to disable
+    double arpack_relaxed_tol = 1e-6;        // --arpack-relaxed-tol=<double>
+    bool arpack_shift_invert = false;        // --arpack-shift-invert
+    double arpack_sigma = 0.0;               // --arpack-sigma=<double>
+    bool arpack_auto_switch_shift_invert = true; // --arpack-no-auto-switch-si
+    double arpack_switch_sigma = 0.0;        // --arpack-switch-sigma=<double>
+    bool arpack_adaptive_inner_tol = true;   // --arpack-no-adaptive-inner-tol
+    double arpack_inner_tol_factor = 1e-2;   // --arpack-inner-tol-factor=<double>
+    double arpack_inner_tol_min = 1e-14;     // --arpack-inner-tol-min=<double>
+    int arpack_inner_max_iter = 300;         // --arpack-inner-max-iter=<int>
 };
 
 // Main wrapper function for exact diagonalization
@@ -479,6 +499,39 @@ EDResults exact_diagonalization_core(
                                 results.eigenvalues, params.output_dir,
                                 params.compute_eigenvectors);
             break;
+
+        case DiagonalizationMethod::ARPACK_ADVANCED: {
+            std::cout << "Using ARPACK advanced multi-attempt solver" << std::endl;
+            detail_arpack::ArpackAdvancedOptions opts;
+            opts.nev = params.num_eigenvalues;
+            opts.which = params.arpack_which;
+            opts.tol = params.tolerance;
+            opts.max_iter = params.max_iterations;
+            opts.ncv = params.arpack_ncv;
+            opts.auto_enlarge_ncv = params.arpack_auto_enlarge_ncv;
+            opts.max_restarts = params.arpack_max_restarts;
+            opts.ncv_growth = params.arpack_ncv_growth;
+            opts.two_phase_refine = params.arpack_two_phase_refine;
+            opts.relaxed_tol = params.arpack_relaxed_tol;
+            opts.shift_invert = params.arpack_shift_invert;
+            opts.sigma = params.arpack_sigma;
+            opts.auto_switch_to_shift_invert = params.arpack_auto_switch_shift_invert;
+            opts.switch_sigma = params.arpack_switch_sigma;
+            opts.adaptive_inner_tol = params.arpack_adaptive_inner_tol;
+            opts.inner_tol_factor = params.arpack_inner_tol_factor;
+            opts.inner_tol_min = params.arpack_inner_tol_min;
+            opts.inner_max_iter = params.arpack_inner_max_iter;
+            opts.verbose = params.arpack_advanced_verbose;
+            std::vector<Complex> evecs; // optionally capture
+            int info = arpack_eigs_advanced(H, hilbert_space_dim, opts,
+                                            results.eigenvalues,
+                                            params.output_dir,
+                                            params.compute_eigenvectors,
+                                            params.compute_eigenvectors ? &evecs : nullptr);
+            if (info != 0) {
+                std::cerr << "ARPACK advanced solver returned info=" << info << std::endl;
+            }
+            break; }
 
         default:
             std::cerr << "Unknown diagonalization method selected" << std::endl;

@@ -46,6 +46,23 @@ int main(int argc, char* argv[]) {
         std::cout << "  --dt=<value>           : Time step for time evolution" << std::endl;
         std::cout << "  --help                : Show this help message" << std::endl;
         std::cout << "  --sublattice_size=<value> : Size of the sublattice" << std::endl;
+    std::cout << "  ARPACK advanced options (when --method=ARPACK_ADVANCED):" << std::endl;
+    std::cout << "    --arpack-which=<SM|LM|SR|LR|...>         (default SM)" << std::endl;
+    std::cout << "    --arpack-ncv=<n>                         (subspace dim override)" << std::endl;
+    std::cout << "    --arpack-max-restarts=<n>                (default 2)" << std::endl;
+    std::cout << "    --arpack-ncv-growth=<factor>             (default 1.5)" << std::endl;
+    std::cout << "    --arpack-no-auto-enlarge-ncv             (disable auto enlarge ncv)" << std::endl;
+    std::cout << "    --arpack-no-two-phase                    (disable relaxed then refine)" << std::endl;
+    std::cout << "    --arpack-relaxed-tol=<val>               (first pass tol, default 1e-6)" << std::endl;
+    std::cout << "    --arpack-shift-invert                    (start in shift-invert mode)" << std::endl;
+    std::cout << "    --arpack-sigma=<val>                     (initial sigma)" << std::endl;
+    std::cout << "    --arpack-no-auto-switch-si               (disable auto switch to shift-invert)" << std::endl;
+    std::cout << "    --arpack-switch-sigma=<val>              (sigma for switch)" << std::endl;
+    std::cout << "    --arpack-no-adaptive-inner-tol           (disable adaptive inner tolerance)" << std::endl;
+    std::cout << "    --arpack-inner-tol-factor=<val>          (default 1e-2)" << std::endl;
+    std::cout << "    --arpack-inner-tol-min=<val>             (default 1e-14)" << std::endl;
+    std::cout << "    --arpack-inner-max-iter=<n>              (default 300)" << std::endl;
+    std::cout << "    --arpack-verbose                         (verbose escalation logging)" << std::endl;
         return 0;
     }
 
@@ -150,6 +167,7 @@ int main(int argc, char* argv[]) {
             else if (method_str == "ARPACK_SHIFT_INVERT") method = DiagonalizationMethod::ARPACK_SHIFT_INVERT;
             else if (method_str == "ARPACK_SM") method = DiagonalizationMethod::ARPACK_SM;
             else if (method_str == "ARPACK_LM") method = DiagonalizationMethod::ARPACK_LM;
+            else if (method_str == "ARPACK_ADVANCED") method = DiagonalizationMethod::ARPACK_ADVANCED;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {
@@ -182,6 +200,23 @@ int main(int argc, char* argv[]) {
         else if (arg.find("--shift=") == 0) {
             params.shift = std::stod(arg.substr(8));
         }
+        // ARPACK advanced specific flags
+        else if (arg.find("--arpack-which=") == 0) params.arpack_which = arg.substr(15);
+        else if (arg.find("--arpack-ncv=") == 0) params.arpack_ncv = std::stoi(arg.substr(13));
+        else if (arg.find("--arpack-max-restarts=") == 0) params.arpack_max_restarts = std::stoi(arg.substr(23));
+        else if (arg.find("--arpack-ncv-growth=") == 0) params.arpack_ncv_growth = std::stod(arg.substr(21));
+        else if (arg == "--arpack-no-auto-enlarge-ncv") params.arpack_auto_enlarge_ncv = false;
+        else if (arg == "--arpack-no-two-phase") params.arpack_two_phase_refine = false;
+        else if (arg.find("--arpack-relaxed-tol=") == 0) params.arpack_relaxed_tol = std::stod(arg.substr(21));
+        else if (arg == "--arpack-shift-invert") params.arpack_shift_invert = true;
+        else if (arg.find("--arpack-sigma=") == 0) params.arpack_sigma = std::stod(arg.substr(15));
+        else if (arg == "--arpack-no-auto-switch-si") params.arpack_auto_switch_shift_invert = false;
+        else if (arg.find("--arpack-switch-sigma=") == 0) params.arpack_switch_sigma = std::stod(arg.substr(23));
+        else if (arg == "--arpack-no-adaptive-inner-tol") params.arpack_adaptive_inner_tol = false;
+        else if (arg.find("--arpack-inner-tol-factor=") == 0) params.arpack_inner_tol_factor = std::stod(arg.substr(27));
+        else if (arg.find("--arpack-inner-tol-min=") == 0) params.arpack_inner_tol_min = std::stod(arg.substr(24));
+        else if (arg.find("--arpack-inner-max-iter=") == 0) params.arpack_inner_max_iter = std::stoi(arg.substr(25));
+        else if (arg == "--arpack-verbose") params.arpack_advanced_verbose = true;
         else if (arg.find("--format=") == 0) {
             std::string format_str = arg.substr(9);
             if (format_str == "STANDARD") format = HamiltonianFileFormat::STANDARD;
