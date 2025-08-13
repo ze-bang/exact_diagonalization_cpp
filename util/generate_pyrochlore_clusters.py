@@ -208,7 +208,7 @@ def generate_clusters(tet_graph, max_order):
             # Take one representative tetrahedron
             first_tet = list(tet_graph.nodes())[0]
             distinct_clusters.append([first_tet])
-            multiplicities.append(1.0)
+            multiplicities.append(0.5)
             continue
         
         # For higher orders, generate all possible connected subgraphs
@@ -297,7 +297,7 @@ def generate_clusters(tet_graph, max_order):
             # For an infinite lattice, normalized by the number of tetrahedra
             # This gives the correct weight per lattice site
             multiplicity = len(embeddings) / len(tet_graph.nodes())
-            multiplicities.append(multiplicity)
+            multiplicities.append(multiplicity/2)
             
         print(f"Found {len(isomorphism_classes)} distinct clusters of order {order}")
     
