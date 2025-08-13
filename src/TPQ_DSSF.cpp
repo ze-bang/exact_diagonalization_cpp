@@ -22,11 +22,13 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc != 6) {
+    if (argc < 6 || argc > 8) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim> <spin_combinations>" << std::endl;
-            std::cerr << "spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
-            std::cerr << "Example: \"0,0;2,2;0,1\" for SpSp, SzSz, SpSm combinations" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end]" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
+            std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -35,8 +37,26 @@ int main(int argc, char* argv[]) {
     std::string directory = argv[1];
     int num_sites = std::stoi(argv[2]);
     float spin_length = std::stof(argv[3]);
-    int krylov_dim = std::stoi(argv[4]);
+    int krylov_dim_or_nmax = std::stoi(argv[4]);
     std::string spin_combinations_str = argv[5];
+    std::string method = (argc >= 7) ? std::string(argv[6]) : std::string("krylov");
+    double dt_opt = 0.01;
+    double t_end_opt = 50.0;
+    if (argc == 8) {
+        // Parse dt,t_end combined argument
+        std::string dt_tend = argv[7];
+        auto comma_pos = dt_tend.find(',');
+        if (comma_pos != std::string::npos) {
+            try {
+                dt_opt = std::stod(dt_tend.substr(0, comma_pos));
+                t_end_opt = std::stod(dt_tend.substr(comma_pos + 1));
+            } catch (...) {
+                if (rank == 0) {
+                    std::cerr << "Warning: failed to parse dt,t_end argument. Using defaults 0.01,50.0" << std::endl;
+                }
+            }
+        }
+    }
 
     // Parse spin combinations
     std::vector<std::pair<int, int>> spin_combinations;
@@ -243,22 +263,78 @@ int main(int argc, char* argv[]) {
         std::string output_dir = output_base_dir + "/beta_" + beta_str;
         ensureDirectoryExists(output_dir);
         
-        // Compute spin structure factor
-        computeTPQSpinStructureFactorKrylov(
-            H,                      // Hamiltonian function
-            tpq_state,             // TPQ state
-            positions_file,        // Positions file
-            N,                     // Hilbert space dimension
-            num_sites,             // Number of sites
-            spin_length,           // Spin length
-            output_dir,            // Output directory
-            sample_index,          // Sample index
-            beta,                  // Inverse temperature
-            momentum_points,       // Custom momentum points
-            krylov_dim,            // Krylov dimension
-            spin_combinations,     // Spin combinations
-            spin_combination_names  // Combination names
-        );
+        if (method == "krylov") {
+            int krylov_dim = krylov_dim_or_nmax;
+            computeTPQSpinStructureFactorKrylov(
+                H,
+                tpq_state,
+                positions_file,
+                N,
+                num_sites,
+                spin_length,
+                output_dir,
+                sample_index,
+                beta,
+                momentum_points,
+                krylov_dim,
+                spin_combinations,
+                spin_combination_names
+            );
+        } else if (method == "taylor") {
+            if (rank == 0) {
+                std::cout << "Using Taylor (create_time_evolution_operator) evolution (n_max=" << krylov_dim_or_nmax
+                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+            }
+            // Build U(dt) and U(-dt)
+            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
+            auto U_nt = create_time_evolution_operator(H, -dt_opt, krylov_dim_or_nmax, true);
+
+            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
+            // NOTE: computeObservableDynamics_U_t computes C_O(t)=<psi(t)|O^\u2020 O|psi(t)>; for non-Hermitian O this corresponds to specific ordering.
+            std::vector<Operator> observables;
+            std::vector<std::string> observable_names;
+            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+                const auto &Q = momentum_points[q_idx];
+                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                    int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
+                    std::stringstream name_ss;
+                    name_ss << spin_combination_names[combo_idx] << "_q" << q_idx << "_op" << op_type_1;
+                    try {
+                        SumOperator sum_op(num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
+                        observables.push_back(sum_op); // Slicing; acceptable since SumOperator derives from Operator
+                        observable_names.push_back(name_ss.str());
+                    } catch (const std::exception &e) {
+                        if (rank == 0) {
+                            std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
+                        }
+                    }
+                }
+            }
+            if (observables.empty()) {
+                if (rank == 0) {
+                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
+                }
+            } else {
+                std::string taylor_dir = output_dir + "/taylor";
+                ensureDirectoryExists(taylor_dir);
+                computeObservableDynamics_U_t(
+                    U_t,
+                    tpq_state,
+                    observables,
+                    observable_names,
+                    N,
+                    taylor_dir,
+                    sample_index,
+                    beta,
+                    t_end_opt,
+                    dt_opt
+                );
+            }
+        } else {
+            if (rank == 0) {
+                std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor" << std::endl;
+            }
+        }
         
         local_processed_count++;
         std::cout << "Rank " << rank << " completed structure factor calculation for sample " << sample_index << ", beta = " << beta << std::endl;

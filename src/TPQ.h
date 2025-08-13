@@ -1119,19 +1119,17 @@ void computeObservableDynamics(
 }
 
 
+// Forward-time only evolution of observable correlations C_O(t)=<psi(t)|O^\u2020 O|psi(t)>, leveraging hermiticity.
+// Removed negative time evolution to halve computational cost.
 void computeObservableDynamics_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
-    std::function<void(const Complex*, Complex*, int)> U_nt,
     const ComplexVector& tpq_state,
     const std::vector<Operator>& observables,
     const std::vector<std::string>& observable_names,
-    int N, 
+    int N,
     const std::string& dir,
     int sample,
     double inv_temp,
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
     double t_end = 100.0,
     double dt = 0.01
 ) {
@@ -1157,14 +1155,11 @@ void computeObservableDynamics_U_t(
         });
     }
     
-    // Calculate spectral function for all operators at once
+    // Forward-time correlations only
     auto time_correlations = calculate_spectral_function_from_tpq_U_t(
-        U_t, operatorFuncs, tpq_state, N, int(t_end/dt+1));
-    
-    auto negative_time_correlations = calculate_spectral_function_from_tpq_U_t(
-        U_nt, operatorFuncs, tpq_state, N, int(t_end/dt+1));
+        U_t, operatorFuncs, tpq_state, N, int(t_end/dt + 1));
 
-    // Process and save results for each observable
+    // Process and save results for each observable (t >= 0)
     for (size_t i = 0; i < observables.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
                              + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
@@ -1173,44 +1168,21 @@ void computeObservableDynamics_U_t(
         for (size_t j = 0; j < time_correlations[i].size(); j++) {
             time_points[j] = j * dt;
         }
-
-        // Combine negative and positive time correlations into one vector
-        std::vector<Complex> combined_time_correlation;
-        std::vector<double> combined_time_points;
-        combined_time_correlation.reserve(time_correlations[i].size() + negative_time_correlations[i].size() - 1);
-        combined_time_points.reserve(time_correlations[i].size() + negative_time_correlations[i].size() - 1);
-        
-        // Add negative time correlations first (in reverse order, skipping t=0)
-        for (int j = negative_time_correlations[i].size() - 1; j > 0; j--) {
-            combined_time_correlation.push_back(negative_time_correlations[i][j]);
-            combined_time_points.push_back(-j * dt);
-        }
-
-        // Add positive time correlations
-        combined_time_correlation.insert(combined_time_correlation.end(), 
-                                        time_correlations[i].begin(), 
-                                        time_correlations[i].end());
-                                        
-        combined_time_points.insert(combined_time_points.end(), 
-                                    time_points.begin(), 
-                                    time_points.end());
-
-        // Write time correlation to file
+        // Write time correlation (non-negative times) to file
         std::ofstream time_corr_out(time_corr_file);
         if (time_corr_out.is_open()) {
             time_corr_out << "# t time_correlation" << std::endl;
-            for (size_t j = 0; j < combined_time_correlation.size(); j++) {
+            for (size_t j = 0; j < time_correlations[i].size(); j++) {
                 time_corr_out << std::setprecision(16) 
-                      << combined_time_points[j] << " " 
-                      << combined_time_correlation[j].real() << " "
-                      << combined_time_correlation[j].imag() << std::endl;
+                      << time_points[j] << " " 
+                      << time_correlations[i][j].real() << " "
+                      << time_correlations[i][j].imag() << std::endl;
             }
             time_corr_out.close();
             std::cout << "Time correlation saved to " << time_corr_file << std::endl;
         }
     }
 }
-
 
 
 /**

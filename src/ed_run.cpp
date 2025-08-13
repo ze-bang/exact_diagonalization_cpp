@@ -142,14 +142,14 @@ int main(int argc, char* argv[]) {
             else if (method_str == "LANCZOS_NO_ORTHO") method = DiagonalizationMethod::LANCZOS_NO_ORTHO;
             else if (method_str == "SHIFT_INVERT") method = DiagonalizationMethod::SHIFT_INVERT;
             else if (method_str == "SHIFT_INVERT_ROBUST") method = DiagonalizationMethod::SHIFT_INVERT_ROBUST;
-            else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
             else if (method_str == "BLOCK_LANCZOS") method = DiagonalizationMethod::BLOCK_LANCZOS;
             else if (method_str == "OSS") method = DiagonalizationMethod::OSS;
             else if (method_str == "mTPQ_CUDA") method = DiagonalizationMethod::mTPQ_CUDA;
             else if (method_str == "FTLM") method = DiagonalizationMethod::FTLM;
             else if (method_str == "LTLM") method = DiagonalizationMethod::LTLM;
             else if (method_str == "ARPACK_SHIFT_INVERT") method = DiagonalizationMethod::ARPACK_SHIFT_INVERT;
-            else if (method_str == "ARPACK") method = DiagonalizationMethod::ARPACK;
+            else if (method_str == "ARPACK_SM") method = DiagonalizationMethod::ARPACK_SM;
+            else if (method_str == "ARPACK_LM") method = DiagonalizationMethod::ARPACK_LM;
             else std::cerr << "Unknown method: " << method_str << std::endl;
         }
         else if (arg.find("--eigenvalues=") == 0) {
