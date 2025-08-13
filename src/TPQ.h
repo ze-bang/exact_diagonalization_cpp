@@ -2086,9 +2086,9 @@ void microcanonical_tpq(
                 if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
                     std::cout << "Computing observables at inv_temp = " << inv_temp << std::endl;
                     if (compute_observables) {
-                        // computeSpinStructureFactorKrylov(H, v0, momentum_positions, position_file, N, num_sites, spin_length, dir, sample, inv_temp);
+                        computeSpinStructureFactorKrylov(H, v0, momentum_positions, position_file, N, num_sites, spin_length, dir, sample, inv_temp);
                         // Just save the state for now
-                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        // std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
                         save_tpq_state(v0, state_file);
                     }
                     temp_measured[i] = true; // Mark this temperature as measured
