@@ -287,7 +287,6 @@ int main(int argc, char* argv[]) {
             }
             // Build U(dt) and U(-dt)
             auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
-            auto U_nt = create_time_evolution_operator(H, -dt_opt, krylov_dim_or_nmax, true);
 
             // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
             // NOTE: computeObservableDynamics_U_t computes C_O(t)=<psi(t)|O^\u2020 O|psi(t)>; for non-Hermitian O this corresponds to specific ordering.
