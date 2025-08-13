@@ -2,9 +2,9 @@ import os
 import numpy as np
 import glob
 import re
+import argparse
 from collections import defaultdict
 from scipy.optimize import curve_fit
-import argparse
 
 #!/usr/bin/env python3
 """
@@ -12,7 +12,145 @@ NLC (Numerical Linked Cluster Expansion) summation utility.
 Calculates thermodynamic properties of a lattice using cluster expansion.
 """
 
-import matplotlib.pyplot as plt
+try:  # Optional plotting dependency
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - plotting not essential for core logic
+    plt = None
+
+# ================= Resummation Utilities ======================
+
+def _forward_differences(a):
+    """Compute successive forward differences until exhausted."""
+    diffs = []
+    current = list(a)
+    while current:
+        diffs.append(current[0])
+        if len(current) == 1:
+            break
+        current = [current[i] - current[i+1] for i in range(len(current)-1)]
+    return diffs
+
+def euler_alternating_sum(terms):
+    """Euler transform for an alternating series sum (-1)^n a_n with a_n>=0.
+    terms: list of original alternating series terms t_n (including sign).
+    Returns accelerated sum estimate.
+    """
+    if not terms:
+        return 0.0
+    # Extract a_n with sign pattern relative to first term
+    sign0 = np.sign(terms[0]) if terms[0] != 0 else 1
+    a = []
+    for n, t in enumerate(terms):
+        expected = sign0 * ((-1)**n)
+        if np.sign(t) == 0:
+            a.append(0.0)
+        elif np.sign(t) != expected:
+            # Not strictly alternating – abort to simple sum
+            return sum(terms)
+        a.append(abs(t))
+    diffs = _forward_differences(a)
+    # Euler transformed partial sum
+    s = 0.0
+    factor = 0.5
+    for k, d in enumerate(diffs):
+        s += factor * d
+        factor *= 0.5
+    return s * sign0  # restore leading sign convention
+
+def shanks_transform(last_three_partial):
+    """Apply single Shanks transform using last three partial sums S_{n-2}, S_{n-1}, S_n."""
+    if len(last_three_partial) < 3:
+        return last_three_partial[-1]
+    S2, S1, S0 = last_three_partial  # note ordering passed should be [S_{n-2}, S_{n-1}, S_n]
+    denom = S0 - 2*S1 + S2
+    if denom == 0:
+        return S0
+    return (S0*S2 - S1*S1) / denom
+
+def wynn_epsilon(partial_sums):
+    """Basic Wynn epsilon algorithm implementation.
+    Returns (accelerated_value, table) where table is list of lists.
+    """
+    S = list(partial_sums)
+    n = len(S)
+    # epsilon table stored as list of rows; eps[-1][k] corresponds to epsilon_{k}^{(n)}
+    eps = [[0.0]*(n+1)]  # row 0 (k=-1) zeros
+    eps.append(S + [0.0])  # row 1 (k=0) initial sequence
+    best = S[-1]
+    for m in range(2, 2*n+1):
+        row = [0.0]*(n+1)
+        for k in range(n - (m//2)):
+            a = eps[m-2][k+1]
+            b = eps[m-1][k]
+            if a == b:
+                row[k] = np.inf
+            else:
+                row[k] = b + 1.0/(a - b)
+        eps.append(row)
+        # Even m rows give improved estimates at element 0
+        if m % 2 == 0:
+            val = row[0]
+            if np.isfinite(val):
+                best = val
+    return best, eps
+
+def analyze_sequence(terms):
+    """Analyze order contribution sequence.
+    Returns dict with diagnostics: alt_fraction, monotone_fraction, last_rel_change.
+    """
+    if len(terms) < 2:
+        return {
+            'alt_fraction': 0.0,
+            'monotone_fraction': 1.0,
+            'last_rel_change': 0.0
+        }
+    signs = np.sign(terms)
+    sign_changes = sum(1 for i in range(1,len(signs)) if signs[i]*signs[i-1] < 0)
+    alt_fraction = sign_changes / (len(signs)-1)
+    mags = [abs(x) for x in terms]
+    monotone = sum(1 for i in range(1,len(mags)) if mags[i] <= mags[i-1]) / (len(mags)-1)
+    partial_sums = np.cumsum(terms)
+    last_rel_change = abs(partial_sums[-1]-partial_sums[-2])/(abs(partial_sums[-2])+1e-12) if len(partial_sums)>1 else 0.0
+    return {
+        'alt_fraction': alt_fraction,
+        'monotone_fraction': monotone,
+        'last_rel_change': last_rel_change
+    }
+
+def auto_resum_sequence(order_terms, absolute_tolerance=1e-8, relative_tolerance=1e-4):
+    """Apply heuristic to choose Euler, Wynn (Shanks), or none.
+    order_terms: list of per-order contributions (NOT partial sums).
+    Returns dict with keys: value, method, diagnostics
+    """
+    if not order_terms:
+        return {'value':0.0,'method':'none','diagnostics':{}}
+    diagnostics = analyze_sequence(order_terms)
+    terms = order_terms
+    partial = np.cumsum(terms)
+    # Convergence check
+    if len(partial) >= 2:
+        delta = abs(partial[-1]-partial[-2])
+        if delta < absolute_tolerance or delta/(abs(partial[-2])+1e-12) < relative_tolerance:
+            return {'value': partial[-1], 'method':'none', 'diagnostics':diagnostics}
+    # Alternating & smooth decay? -> Euler
+    if diagnostics['alt_fraction'] > 0.6 and diagnostics['monotone_fraction'] > 0.7:
+        val = euler_alternating_sum(terms)
+        return {'value': val, 'method':'euler', 'diagnostics':diagnostics}
+    # Otherwise try Wynn / Shanks
+    if len(partial) >= 3:
+        shanks_val = shanks_transform(partial[-3:])
+    else:
+        shanks_val = partial[-1]
+    wynn_val, _ = wynn_epsilon(partial)
+    # Choose stabilized accelerated value if reasonable
+    candidates = []
+    if np.isfinite(wynn_val):
+        candidates.append(('wynn', wynn_val, abs(wynn_val-partial[-1])))
+    candidates.append(('shanks', shanks_val, abs(shanks_val-partial[-1])))
+    # Pick candidate with minimal deviation but some improvement (delta reduction)
+    candidates.sort(key=lambda x: x[2])
+    method, val, _ = candidates[0]
+    return {'value': val, 'method': method, 'diagnostics': diagnostics}
 
 class NLCExpansion:
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
@@ -35,7 +173,8 @@ class NLCExpansion:
 
         self.clusters = {}  # Will store {cluster_id: {order, multiplicity, eigenvalues, etc.}}
         self.weights = {}   # Will store calculated weights for each cluster and property
-        
+        self.resum_diagnostics = {}
+
     def read_clusters(self):
         """Read all cluster information from files in the cluster directory."""
         pattern = os.path.join(self.cluster_dir, "cluster_*_order_*.dat")
@@ -157,11 +296,6 @@ class NLCExpansion:
             # S = kB * [ln(Z) + βE]
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
             entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
-
-            # Convert to per site
-            energy /= 2
-            specific_heat /= 2
-            entropy /= 2
 
             if self.SI:
                 specific_heat *= (6.02214076e23  * 1.380649e-23)  # Convert to SI units (J/K)
@@ -403,179 +537,55 @@ class NLCExpansion:
 
 
 
-    def sum_nlc(self, euler_resum=False, order_cutoff=None):
-        """
-        Perform the NLC summation with optional Euler resummation.
-        
-        Args:
-            euler_resum: If True, apply Euler resummation
-            order_cutoff: Maximum order to include in the summation
-            
-        Returns:
-            Dictionary with summed properties
-        """
+    def sum_nlc(self, euler_resum=False, order_cutoff=None, auto_resum=True):
+        """Perform the NLC summation with optional Euler or automatic (Euler/Wynn/none) resummation.
 
-        if self.measure_spin:
-            # Initialize results for spin expectation values
-            results = {
-                'energy': np.zeros_like(self.temp_values),
-                'specific_heat': np.zeros_like(self.temp_values),
-                'entropy': np.zeros_like(self.temp_values),
-                'sp': np.zeros_like(self.temp_values),
-                'sm': np.zeros_like(self.temp_values),
-                'sz': np.zeros_like(self.temp_values)
-            }
-        else:
-            results = {
-                'energy': np.zeros_like(self.temp_values),
-                'specific_heat': np.zeros_like(self.temp_values),
-                'entropy': np.zeros_like(self.temp_values)
-            }
-    
-        # Calculate the NLC sum for each property
-        for prop in ['energy', 'specific_heat', 'entropy']:
-            # Sum by order
-            sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
-            
-            for cluster_id, weight in self.weights[prop].items():
-                order = self.clusters[cluster_id]['order']
+        The internal weight storage uses a property-first mapping: self.weights[prop][cluster_id] = weight_array.
+        This function reorganizes weights per order, then (optionally) applies a resummation heuristic
+        independently at each temperature.
+        """
+        # Initialize results container with zeros
+        props = ['energy', 'specific_heat', 'entropy'] + (['sp', 'sm', 'sz'] if self.measure_spin else [])
+        results = {p: np.zeros_like(self.temp_values) for p in props}
+
+        for prop in props:
+            if prop not in self.weights:
+                continue
+            # Map: order -> list of weight arrays (clusters of that order)
+            order_map = defaultdict(list)
+            for cid, warr in self.weights[prop].items():
+                order = self.clusters.get(cid, {}).get('order')
+                if order is None:
+                    continue
                 if order_cutoff is not None and order > order_cutoff:
                     continue
-                    
-                sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
-            
-            if not euler_resum:
-                # Wynn's epsilon algorithm
-                max_order = max(sum_by_order.keys()) if sum_by_order else 0
-
-                # Calculate partial sums
-                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
-                for order in range(max_order + 1):
-                    if order > 0:
-                        partial_sums[order] = partial_sums[order-1]
-                    if order in sum_by_order:
-                        partial_sums[order] += sum_by_order[order]
-
-                # Apply Wynn's epsilon algorithm
-                # Initialize epsilon table
-                epsilon_table = np.zeros((2 * max_order + 1, max_order + 1, len(self.temp_values)))
-
-                # First column: partial sums
-                for n in range(max_order + 1):
-                    epsilon_table[0, n] = partial_sums[n]
-
-                # Fill the epsilon table using Wynn's recurrence relation
-                for k in range(1, 2 * max_order):
-                    for n in range(max_order - (k + 1) // 2):
-                        if k % 2 == 1:
-                            # Odd columns: auxiliary quantities
-                            if np.any(epsilon_table[k-1, n+1] - epsilon_table[k-1, n] != 0):
-                                epsilon_table[k, n] = epsilon_table[k-2, n+1] + 1.0 / (epsilon_table[k-1, n+1] - epsilon_table[k-1, n])
-                            else:
-                                # Handle division by zero
-                                epsilon_table[k, n] = epsilon_table[k-2, n+1]
-                        else:
-                            # Even columns: accelerated partial sums
-                            if np.any(epsilon_table[k-1, n+1] - epsilon_table[k-1, n] != 0):
-                                epsilon_table[k, n] = epsilon_table[k-2, n+1] + 1.0 / (epsilon_table[k-1, n+1] - epsilon_table[k-1, n])
-                            else:
-                                epsilon_table[k, n] = epsilon_table[k-2, n+1]
-
-                # Extract the best approximation (rightmost even column)
-                best_k = 2 * ((max_order - 1) // 2)
-                if best_k >= 0 and best_k < epsilon_table.shape[0]:
-                    results[prop] = epsilon_table[best_k, 0]
+                order_map[order].append(np.array(warr))
+            if not order_map:
+                continue
+            # Aggregate contributions per order
+            order_sequences = []  # list of (order, contrib_array)
+            for o in sorted(order_map.keys()):
+                contrib = np.sum(order_map[o], axis=0)
+                order_sequences.append((o, contrib))
+            if not order_sequences:
+                continue
+            nT = len(self.temp_values)
+            out = np.zeros(nT)
+            diag_list = []
+            for ti in range(nT):
+                per_order_terms = [seq[1][ti] for seq in order_sequences]
+                if auto_resum:
+                    diag = auto_resum_sequence(per_order_terms)
+                    out[ti] = diag['value']
+                    diag['order_terms'] = per_order_terms
+                    diag_list.append(diag)
+                elif euler_resum:
+                    out[ti] = euler_alternating_sum(per_order_terms)
                 else:
-                    # Fallback to last partial sum if Wynn's fails
-                    results[prop] = partial_sums[max_order]
-                # force specific heat to be derivative of energy
-                if prop == 'specific_heat':
-                    results[prop] = np.gradient(results['energy'], self.temp_values)
-            else:
-                # Euler resummation
-                max_order = max(sum_by_order.keys()) if sum_by_order else 0
-                
-                # Initialize partial sums array
-                partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
-                
-                # Calculate partial sums
-                for order in range(max_order + 1):
-                    if order > 0:
-                        partial_sums[order] = partial_sums[order-1]
-                    if order in sum_by_order:
-                        partial_sums[order] += sum_by_order[order]
-                
-                # Apply Euler transformation
-                euler_sums = np.zeros_like(partial_sums)
-                euler_sums[0] = partial_sums[0]
-                
-                for k in range(1, max_order + 1):
-                    for j in range(k, max_order + 1):
-                        binomial = 1
-                        for l in range(j-k+1, j+1):
-                            binomial *= l
-                        for l in range(1, k+1):
-                            binomial //= l
-                        
-                        euler_sums[k] += binomial * (-1)**(j-k) * partial_sums[j]
-                
-                # Use the highest order Euler sum
-                results[prop] = euler_sums[max_order]
-        
-        # Force specific heat as derivative of energy for now
-        results['specific_heat'] = np.gradient(results['energy'], self.temp_values)
-
-        # Force specific heat to be non-negative
-        results['specific_heat'] = np.maximum(results['specific_heat'], 0.0)
-
-        if self.measure_spin:
-            # Calculate spin expectation values
-            for prop in ['sp', 'sm', 'sz']:
-                # Sum by order
-                sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
-                
-                for cluster_id, weight in self.weights[prop].items():
-                    order = self.clusters[cluster_id]['order']
-                    if order_cutoff is not None and order > order_cutoff:
-                        continue
-                        
-                    sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
-                
-                if not euler_resum:
-                    # Regular summation
-                    for order, contribution in sum_by_order.items():
-                        results[prop] += contribution
-                else:
-                    # Euler resummation
-                    max_order = max(sum_by_order.keys()) if sum_by_order else 0
-                    
-                    # Initialize partial sums array
-                    partial_sums = np.zeros((max_order + 1, len(self.temp_values)))
-                    
-                    # Calculate partial sums
-                    for order in range(max_order + 1):
-                        if order > 0:
-                            partial_sums[order] = partial_sums[order-1]
-                        if order in sum_by_order:
-                            partial_sums[order] += sum_by_order[order]
-                    
-                    # Apply Euler transformation
-                    euler_sums = np.zeros_like(partial_sums)
-                    euler_sums[0] = partial_sums[0]
-                    
-                    for k in range(1, max_order + 1):
-                        for j in range(k, max_order + 1):
-                            binomial = 1
-                            for l in range(j-k+1, j+1):
-                                binomial *= l
-                            for l in range(1, k+1):
-                                binomial //= l
-                            
-                            euler_sums[k] += binomial * (-1)**(j-k) * partial_sums[j]
-                    
-                    # Use the highest order Euler sum
-                    results[prop] = euler_sums[max_order]
-        
+                    out[ti] = np.sum(per_order_terms)
+            results[prop] = out
+            if auto_resum:
+                self.resum_diagnostics[prop] = diag_list
         return results
     
     def run(self, euler_resum=False, order_cutoff=None):
@@ -627,7 +637,8 @@ if __name__ == "__main__":
     parser.add_argument('--cluster_dir', required=True, help='Directory containing cluster information files')
     parser.add_argument('--eigenvalue_dir', required=True, help='Directory containing eigenvalue files from ED calculations')
     parser.add_argument('--output_dir', default='.', help='Directory to save output files')
-    parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation')
+    parser.add_argument('--euler_resum', action='store_true', help='Force Euler resummation (overrides auto)')
+    parser.add_argument('--auto_resum', action='store_true', help='Automatically choose resummation (Euler/Wynn/none) per temperature')
     parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
     parser.add_argument('--plot', action='store_true', help='Generate plot of results')
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
@@ -635,18 +646,10 @@ if __name__ == "__main__":
     parser.add_argument('--temp_max', type=float, default=1.0, help='Maximum temperature for calculations')
     parser.add_argument('--temp_bins', type=int, default=200, help='Number of temperature points to calculate')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
-    
     args = parser.parse_args()
-    
-    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
-    
-    # Create NLC instance
     nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units)
-    
-    # Run NLC calculation
-    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff)
-    
+    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff) if not args.auto_resum else nlc.sum_nlc(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff, auto_resum=True)
     # Save results in separate files for each quantity
     energy_file = os.path.join(args.output_dir, "nlc_energy.txt")
     specific_heat_file = os.path.join(args.output_dir, "nlc_specific_heat.txt")
@@ -738,4 +741,4 @@ if __name__ == "__main__":
             plt.close()
     
     print(f"NLC calculation completed! Results saved to {args.output_dir}")
-    
+

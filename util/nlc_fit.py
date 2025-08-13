@@ -1227,6 +1227,7 @@ def main():
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
                 '--max_order', str(args.max_order),
                 '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}'),
+                '--analytic_multiplicity'
             ]
             
             try:
