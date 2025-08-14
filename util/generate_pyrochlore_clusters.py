@@ -1,7 +1,6 @@
 import argparse
 import numpy as np
 import networkx as nx
-from mpl_toolkits.mplot3d import Axes3D
 import itertools
 import sys
 from collections import defaultdict
@@ -13,8 +12,142 @@ import collections
 Generate topologically distinct clusters on a pyrochlore lattice for
 numerical linked cluster expansion (NLCE) calculations.
 """
+try:
+    import matplotlib.pyplot as plt  # optional; only needed for --visualize
+except Exception:
+    plt = None
 
-import matplotlib.pyplot as plt
+# ---------------- New Multiplicity Logic (root-anchored embeddings) ---------------- #
+def _cluster_automorphisms_fixing_root(pattern: nx.Graph, root):
+    """Count automorphisms of pattern that fix the chosen root.
+
+    Uses a full isomorphism iterator; clusters are small in typical NLCE orders
+    so this is acceptable. For larger clusters, consider nauty/bliss.
+    """
+    gm = nx.algorithms.isomorphism.GraphMatcher(pattern, pattern)
+    count = 0
+    for iso in gm.isomorphisms_iter():
+        if iso[root] == root:
+            count += 1
+    return max(count, 1)
+
+
+def _select_anchor_tetrahedron(tet_graph: nx.Graph, required_degree: int):
+    """Pick an interior tetrahedron: choose node with maximum degree (>= required_degree).
+
+    This avoids boundary effects when counting root-anchored embeddings.
+    """
+    # Compute maximum degree in the lattice graph
+    deg_items = list(tet_graph.degree())
+    if not deg_items:
+        return next(iter(tet_graph.nodes()))
+    max_deg = max(d for _, d in deg_items)
+    # Prefer nodes with max_deg; fallback to any >= required_degree, else any node
+    candidates = [n for n, d in deg_items if d == max_deg]
+    if candidates:
+        return candidates[0]
+    for n, d in deg_items:
+        if d >= required_degree:
+            return n
+    return next(iter(tet_graph.nodes()))
+
+
+def _build_local_patch(tet_graph: nx.Graph, center, radius: int):
+    """Return induced subgraph of nodes within BFS distance <= radius from center."""
+    if radius <= 0:
+        return tet_graph.subgraph([center]).copy()
+    visited = {center}
+    frontier = {center}
+    for _ in range(radius):
+        nxt = set()
+        for u in frontier:
+            nxt.update(tet_graph.neighbors(u))
+        nxt -= visited
+        if not nxt:
+            break
+        visited |= nxt
+        frontier = nxt
+    return tet_graph.subgraph(visited).copy()
+
+
+def _pattern_diameter(pattern: nx.Graph):
+    try:
+        return nx.diameter(pattern)
+    except Exception:
+        return 0
+
+
+def _root_anchored_embedding_count(pattern: nx.Graph, root, lattice_patch: nx.Graph, anchor):
+    """Count monomorphism embeddings of pattern into lattice_patch with root fixed to anchor.
+
+    Returns raw count (includes automorphisms that fix the root).
+    """
+    lattice_adj = {n: set(lattice_patch.neighbors(n)) for n in lattice_patch.nodes()}
+    pattern_adj = {n: set(pattern.neighbors(n)) for n in pattern.nodes()}
+
+    order = [root] + sorted([n for n in pattern.nodes() if n != root], key=lambda x: (-pattern.degree[x], x))
+    mapping = {root: anchor}
+    used = {anchor}
+    raw = 0
+
+    if pattern.degree[root] > lattice_patch.degree(anchor):
+        return 0
+
+    def backtrack(idx: int):
+        nonlocal raw
+        if idx == len(order):
+            raw += 1
+            return
+        u = order[idx]
+        mapped_neighbors = [v for v in pattern_adj[u] if v in mapping]
+        if not mapped_neighbors:
+            return  # enforce connectivity ordering
+        candidate_sets = [lattice_adj[mapping[v]] for v in mapped_neighbors]
+        candidates = set.intersection(*candidate_sets)
+        required_deg = pattern.degree[u]
+        for c in list(candidates):
+            if c in used:
+                continue
+            if lattice_patch.degree(c) < required_deg:
+                continue
+            mapping[u] = c
+            used.add(c)
+            backtrack(idx + 1)
+            used.remove(c)
+            del mapping[u]
+
+    backtrack(1)
+    return raw
+
+
+def compute_cluster_multiplicity(rep_nodes, tet_graph):
+    """Compute per-site multiplicity for a representative cluster (list of tetrahedron indices).
+
+    multiplicity = raw_embeddings / (2 * |Aut_root|)
+    where raw_embeddings counts embeddings with root fixed; pyrochlore has N_tet = N_site/2.
+    """
+    if len(rep_nodes) == 1:
+        return 0.5
+
+    pattern_orig = tet_graph.subgraph(rep_nodes).copy()
+    relabel_map = {old: i for i, old in enumerate(pattern_orig.nodes())}
+    pattern = nx.relabel_nodes(pattern_orig, relabel_map, copy=True)
+
+    root = max(pattern.nodes(), key=lambda n: (pattern.degree[n], -n))
+    aut_fix_root = _cluster_automorphisms_fixing_root(pattern, root)
+
+    anchor_required_degree = pattern.degree[root]
+    anchor = _select_anchor_tetrahedron(tet_graph, anchor_required_degree)
+
+    diam = _pattern_diameter(pattern)
+    patch = _build_local_patch(tet_graph, anchor, diam)
+    raw = _root_anchored_embedding_count(pattern, root, patch, anchor)
+    if raw == 0:
+        patch2 = _build_local_patch(tet_graph, anchor, diam + 1)
+        raw = _root_anchored_embedding_count(pattern, root, patch2, anchor)
+
+    return raw / (2.0 * aut_fix_root)
+# ---------------------------------------------------------------------------------- #
 
 def extract_cluster_info(lattice, pos, tetrahedra, cluster):
     """
@@ -288,16 +421,11 @@ def generate_clusters(tet_graph, max_order):
             # Use the most symmetric graph as the representative
             isomorphism_classes.append((most_symmetric, group))
 
-        # Add to results with corrected multiplicities
-        for rep_nodes, embeddings in isomorphism_classes:
+        # Add to results and compute multiplicities independent of L
+        for rep_nodes, _embeddings in isomorphism_classes:
             cluster = list(rep_nodes)
             distinct_clusters.append(cluster)
-            
-            # Calculate embedding weight for NLCE
-            # For an infinite lattice, normalized by the number of tetrahedra
-            # This gives the correct weight per lattice site
-            multiplicity = len(embeddings) / len(tet_graph.nodes())
-            multiplicities.append(multiplicity/2)
+            multiplicities.append(compute_cluster_multiplicity(cluster, tet_graph))
             
         print(f"Found {len(isomorphism_classes)} distinct clusters of order {order}")
     

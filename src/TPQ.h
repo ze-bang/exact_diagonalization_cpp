@@ -174,6 +174,34 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
 }
 
 
+Complex calculateSpm_onsite(
+    const ComplexVector& tpq_state,
+    int num_sites,
+    float spin_length,
+    const std::vector<SingleSiteOperator>& Spm_ops,
+    int sublattice_size
+){
+    // Calculate the dimension of the Hilbert space
+    int N = 1 << num_sites;  // 2^num_sites
+
+    Complex Spm_exp(0.0, 0.0);
+    
+    // For each site, compute the expectation values
+    for (int site = 0; site < num_sites; site++) {
+        int i = site % sublattice_size;
+
+        // Apply operators - use direct vector construction to avoid copy
+        std::vector<Complex> Spm_psi = Spm_ops[i].apply({tpq_state.begin(), tpq_state.end()});
+
+        for (int j = 0; j < N; j++) {
+            Spm_exp += std::conj(Spm_psi[j]) * Spm_psi[j];
+        }
+    }
+
+    return Spm_exp/ double(num_sites);
+}
+
+
 std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> createDoubleSiteOperators(int num_sites, float spin_length) {
     std::vector<DoubleSiteOperator> Szz_ops;
     std::vector<DoubleSiteOperator> Spm_ops;
@@ -863,6 +891,8 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
 
 
 
+
+
 void writeFluctuationData(
     const std::string& flct_file,
     const std::vector<std::string>& spin_corr,
@@ -877,7 +907,8 @@ void writeFluctuationData(
 ) {
     std::ofstream flct_out(flct_file, std::ios::app);
     auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
-    
+    auto Spm2exp = calculateSpm_onsite(tpq_state, num_sites, spin_length, double_site_ops.second, sublattice_size);
+
     flct_out << std::setprecision(16) << inv_temp 
              << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
              << " " << Sz2[sublattice_size].real() << " " << Sz2[sublattice_size].imag();
@@ -886,7 +917,10 @@ void writeFluctuationData(
         flct_out << " " << Sz[i].real() << " " << Sz[i].imag() 
                  << " " << Sz2[i].real() << " " << Sz2[i].imag();
     }
-    flct_out << " " << step << std::endl;
+
+    flct_out << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
+
+    flct_out << " " << step << std::endl;   
 
     auto [Szz, Spm, Spp, Spz] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
     for (size_t idx = 0; idx < spin_corr.size(); idx++) {
@@ -1028,6 +1062,9 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
         for (int i = 0; i < sublattice_size; i++) {
             flct_out << " sz" << i << "(real) sz" << i << "(imag)"  << " sz2" << i << "(real) sz2" << i << "(imag)";
         }
+
+        flct_out << " Spm2(real) Spm2(imag)";
+
         flct_out << " step" << std::endl;
 
         // Initialize each spin correlation file
