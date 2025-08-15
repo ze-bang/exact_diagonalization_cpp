@@ -537,7 +537,7 @@ class NLCExpansion:
 
 
 
-    def sum_nlc(self, euler_resum=False, order_cutoff=None, auto_resum=True):
+    def sum_nlc(self, euler_resum=False, order_cutoff=None, auto_resum=False):
         """Perform the NLC summation with optional Euler or automatic (Euler/Wynn/none) resummation.
 
         The internal weight storage uses a property-first mapping: self.weights[prop][cluster_id] = weight_array.
@@ -588,7 +588,7 @@ class NLCExpansion:
                 self.resum_diagnostics[prop] = diag_list
         return results
     
-    def run(self, euler_resum=False, order_cutoff=None):
+    def run(self, euler_resum=False, order_cutoff=None, auto_resum=False):
         """Run the full NLC calculation."""
         print("Reading cluster information...")
         self.read_clusters()
@@ -600,7 +600,7 @@ class NLCExpansion:
         self.calculate_weights()
         
         print("Performing NLC summation...")
-        results = self.sum_nlc(euler_resum, order_cutoff)
+        results = self.sum_nlc(euler_resum, order_cutoff, auto_resum=auto_resum)
         
         return results
     
@@ -649,7 +649,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
     nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units)
-    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff) if not args.auto_resum else nlc.sum_nlc(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff, auto_resum=True)
+    # Always run the full pipeline to ensure clusters/eigenvalues/weights are prepared,
+    # and pass through the auto_resum flag to control resummation behavior.
+    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff, auto_resum=args.auto_resum)
     # Save results in separate files for each quantity
     energy_file = os.path.join(args.output_dir, "nlc_energy.txt")
     specific_heat_file = os.path.join(args.output_dir, "nlc_specific_heat.txt")
