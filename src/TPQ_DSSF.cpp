@@ -300,7 +300,6 @@ int main(int argc, char* argv[]) {
 
             // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
             std::vector<Operator> observables;
-            std::vector<Operator> observables_neg_q;
             std::vector<std::string> observable_names;
             for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
                 const auto &Q = momentum_points[q_idx];
@@ -310,13 +309,7 @@ int main(int argc, char* argv[]) {
                     name_ss << spin_combination_names[combo_idx] << "_q" << q_idx << "_op" << op_type_1;
                     try {
                         SumOperator sum_op(num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
-                        array<double, 3> momentum_neq_Q = {{0}};
-                        for (int j = 0; j < 3; ++j) {
-                            momentum_neq_Q[j] = -Q[j]; // Negate the momentum vector
-                        }
-                        SumOperator sum_op_neg_q(num_sites, spin_length, spin_combinations[combo_idx].second, momentum_neq_Q, positions_file);
                         observables.push_back(sum_op); // Slicing; acceptable since SumOperator derives from Operator
-                        observables_neg_q.push_back(sum_op_neg_q);
                         observable_names.push_back(name_ss.str());
                     } catch (const std::exception &e) {
                         if (rank == 0) {
@@ -336,7 +329,6 @@ int main(int argc, char* argv[]) {
                     U_t,
                     tpq_state,
                     observables,
-                    observables_neg_q,
                     observable_names,
                     N,
                     taylor_dir,

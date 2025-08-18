@@ -1051,201 +1051,301 @@ public:
     }
     
     void generateSymmetrizedBasis(const std::string& dir) {
-        // Load automorphism max clique
-        const std::string max_clique_path = dir + "/automorphism_results/max_clique.json";
-        std::cout << "Loading max clique from: " << max_clique_path << std::endl;
-
-        // Read file into a string
-        std::ifstream max_clique_file(max_clique_path);
-        if (!max_clique_file.is_open()) {
-            throw std::runtime_error("Cannot open max_clique.json file: " + max_clique_path);
-        }
-        const std::string json_content(
-            (std::istreambuf_iterator<char>(max_clique_file)),
-            std::istreambuf_iterator<char>());
-        max_clique_file.close();
-
-        // Minimal JSON parser for [[...], [...], ...]
-        auto parse_json_int_arrays = [](const std::string& s) -> std::vector<std::vector<int>> {
-            std::vector<std::vector<int>> arrays;
-            size_t pos = s.find('[');
-            if (pos == std::string::npos) return arrays;
-            ++pos;
-
-            while (pos < s.size()) {
-                while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
-                if (pos >= s.size() || s[pos] == ']') break;
-                if (s[pos] != '[') { ++pos; continue; }
-
-                ++pos; // skip '[' of inner array
-                std::vector<int> arr;
-                std::string num;
-                while (pos < s.size() && s[pos] != ']') {
-                    char c = s[pos++];
-                    if (std::isdigit(static_cast<unsigned char>(c))) {
-                        num += c;
-                    } else if (!num.empty() && (c == ',' || std::isspace(static_cast<unsigned char>(c)))) {
-                        arr.push_back(std::stoi(num));
-                        num.clear();
-                    }
-                }
-                if (!num.empty()) arr.push_back(std::stoi(num));
-                if (pos < s.size() && s[pos] == ']') ++pos; // skip ']'
-                if (!arr.empty()) arrays.push_back(std::move(arr));
-            }
-            return arrays;
-        };
-
-        std::vector<std::vector<int>> max_clique = parse_json_int_arrays(json_content);
-        if (max_clique.empty()) {
-            throw std::runtime_error("Invalid or empty max_clique.json");
-        }
-        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
-
-        // Find minimal generators and their orders
-        MinimalGeneratorFinder gen_finder;
-        auto gens_pair = gen_finder.findMinimalGenerators(max_clique);
-        const auto& generators = gens_pair.first;
-        const auto& orders = gens_pair.second;
-
-        std::cout << "Minimal generators:\n";
-        for (size_t i = 0; i < generators.size(); ++i) {
-            std::cout << "Generator: ";
-            for (int v : generators[i]) std::cout << v << " ";
-            std::cout << "with order: " << orders[i] << std::endl;
-        }
-
-        // Represent automorphisms as powers of generators
-        std::vector<std::vector<int>> power_representation =
-            AutomorphismPowerRepresentation::representAllAsGeneratorPowers(generators, max_clique);
-        std::cout << "Power representation generated.\n";
-        std::cout << "Symmetrized Hamiltonian generated.\n";
-
-        // Enumerate all symmetry sectors (quantum numbers)
-        std::vector<std::vector<int>> all_quantum_numbers;
-        std::vector<int> current_qnums(generators.size(), 0);
-        std::function<void(size_t)> enumerate_qnums = [&](size_t pos) {
-            if (pos == generators.size()) {
-                all_quantum_numbers.push_back(current_qnums);
-                return;
-            }
-            for (int k = 0; k < orders[pos]; ++k) {
-                current_qnums[pos] = k;
-                enumerate_qnums(pos + 1);
-            }
-        };
-        enumerate_qnums(0);
-
-        std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
-
-        // Ensure output directory exists
-        const std::string sym_basis_dir = dir + "/sym_basis";
-        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
-        system(mkdir_cmd.c_str());
-
-        // Prepare bookkeeping
-        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
-        const size_t dim = static_cast<size_t>(1ULL << n_bits_);
-        size_t total_written = 0;
-
-        // Progress helper
-        auto print_progress = [](size_t cur, size_t tot, size_t sector_idx, size_t sectors) {
-            double pct = tot ? (static_cast<double>(cur) / tot) * 100.0 : 100.0;
-            int bar_width = 40;
-            int pos = static_cast<int>(bar_width * pct / 100.0);
-            std::cout << "\rProcessing sector " << (sector_idx + 1) << "/" << sectors << " [";
-            for (int i = 0; i < bar_width; ++i) {
-                if (i < pos) std::cout << "=";
-                else if (i == pos) std::cout << ">";
-                else std::cout << " ";
-            }
-            std::cout << "] " << std::fixed << std::setprecision(1) << pct << "%" << std::flush;
-        };
-
-        // For each sector
-        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
-            const auto& qnums = all_quantum_numbers[sector_idx];
-            std::set<size_t> processed;
-            std::set<std::string> seen_hashes; // per-sector uniqueness
-            size_t sector_basis_count = 0;
-
-            for (size_t basis = 0; basis < dim; ++basis) {
-                if (basis % std::max<size_t>(1, dim / 100) == 0 || basis + 1 == dim) {
-                    print_progress(basis, dim, sector_idx, all_quantum_numbers.size());
-                }
-                if (processed.count(basis)) continue;
-
-                // Orbit under symmetry operations
-                std::set<size_t> orbit;
-                for (const auto& perm : max_clique) orbit.insert(applyPermutation(static_cast<int>(basis), perm));
-                processed.insert(orbit.begin(), orbit.end());
-
-                // Construct symmetrized basis vector
-                std::vector<Complex> vec = sym_basis_e_(static_cast<int>(basis), max_clique,
-                                                        power_representation, orders, qnums);
-
-                // Check norm
-                double norm2 = 0.0;
-                for (const auto& v : vec) norm2 += std::norm(v);
-                if (norm2 <= 1e-10) continue;
-
-                // Phase-fix using first non-zero entry
-                size_t first_nz = 0;
-                while (first_nz < dim && std::abs(vec[first_nz]) < 1e-10) ++first_nz;
-                if (first_nz == dim) continue;
-                Complex phase = vec[first_nz] / std::abs(vec[first_nz]);
-                for (auto& v : vec) v /= phase;
-
-                // Sparse hash for uniqueness
-                std::stringstream ss;
-                ss << std::fixed << std::setprecision(12);
-                for (size_t i = 0; i < dim; ++i) {
-                    if (std::abs(vec[i]) > 1e-10) {
-                        ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
-                    }
-                }
-                std::string key = ss.str();
-                if (seen_hashes.count(key)) continue; // duplicate vector in this sector
-                seen_hashes.insert(key);
-
-                // Write vector to disk
-                const std::string out_file = sym_basis_dir + "/sym_basis" + std::to_string(total_written) + ".dat";
-                std::ofstream ofs(out_file);
-                for (size_t i = 0; i < dim; ++i) {
-                    if (std::abs(vec[i]) > 1e-10) {
-                        ofs << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
-                    }
-                }
-                ofs.close();
-
-                ++sector_basis_count;
-                ++total_written;
-            }
-
-            std::cout << std::endl;
-            symmetrized_block_ham_sizes[sector_idx] = static_cast<int>(sector_basis_count);
-            std::cout << "Sector " << (sector_idx + 1) << ": Found " << sector_basis_count << " basis vectors" << std::endl;
-        }
-
-        // Summary and block sizes
-        std::cout << "\nNumber of unique symmetrized basis vectors: " << total_written << std::endl;
-        std::cout << "Block sizes: ";
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
-            std::cout << symmetrized_block_ham_sizes[i] << (i + 1 == symmetrized_block_ham_sizes.size() ? "" : " ");
-        }
-        std::cout << std::endl;
-
-        // Persist block sizes
-        std::ofstream block_size_file(dir + "/sym_basis/sym_block_sizes.txt");
-        if (!block_size_file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + "/sym_basis/sym_block_sizes.txt");
-        }
-        for (int sz : symmetrized_block_ham_sizes) block_size_file << sz << "\n";
-        block_size_file.close();
-
+        // Step 1: Load automorphism data
+        auto max_clique = loadMaxClique(dir);
+        
+        // Step 2: Find minimal generators
+        auto [generators, orders] = findGenerators(max_clique);
+        
+        // Step 3: Get power representation
+        auto power_representation = computePowerRepresentation(generators, max_clique);
+        
+        // Step 4: Generate all quantum number combinations
+        auto all_quantum_numbers = enumerateQuantumNumbers(generators, orders);
+        
+        // Step 5: Setup output directory
+        prepareOutputDirectory(dir);
+        
+        // Step 6: Generate basis vectors for each symmetry sector
+        generateBasisVectors(dir, max_clique, power_representation, orders, all_quantum_numbers);
+        
+        // Step 7: Save results
+        saveBlockSizes(dir);
+        
         std::cout << "Symmetrized basis generation complete." << std::endl;
     }
 
+private:
+    std::vector<std::vector<int>> loadMaxClique(const std::string& dir) {
+        const std::string filepath = dir + "/automorphism_results/max_clique.json";
+        std::cout << "Loading max clique from: " << filepath << std::endl;
+        
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open max_clique.json file: " + filepath);
+        }
+        
+        std::string json_content((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+        file.close();
+        
+        auto max_clique = parseJsonIntArrays(json_content);
+        if (max_clique.empty()) {
+            throw std::runtime_error("Invalid or empty max_clique.json");
+        }
+        
+        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
+        return max_clique;
+    }
+    
+    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
+        std::vector<std::vector<int>> result;
+        size_t pos = json.find('[');
+        if (pos == std::string::npos) return result;
+        ++pos;
+        
+        while (pos < json.size()) {
+            // Skip whitespace
+            while (pos < json.size() && std::isspace(json[pos])) ++pos;
+            if (pos >= json.size() || json[pos] == ']') break;
+            if (json[pos] != '[') { ++pos; continue; }
+            
+            // Parse inner array
+            ++pos;
+            std::vector<int> array;
+            std::string number;
+            
+            while (pos < json.size() && json[pos] != ']') {
+                char c = json[pos++];
+                if (std::isdigit(c)) {
+                    number += c;
+                } else if (!number.empty() && (c == ',' || std::isspace(c))) {
+                    array.push_back(std::stoi(number));
+                    number.clear();
+                }
+            }
+            
+            if (!number.empty()) array.push_back(std::stoi(number));
+            if (pos < json.size() && json[pos] == ']') ++pos;
+            if (!array.empty()) result.push_back(std::move(array));
+        }
+        
+        return result;
+    }
+    
+    std::pair<std::vector<std::vector<int>>, std::vector<int>> 
+    findGenerators(const std::vector<std::vector<int>>& max_clique) {
+        MinimalGeneratorFinder gen_finder;
+        auto [generators, orders] = gen_finder.findMinimalGenerators(max_clique);
+        
+        std::cout << "Found " << generators.size() << " minimal generators:\n";
+        for (size_t i = 0; i < generators.size(); ++i) {
+            std::cout << "  Generator " << i << " (order " << orders[i] << "): ";
+            for (int v : generators[i]) std::cout << v << " ";
+            std::cout << "\n";
+        }
+        
+        return {generators, orders};
+    }
+    
+    std::vector<std::vector<int>> 
+    computePowerRepresentation(const std::vector<std::vector<int>>& generators,
+                               const std::vector<std::vector<int>>& max_clique) {
+        auto power_repr = AutomorphismPowerRepresentation::representAllAsGeneratorPowers(
+            generators, max_clique);
+        std::cout << "Power representation computed for all automorphisms.\n";
+        return power_repr;
+    }
+    
+    std::vector<std::vector<int>> 
+    enumerateQuantumNumbers(const std::vector<std::vector<int>>& generators,
+                            const std::vector<int>& orders) {
+        std::vector<std::vector<int>> quantum_numbers;
+        std::vector<int> current(generators.size(), 0);
+        
+        std::function<void(size_t)> enumerate = [&](size_t pos) {
+            if (pos == generators.size()) {
+                quantum_numbers.push_back(current);
+                return;
+            }
+            for (int k = 0; k < orders[pos]; ++k) {
+                current[pos] = k;
+                enumerate(pos + 1);
+            }
+        };
+        
+        enumerate(0);
+        std::cout << "Total symmetry sectors: " << quantum_numbers.size() << std::endl;
+        return quantum_numbers;
+    }
+    
+    void prepareOutputDirectory(const std::string& dir) {
+        const std::string sym_basis_dir = dir + "/sym_basis";
+        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
+        system(mkdir_cmd.c_str());
+    }
+    
+    void generateBasisVectors(const std::string& dir,
+                             const std::vector<std::vector<int>>& max_clique,
+                             const std::vector<std::vector<int>>& power_representation,
+                             const std::vector<int>& orders,
+                             const std::vector<std::vector<int>>& all_quantum_numbers) {
+        const size_t dim = 1ULL << n_bits_;
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
+        
+        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
+            size_t sector_size = processSector(dir, sector_idx, all_quantum_numbers[sector_idx],
+                                              max_clique, power_representation, orders,
+                                              dim, total_written);
+            symmetrized_block_ham_sizes[sector_idx] = sector_size;
+            
+            std::cout << "Sector " << (sector_idx + 1) << "/" << all_quantum_numbers.size() 
+                     << ": " << sector_size << " basis vectors\n";
+        }
+        
+        std::cout << "\nTotal unique symmetrized basis vectors: " << total_written << std::endl;
+    }
+    
+    size_t processSector(const std::string& dir, size_t sector_idx,
+                        const std::vector<int>& quantum_nums,
+                        const std::vector<std::vector<int>>& max_clique,
+                        const std::vector<std::vector<int>>& power_representation,
+                        const std::vector<int>& orders,
+                        size_t dim, size_t& total_written) {
+        std::set<size_t> processed_states;
+        std::set<std::string> unique_vectors;
+        size_t sector_basis_count = 0;
+        
+        for (size_t basis = 0; basis < dim; ++basis) {
+            if (basis % std::max<size_t>(1, dim / 100) == 0) {
+                showProgress(basis, dim, sector_idx);
+            }
+            
+            if (processed_states.count(basis)) continue;
+            
+            // Mark all states in the orbit as processed
+            auto orbit = computeOrbit(basis, max_clique);
+            processed_states.insert(orbit.begin(), orbit.end());
+            
+            // Generate and validate symmetrized vector
+            auto vec = createSymmetrizedVector(basis, max_clique, power_representation, 
+                                              orders, quantum_nums);
+            if (!isValidVector(vec)) continue;
+            
+            // Normalize phase and check uniqueness
+            normalizePhase(vec);
+            std::string hash = computeVectorHash(vec);
+            if (unique_vectors.count(hash)) continue;
+            unique_vectors.insert(hash);
+            
+            // Save to file
+            saveVector(dir, vec, total_written);
+            ++sector_basis_count;
+            ++total_written;
+        }
+        
+        std::cout << std::endl;
+        return sector_basis_count;
+    }
+    
+    std::set<size_t> computeOrbit(size_t basis, const std::vector<std::vector<int>>& max_clique) {
+        std::set<size_t> orbit;
+        for (const auto& perm : max_clique) {
+            orbit.insert(applyPermutation(static_cast<int>(basis), perm));
+        }
+        return orbit;
+    }
+    
+    std::vector<Complex> createSymmetrizedVector(int basis,
+                                                 const std::vector<std::vector<int>>& max_clique,
+                                                 const std::vector<std::vector<int>>& power_repr,
+                                                 const std::vector<int>& orders,
+                                                 const std::vector<int>& quantum_nums) {
+        return sym_basis_e_(basis, max_clique, power_repr, orders, quantum_nums);
+    }
+    
+    bool isValidVector(const std::vector<Complex>& vec) {
+        double norm_squared = 0.0;
+        for (const auto& v : vec) {
+            norm_squared += std::norm(v);
+        }
+        return norm_squared > 1e-10;
+    }
+    
+    void normalizePhase(std::vector<Complex>& vec) {
+        // Find first non-zero entry
+        size_t first_nonzero = 0;
+        while (first_nonzero < vec.size() && std::abs(vec[first_nonzero]) < 1e-10) {
+            ++first_nonzero;
+        }
+        
+        if (first_nonzero >= vec.size()) return;
+        
+        // Normalize by phase of first non-zero entry
+        Complex phase = vec[first_nonzero] / std::abs(vec[first_nonzero]);
+        for (auto& v : vec) {
+            v /= phase;
+        }
+    }
+    
+    std::string computeVectorHash(const std::vector<Complex>& vec) {
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(12);
+        
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (std::abs(vec[i]) > 1e-10) {
+                ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
+            }
+        }
+        
+        return ss.str();
+    }
+    
+    void saveVector(const std::string& dir, const std::vector<Complex>& vec, size_t index) {
+        const std::string filepath = dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat";
+        std::ofstream file(filepath);
+        
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (std::abs(vec[i]) > 1e-10) {
+                file << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
+            }
+        }
+    }
+    
+    void showProgress(size_t current, size_t total, size_t sector_idx) {
+        double percent = (static_cast<double>(current) / total) * 100.0;
+        int bar_width = 40;
+        int pos = static_cast<int>(bar_width * percent / 100.0);
+        
+        std::cout << "\rSector " << (sector_idx + 1) << " [";
+        for (int i = 0; i < bar_width; ++i) {
+            if (i < pos) std::cout << "=";
+            else if (i == pos) std::cout << ">";
+            else std::cout << " ";
+        }
+        std::cout << "] " << std::fixed << std::setprecision(1) << percent << "%" << std::flush;
+    }
+    
+    void saveBlockSizes(const std::string& dir) {
+        std::cout << "Block sizes: ";
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            std::cout << symmetrized_block_ham_sizes[i];
+            if (i < symmetrized_block_ham_sizes.size() - 1) std::cout << " ";
+        }
+        std::cout << std::endl;
+        
+        std::ofstream file(dir + "/sym_basis/sym_block_sizes.txt");
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not save block sizes file");
+        }
+        
+        for (int size : symmetrized_block_ham_sizes) {
+            file << size << "\n";
+        }
+    }
+
+public:
     std::vector<Complex> read_sym_basis(int index, const std::string& dir){
         std::ifstream file(dir+"/sym_basis/sym_basis"+std::to_string(index)+".dat");
         if (!file.is_open()) {
@@ -1521,180 +1621,258 @@ public:
             return {basis, Complex(0.0, 0.0)};
         });
     }
-
     // Build symmetrized sparse matrices for each block and save them to files
     void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
-        if (symmetrized_block_ham_sizes.empty()) {
-            // Load symmetrized block sizes from file
-            std::ifstream file(dir + "/sym_basis/sym_block_sizes.txt");
-            if (!file.is_open()) {
-                throw std::runtime_error("Symmetrized basis must be generated first with generateSymmetrizedBasis()");
-            }
-            std::string line;
-            while (std::getline(file, line)) {
-                std::istringstream iss(line);
-                int block_size;
-                if (iss >> block_size) {
-                    symmetrized_block_ham_sizes.push_back(block_size);
-                }
-            }
-            file.close();
-            std::cout << "Loaded symmetrized block sizes from file." << std::endl;
-        }
+        // Step 1: Load block sizes if not already loaded
+        loadBlockSizesIfNeeded(dir);
         
         std::cout << "Building and saving symmetrized Hamiltonian blocks..." << std::endl;
         
-        // Create a directory for the block matrices
-        std::string block_dir = dir + "/sym_blocks";
-        std::string mkdir_command = "mkdir -p " + block_dir;
-        system(mkdir_command.c_str());
+        // Step 2: Create output directory
+        std::string block_dir = createBlockDirectory(dir);
         
-        int dim = 1 << n_bits_;
-        int block_start = 0;
+        // Step 3: Pre-build the sparse matrix representation once
+        buildSparseMatrix();
         
-        // Use a sparse vector representation to reduce memory usage
-        using SparseVector = std::map<int, Complex>;
-        
-        // Process each symmetry block
-        for (size_t block = 0; block < symmetrized_block_ham_sizes.size(); block++) {
-            int block_size = symmetrized_block_ham_sizes[block];
-            if (block_size == 0) continue;
-            
-            std::cout << "Processing block " << block << " of size " << block_size << std::endl;
-            
-            // Pre-build the sparse matrix representation
-            buildSparseMatrix();
-            
-            // Create a sparse matrix for this block
-            std::vector<Eigen::Triplet<Complex>> triplets;
-            triplets.reserve(block_size * 10); // Estimate average 10 non-zeros per row
-            
-            // Process basis vectors in smaller chunks to reduce memory usage
-            const int CHUNK_SIZE = std::min(100, block_size);
-            
-            for (int chunk_start = 0; chunk_start < block_size; chunk_start += CHUNK_SIZE) {
-                int chunk_end = std::min(chunk_start + CHUNK_SIZE, block_size);
-                
-                // Cache for this chunk only
-                std::vector<SparseVector> chunk_cache(chunk_end - chunk_start);
-                
-                // Load chunk basis vectors
-                #pragma omp parallel for schedule(dynamic)
-                for (int i = chunk_start; i < chunk_end; i++) {
-                    read_sym_basis_sparse(block_start + i, dir, chunk_cache[i - chunk_start]);
-                }
-                
-                // Process this chunk
-                #pragma omp parallel for schedule(dynamic)
-                for (int i = chunk_start; i < chunk_end; i++) {
-                    if (chunk_cache[i - chunk_start].empty()) continue;
-                    
-                    // Apply operator to basis vector i
-                    SparseVector transformed_i;
-                    for (const auto& [idx, val] : chunk_cache[i - chunk_start]) {
-                        for (const auto& transform : transforms_) {
-                            auto [new_idx, scalar] = transform(idx);
-                            if (new_idx >= 0 && new_idx < dim && std::abs(scalar) > 1e-10) {
-                                transformed_i[new_idx] += val * scalar;
-                            }
-                        }
-                    }
-                    
-                    // Calculate matrix elements with all basis vectors
-                    std::vector<std::pair<int, Complex>> row_elements;
-                    
-                    // Process against all basis vectors in smaller batches
-                    const int BATCH_SIZE = 1000;
-                    for (int batch_start = 0; batch_start < block_size; batch_start += BATCH_SIZE) {
-                        int batch_end = std::min(batch_start + BATCH_SIZE, block_size);
-                        
-                        // Load batch if not in current chunk
-                        std::vector<SparseVector> batch_cache;
-                        if (batch_start < chunk_start || batch_end > chunk_end) {
-                            batch_cache.resize(batch_end - batch_start);
-                            for (int j = batch_start; j < batch_end; j++) {
-                                read_sym_basis_sparse(block_start + j, dir, batch_cache[j - batch_start]);
-                            }
-                        }
-                        
-                        // Process batch
-                        for (int j = batch_start; j < batch_end; j++) {
-                            const SparseVector* basis_j = nullptr;
-                            
-                            if (j >= chunk_start && j < chunk_end) {
-                                basis_j = &chunk_cache[j - chunk_start];
-                            } else {
-                                basis_j = &batch_cache[j - batch_start];
-                            }
-                            
-                            if (basis_j->empty()) continue;
-                            
-                            // Calculate <j|H|i>
-                            Complex element(0.0, 0.0);
-                            for (const auto& [idx, val] : transformed_i) {
-                                auto it = basis_j->find(idx);
-                                if (it != basis_j->end()) {
-                                    element += std::conj(it->second) * val;
-                                }
-                            }
-                            
-                            if (std::abs(element) > 1e-10) {
-                                row_elements.emplace_back(j, element);
-                            }
-                        }
-                    }
-                    
-                    // Add non-zero elements to triplets list
-                    #pragma omp critical
-                    {
-                        for (const auto& [j, element] : row_elements) {
-                            triplets.emplace_back(j, i, element);
-                        }
-                    }
-                }
-                
-                // Clear chunk cache to free memory
-                chunk_cache.clear();
-                chunk_cache.shrink_to_fit();
-            }
-            
-            // Create and save the sparse matrix
-            Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
-            blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
-            
-            // Save in binary format for efficiency
-            std::string filename = block_dir + "/block_" + std::to_string(block) + ".dat";
-            std::ofstream file(filename, std::ios::binary);
-            if (!file.is_open()) {
-                throw std::runtime_error("Could not open file for writing: " + filename);
-            }
-            
-            // Write matrix dimensions
-            file << block_size << " " << block_size << std::endl;
-            
-            // Write number of non-zeros for pre-allocation
-            // int nnz = blockMatrix.nonZeros();
-            // file << nnz << std::endl;
-            
-            // Write non-zero elements (row, col, real, imag) in binary format
-            for (int k = 0; k < blockMatrix.outerSize(); ++k) {
-                for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
-                    int row = it.row();
-                    int col = it.col();
-                    double real = it.value().real();
-                    double imag = it.value().imag();
-                    file << row << " " << col << " " << real << " " << imag << std::endl;
-                }
-            }
-            
-            file.close();
-            // std::cout << "Saved block " << block << " with " << nnz << " non-zeros to " << filename << std::endl;
-            
-            block_start += block_size;
-        }
+        // Step 4: Process each symmetry block
+        processAllSymmetryBlocks(dir, block_dir);
         
         std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
     }
+
+private:
+    void loadBlockSizesIfNeeded(const std::string& dir) {
+        if (!symmetrized_block_ham_sizes.empty()) {
+            return;
+        }
+        
+        std::string filepath = dir + "/sym_basis/sym_block_sizes.txt";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error(
+                "Symmetrized basis must be generated first with generateSymmetrizedBasis()"
+            );
+        }
+        
+        symmetrized_block_ham_sizes.clear();
+        int block_size;
+        while (file >> block_size) {
+            symmetrized_block_ham_sizes.push_back(block_size);
+        }
+        
+        std::cout << "Loaded " << symmetrized_block_ham_sizes.size() 
+                  << " symmetrized block sizes." << std::endl;
+    }
+    
+    std::string createBlockDirectory(const std::string& dir) {
+        std::string block_dir = dir + "/sym_blocks";
+        std::string mkdir_command = "mkdir -p " + block_dir;
+        system(mkdir_command.c_str());
+        return block_dir;
+    }
+    
+    void processAllSymmetryBlocks(const std::string& dir, const std::string& block_dir) {
+        int block_start = 0;
+        
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); block_idx++) {
+            int block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                continue;
+            }
+            
+            std::cout << "Processing block " << block_idx 
+                     << " (size: " << block_size << ")" << std::endl;
+            
+            processSingleBlockOptimized(dir, block_dir, block_idx, block_start, block_size);
+            block_start += block_size;
+        }
+    }
+    
+    void processSingleBlockOptimized(const std::string& dir, 
+                                    const std::string& block_dir,
+                                    size_t block_idx,
+                                    int block_start, 
+                                    int block_size) {
+        // Use column-wise processing for better cache locality
+        std::vector<std::vector<std::pair<int, Complex>>> columns(block_size);
+        
+        // Process columns in parallel
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int col = 0; col < block_size; col++) {
+            processColumn(dir, block_start, col, block_size, columns[col]);
+        }
+        
+        // Convert to sparse matrix and save
+        saveBlockMatrixOptimized(block_dir, block_idx, block_size, columns);
+    }
+    
+    void processColumn(const std::string& dir,
+                      int block_start,
+                      int col,
+                      int block_size,
+                      std::vector<std::pair<int, Complex>>& column) {
+        // Load basis vector for this column
+        std::map<int, Complex> basis_col;
+        read_sym_basis_sparse(block_start + col, dir, basis_col);
+        
+        if (basis_col.empty()) {
+            return;
+        }
+        
+        // Apply Hamiltonian using pre-built sparse matrix
+        std::map<int, Complex> h_basis_col = applyHamiltonianOptimized(basis_col);
+        
+        // Pre-allocate space for column
+        column.reserve(block_size / 10);  // Estimate sparsity
+        
+        // Compute matrix elements for this column
+        for (int row = 0; row < block_size; row++) {
+            Complex element = computeMatrixElementOptimized(dir, block_start + row, h_basis_col);
+            
+            if (std::abs(element) > 1e-10) {
+                column.emplace_back(row, element);
+            }
+        }
+    }
+    
+    std::map<int, Complex> applyHamiltonianOptimized(const std::map<int, Complex>& basis_vec) {
+        std::map<int, Complex> result;
+        int dim = 1 << n_bits_;
+        
+        // Use the pre-built sparse matrix for efficient application
+        for (const auto& [idx, val] : basis_vec) {
+            if (idx >= dim) continue;
+            
+            // Apply transforms more efficiently
+            for (const auto& transform : transforms_) {
+                auto [new_idx, scalar] = transform(idx);
+                
+                if (new_idx >= 0 && new_idx < dim) {
+                    Complex contribution = val * scalar;
+                    if (std::abs(contribution) > 1e-10) {
+                        result[new_idx] += contribution;
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    Complex computeMatrixElementOptimized(const std::string& dir,
+                                         int row_idx,
+                                         const std::map<int, Complex>& h_basis_col) {
+        // Use static thread-local cache for basis vectors
+        static thread_local std::unordered_map<int, std::map<int, Complex>> basis_cache;
+        static thread_local int cache_counter = 0;
+        
+        // Periodically clear cache to prevent memory bloat
+        if (++cache_counter > 1000) {
+            basis_cache.clear();
+            cache_counter = 0;
+        }
+        
+        // Check cache first
+        auto cache_it = basis_cache.find(row_idx);
+        if (cache_it == basis_cache.end()) {
+            // Load and cache basis vector
+            std::map<int, Complex> basis_row;
+            read_sym_basis_sparse(row_idx, dir, basis_row);
+            cache_it = basis_cache.emplace(row_idx, std::move(basis_row)).first;
+        }
+        
+        // Compute inner product
+        return computeInnerProductOptimized(cache_it->second, h_basis_col);
+    }
+    
+    Complex computeInnerProductOptimized(const std::map<int, Complex>& basis_row,
+                                        const std::map<int, Complex>& h_basis_col) {
+        Complex result(0.0, 0.0);
+        
+        // Use the smaller map for iteration
+        if (basis_row.size() < h_basis_col.size()) {
+            for (const auto& [idx, val] : basis_row) {
+                auto it = h_basis_col.find(idx);
+                if (it != h_basis_col.end()) {
+                    result += std::conj(val) * it->second;
+                }
+            }
+        } else {
+            for (const auto& [idx, val] : h_basis_col) {
+                auto it = basis_row.find(idx);
+                if (it != basis_row.end()) {
+                    result += std::conj(it->second) * val;
+                }
+            }
+        }
+        
+        return result;
+    }
+    
+    void saveBlockMatrixOptimized(const std::string& block_dir,
+                                 size_t block_idx,
+                                 int block_size,
+                                 const std::vector<std::vector<std::pair<int, Complex>>>& columns) {
+        // Count total non-zeros
+        size_t nnz = 0;
+        for (const auto& col : columns) {
+            nnz += col.size();
+        }
+        
+        // Build sparse matrix efficiently
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        triplets.reserve(nnz);
+        
+        for (int col = 0; col < block_size; col++) {
+            for (const auto& [row, val] : columns[col]) {
+                triplets.emplace_back(row, col, val);
+            }
+        }
+        
+        Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
+        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
+        blockMatrix.makeCompressed();
+        
+        // Save in compressed format
+        std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
+        std::ofstream file(filename, std::ios::binary);
+        
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file for writing: " + filename);
+        }
+        
+        // Write header
+        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
+        
+        // Write non-zero elements in CSC format for better performance
+        for (int k = 0; k < blockMatrix.outerSize(); ++k) {
+            for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
+                int row = it.row();
+                int col = it.col();
+                double real = it.value().real();
+                double imag = it.value().imag();
+                
+                file.write(reinterpret_cast<const char*>(&row), sizeof(int));
+                file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+                file.write(reinterpret_cast<const char*>(&real), sizeof(double));
+                file.write(reinterpret_cast<const char*>(&imag), sizeof(double));
+            }
+        }
+        
+        file.close();
+        
+        std::cout << "  Block " << block_idx << " saved: " 
+                  << block_size << "x" << block_size 
+                  << " with " << nnz << " non-zeros ("
+                  << std::fixed << std::setprecision(2) 
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill)"
+                  << std::endl;
+    }
+
+public:
 
     // Build the sparse matrix from transforms if needed
     void buildSparseMatrix() const {

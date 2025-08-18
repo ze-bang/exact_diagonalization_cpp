@@ -1098,17 +1098,6 @@ int main(int argc, char* argv[]) {
                     i+1
                 );
             }
-
-
-
-            // compute_spin_expectations(
-            //     directory + "/output",
-            //     obs_output_dir,
-            //     params.num_sites,
-            //     params.spin_length,
-            //     0.0,
-            //     true  // print output
-            // );
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
