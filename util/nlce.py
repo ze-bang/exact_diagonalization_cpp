@@ -158,6 +158,7 @@ def main():
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
     
     # NLCE parameters
+    parser.add_argument('--auto_resum', action='store_true', help='Use automatic resummation for NLCE')
     parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation for NLCE')
     parser.add_argument('--order_cutoff', type=int, help='Maximum order for NLCE summation')
     
@@ -521,7 +522,10 @@ def main():
             
         if args.SI_units:
             nlc_params.append('--SI_units')
-        
+
+        if args.auto_resum:
+            nlc_params.append('--auto_resum')
+
         if args.euler_resum:
             nlc_params.append('--euler_resum')
         

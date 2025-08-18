@@ -195,10 +195,10 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
     field_dir = fixed_params["field_dir"]
     
     # If h_value is nonzero, average over all symmetry-equivalent field directions
-    if h_value != 0:
-        field_dirs = get_symmetry_equivalent_field_dirs(field_dir)
-    else:
-        field_dirs = [field_dir]
+    # if h_value != 0:
+    #     field_dirs = get_symmetry_equivalent_field_dirs(field_dir)
+    # else:
+    field_dirs = [field_dir]
     all_calc_temp = []
     all_calc_spec_heat = []
     print("Symmetry-equivalent field directions:", field_dirs)
@@ -235,7 +235,8 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 '--temp_max', f'{temp_max:.8f}',
                 '--temp_bins', str(fixed_params["temp_bins"]),
                 '--thermo',
-                '--SI_units'
+                '--SI_units',
+                '--auto_resum'
             ]
             
             # Only add symmetrization if not fitting random transverse field
@@ -257,12 +258,11 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 '--temp_bins', str(fixed_params["temp_bins"]),
                 '--thermo',
                 '--SI_units',
-                '--method=mTPQ'
+                '--method=mTPQ',
+                '--auto_resum'
             ]
 
         cmd.append('--skip_cluster_gen')
-        if fixed_params.get("fit_random_transverse_field", False):
-            cmd.append('--euler_resum')
         if fixed_params.get("skip_ham_prep", False):
             cmd.append('--skip_ham_prep')
         if fixed_params.get("measure_spin", False):
@@ -1226,8 +1226,7 @@ def main():
                 'python3',
                 os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generate_pyrochlore_clusters.py'),
                 '--max_order', str(args.max_order),
-                '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}'),
-                '--analytic_multiplicity'
+                '--output_dir', os.path.join(run_work_dir, f'clusters_order_{args.max_order}')
             ]
             
             try:
