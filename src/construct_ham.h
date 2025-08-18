@@ -1051,323 +1051,198 @@ public:
     }
     
     void generateSymmetrizedBasis(const std::string& dir) {
-        std::ifstream trans_file(dir + "/Trans.dat");
-        if (!trans_file.is_open()) {
-            std::cerr << "Error: Cannot open file " << dir + "/Trans.dat" << std::endl;
-        }
-
-        // Skip the first line
-        std::string dummy_line;
-        std::getline(trans_file, dummy_line);
-
-        // Read the second line to get num_site
-        std::string dum;
-        int num_site;
-        trans_file >> dum >> num_site;
-        trans_file.close();
-        
-
-        // Read max clique from JSON file
-        std::string max_clique_path = dir + "/automorphism_results/max_clique.json";
+        // Load automorphism max clique
+        const std::string max_clique_path = dir + "/automorphism_results/max_clique.json";
         std::cout << "Loading max clique from: " << max_clique_path << std::endl;
-        
-        // Read max clique
-        std::vector<std::vector<int>> max_clique_here;
+
+        // Read file into a string
         std::ifstream max_clique_file(max_clique_path);
         if (!max_clique_file.is_open()) {
             throw std::runtime_error("Cannot open max_clique.json file: " + max_clique_path);
         }
-        
-        // Read the entire file content
-        std::string json_content((std::istreambuf_iterator<char>(max_clique_file)),
-                      std::istreambuf_iterator<char>());
+        const std::string json_content(
+            (std::istreambuf_iterator<char>(max_clique_file)),
+            std::istreambuf_iterator<char>());
         max_clique_file.close();
-        
-        // Simple JSON array parser
-        size_t pos = 0;
-        // Find start of array
-        pos = json_content.find('[', pos);
-        if (pos == std::string::npos) {
-            throw std::runtime_error("Invalid JSON format in max_clique.json");
+
+        // Minimal JSON parser for [[...], [...], ...]
+        auto parse_json_int_arrays = [](const std::string& s) -> std::vector<std::vector<int>> {
+            std::vector<std::vector<int>> arrays;
+            size_t pos = s.find('[');
+            if (pos == std::string::npos) return arrays;
+            ++pos;
+
+            while (pos < s.size()) {
+                while (pos < s.size() && std::isspace(static_cast<unsigned char>(s[pos]))) ++pos;
+                if (pos >= s.size() || s[pos] == ']') break;
+                if (s[pos] != '[') { ++pos; continue; }
+
+                ++pos; // skip '[' of inner array
+                std::vector<int> arr;
+                std::string num;
+                while (pos < s.size() && s[pos] != ']') {
+                    char c = s[pos++];
+                    if (std::isdigit(static_cast<unsigned char>(c))) {
+                        num += c;
+                    } else if (!num.empty() && (c == ',' || std::isspace(static_cast<unsigned char>(c)))) {
+                        arr.push_back(std::stoi(num));
+                        num.clear();
+                    }
+                }
+                if (!num.empty()) arr.push_back(std::stoi(num));
+                if (pos < s.size() && s[pos] == ']') ++pos; // skip ']'
+                if (!arr.empty()) arrays.push_back(std::move(arr));
+            }
+            return arrays;
+        };
+
+        std::vector<std::vector<int>> max_clique = parse_json_int_arrays(json_content);
+        if (max_clique.empty()) {
+            throw std::runtime_error("Invalid or empty max_clique.json");
         }
-        pos++; // Move past the opening bracket
-        
-        // Parse each inner array
-        while (pos < json_content.size()) {
-            // Skip whitespace and find start of inner array
-            while (pos < json_content.size() && (json_content[pos] == ' ' || json_content[pos] == '\n' || 
-              json_content[pos] == '\r' || json_content[pos] == '\t')) pos++;
-            
-            if (pos >= json_content.size() || json_content[pos] == ']') break; // End of outer array
-            
-            if (json_content[pos] != '[') {
-            pos++; // Skip commas and other characters
-            continue;
-            }
-            
-            // Found start of inner array
-            pos++; // Move past the opening bracket
-            std::vector<int> permutation;
-            
-            // Parse the inner array
-            std::string num_str;
-            while (pos < json_content.size() && json_content[pos] != ']') {
-            char c = json_content[pos++];
-            if (std::isdigit(c)) {
-                num_str += c;
-            } else if (!num_str.empty() && (c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t')) {
-                permutation.push_back(std::stoi(num_str));
-                num_str.clear();
-            }
-            }
-            
-            // Add the last number if there is one
-            if (!num_str.empty()) {
-            permutation.push_back(std::stoi(num_str));
-            }
-            
-            // Add the permutation to the list
-            if (!permutation.empty()) {
-            max_clique_here.push_back(permutation);
-            }
-            
-            pos++; // Move past the closing bracket
-        }
-        
-        if (max_clique_here.empty()) {
-            throw std::runtime_error("Failed to parse max_clique.json or file is empty");
-        }
-        
-        std::cout << "Loaded " << max_clique_here.size() << " permutations in max clique" << std::endl;
-        MinimalGeneratorFinder minimal_finder;
-        std::pair<std::vector<std::vector<int>>, std::vector<int>> minimal_generators = minimal_finder.findMinimalGenerators(max_clique_here);
-        
+        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
+
+        // Find minimal generators and their orders
+        MinimalGeneratorFinder gen_finder;
+        auto gens_pair = gen_finder.findMinimalGenerators(max_clique);
+        const auto& generators = gens_pair.first;
+        const auto& orders = gens_pair.second;
+
         std::cout << "Minimal generators:\n";
-        int count_temp = 0;
-        for (const auto& generator : minimal_generators.first) {
+        for (size_t i = 0; i < generators.size(); ++i) {
             std::cout << "Generator: ";
-            for (int index : generator) {
-                std::cout << index << " ";
-            }
-            std::cout << "with order: ";
-            std::cout << minimal_generators.second[count_temp] << " ";
-            count_temp++;
-            std::cout << std::endl;
+            for (int v : generators[i]) std::cout << v << " ";
+            std::cout << "with order: " << orders[i] << std::endl;
         }
 
-        AutomorphismPowerRepresentation automorphism_power_representation;
-        std::vector<std::vector<int>> power_representation = automorphism_power_representation.representAllAsGeneratorPowers(minimal_generators.first, max_clique_here);
+        // Represent automorphisms as powers of generators
+        std::vector<std::vector<int>> power_representation =
+            AutomorphismPowerRepresentation::representAllAsGeneratorPowers(generators, max_clique);
         std::cout << "Power representation generated.\n";
         std::cout << "Symmetrized Hamiltonian generated.\n";
 
-    
-
+        // Enumerate all symmetry sectors (quantum numbers)
         std::vector<std::vector<int>> all_quantum_numbers;
-        std::vector<int> current_qnums(minimal_generators.first.size(), 0);
-
-        std::function<void(size_t)> generate_quantum_numbers = [&](size_t position) {
-            if (position == minimal_generators.first.size()) {
+        std::vector<int> current_qnums(generators.size(), 0);
+        std::function<void(size_t)> enumerate_qnums = [&](size_t pos) {
+            if (pos == generators.size()) {
                 all_quantum_numbers.push_back(current_qnums);
                 return;
             }
-            
-            for (int i = 0; i < minimal_generators.second[position]; i++) {
-                current_qnums[position] = i;
-                generate_quantum_numbers(position + 1);
+            for (int k = 0; k < orders[pos]; ++k) {
+                current_qnums[pos] = k;
+                enumerate_qnums(pos + 1);
             }
         };
-
-        generate_quantum_numbers(0);
+        enumerate_qnums(0);
 
         std::cout << "Total symmetry sectors: " << all_quantum_numbers.size() << std::endl;
 
-        // Create a directory for the symmetrized basis states
-        std::string sym_basis_dir = dir + "/sym_basis";
-        std::string mkdir_command = "mkdir -p " + sym_basis_dir;
-        system(mkdir_command.c_str());
-        std::vector<std::vector<Complex>> unique_sym_basis;
+        // Ensure output directory exists
+        const std::string sym_basis_dir = dir + "/sym_basis";
+        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
+        system(mkdir_cmd.c_str());
 
-        // Create a filename based on the quantum numbers
-        std::string filename = sym_basis_dir + "/sym_basis";
-        symmetrized_block_ham_sizes.resize(all_quantum_numbers.size(), 0);
-        int count = 0;
-        
-        // For each symmetry sector (combination of quantum numbers)
-        for (const auto& e_i : all_quantum_numbers) {
-            std::vector<size_t> representative_states;
-            std::set<size_t> processed_states;
-            size_t total_basis_states = 1 << n_bits_;
+        // Prepare bookkeeping
+        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
+        const size_t dim = static_cast<size_t>(1ULL << n_bits_);
+        size_t total_written = 0;
+
+        // Progress helper
+        auto print_progress = [](size_t cur, size_t tot, size_t sector_idx, size_t sectors) {
+            double pct = tot ? (static_cast<double>(cur) / tot) * 100.0 : 100.0;
+            int bar_width = 40;
+            int pos = static_cast<int>(bar_width * pct / 100.0);
+            std::cout << "\rProcessing sector " << (sector_idx + 1) << "/" << sectors << " [";
+            for (int i = 0; i < bar_width; ++i) {
+                if (i < pos) std::cout << "=";
+                else if (i == pos) std::cout << ">";
+                else std::cout << " ";
+            }
+            std::cout << "] " << std::fixed << std::setprecision(1) << pct << "%" << std::flush;
+        };
+
+        // For each sector
+        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
+            const auto& qnums = all_quantum_numbers[sector_idx];
+            std::set<size_t> processed;
+            std::set<std::string> seen_hashes; // per-sector uniqueness
             size_t sector_basis_count = 0;
-            
-            // Create a temporary directory for this symmetry sector
-            std::string sector_dir = sym_basis_dir + "/temp_sector_" + std::to_string(count);
-            std::string mkdir_sector = "mkdir -p " + sector_dir;
-            system(mkdir_sector.c_str());
-            
-            // Use a file-based hash map to reduce memory usage
-            std::string hash_file = sector_dir + "/vector_hashes.txt";
-            std::ofstream hash_map(hash_file);
-            
-            // Setup progress tracking
-            size_t progress_interval = total_basis_states / 100;
-            if (progress_interval < 1) progress_interval = 1;
-            
-            // Process in batches to reduce memory pressure
-            const size_t BATCH_SIZE = 1000;
-            std::set<size_t> batch_processed;
-            
-            for (size_t batch_start = 0; batch_start < total_basis_states; batch_start += BATCH_SIZE) {
-            batch_processed.clear();
-            size_t batch_end = std::min(batch_start + BATCH_SIZE, total_basis_states);
-            
-            for (size_t basis = batch_start; basis < batch_end; basis++) {
-                // Display progress bar
-                if (basis % progress_interval == 0 || basis == total_basis_states - 1) {
-                double percentage = static_cast<double>(basis) / total_basis_states * 100.0;
-                int barWidth = 40;
-                int pos = barWidth * percentage / 100.0;
-                
-                std::cout << "\rProcessing sector " << count + 1 << "/" << all_quantum_numbers.size()
-                      << " [";
-                for (int i = 0; i < barWidth; ++i) {
-                    if (i < pos) std::cout << "=";
-                    else if (i == pos) std::cout << ">";
-                    else std::cout << " ";
+
+            for (size_t basis = 0; basis < dim; ++basis) {
+                if (basis % std::max<size_t>(1, dim / 100) == 0 || basis + 1 == dim) {
+                    print_progress(basis, dim, sector_idx, all_quantum_numbers.size());
                 }
-                std::cout << "] " << std::fixed << std::setprecision(1) << percentage << "%" << std::flush;
-                }
-                
-                // Skip states already processed
-                if (processed_states.find(basis) != processed_states.end() || 
-                batch_processed.find(basis) != batch_processed.end()) {
-                continue;
-                }
-                
-                // Get orbit of the current state under symmetry operations
+                if (processed.count(basis)) continue;
+
+                // Orbit under symmetry operations
                 std::set<size_t> orbit;
-                for (const auto& perm : max_clique_here) {
-                orbit.insert(applyPermutation(basis, perm));
-                }
-                
-                // Mark states in orbit as processed for this batch
-                batch_processed.insert(orbit.begin(), orbit.end());
-                
-                // Generate symmetrized basis vector
-                std::vector<Complex> sym_basis_vec = sym_basis_e_(basis, max_clique_here, power_representation, minimal_generators.second, e_i);
-                
+                for (const auto& perm : max_clique) orbit.insert(applyPermutation(static_cast<int>(basis), perm));
+                processed.insert(orbit.begin(), orbit.end());
+
+                // Construct symmetrized basis vector
+                std::vector<Complex> vec = sym_basis_e_(static_cast<int>(basis), max_clique,
+                                                        power_representation, orders, qnums);
+
                 // Check norm
-                double norm_squared = 0.0;
-                for (const auto& val : sym_basis_vec) {
-                norm_squared += std::norm(val);
-                }
-                
-                if (norm_squared > 1e-10) {
-                // Find first non-zero component for phase normalization
-                size_t first_nonzero = 0;
-                while (first_nonzero < total_basis_states && std::abs(sym_basis_vec[first_nonzero]) < 1e-10) {
-                    first_nonzero++;
-                }
-                
-                if (first_nonzero < total_basis_states) {
-                    // Normalize phase
-                    Complex phase_factor = sym_basis_vec[first_nonzero] / std::abs(sym_basis_vec[first_nonzero]);
-                    for (auto& val : sym_basis_vec) {
-                    val /= phase_factor;
-                    }
-                    
-                    // Create sparse representation and hash
-                    std::stringstream hash_stream;
-                    for (size_t i = 0; i < total_basis_states; i++) {
-                    if (std::abs(sym_basis_vec[i]) > 1e-10) {
-                        hash_stream << i << ":"
-                           << std::fixed << std::setprecision(12) 
-                           << sym_basis_vec[i].real() << ":"
-                           << sym_basis_vec[i].imag() << ";";
-                    }
-                    }
-                    std::string vector_hash = hash_stream.str();
-                    
-                    // Check if this hash already exists
-                    hash_map.seekp(0, std::ios::beg);
-                    std::string line;
-                    bool is_duplicate = false;
-                    std::ifstream hash_check(hash_file);
-                    while (std::getline(hash_check, line)) {
-                    if (line == vector_hash) {
-                        is_duplicate = true;
-                        break;
-                    }
-                    }
-                    hash_check.close();
-                    
-                    if (!is_duplicate) {
-                    // Write vector hash
-                    hash_map << vector_hash << std::endl;
-                    hash_map.flush(); // Ensure it's written immediately
-                    
-                    // Write the vector to disk directly
-                    std::string vec_filename = sector_dir + "/vector_" + std::to_string(sector_basis_count) + ".dat";
-                    std::ofstream vec_file(vec_filename);
-                    for (size_t i = 0; i < total_basis_states; i++) {
-                        if (std::abs(sym_basis_vec[i]) > 1e-10) {
-                        vec_file << i << " " << sym_basis_vec[i].real() << " " << sym_basis_vec[i].imag() << std::endl;
-                        }
-                    }
-                    vec_file.close();
-                    
-                    representative_states.push_back(basis);
-                    sector_basis_count++;
+                double norm2 = 0.0;
+                for (const auto& v : vec) norm2 += std::norm(v);
+                if (norm2 <= 1e-10) continue;
+
+                // Phase-fix using first non-zero entry
+                size_t first_nz = 0;
+                while (first_nz < dim && std::abs(vec[first_nz]) < 1e-10) ++first_nz;
+                if (first_nz == dim) continue;
+                Complex phase = vec[first_nz] / std::abs(vec[first_nz]);
+                for (auto& v : vec) v /= phase;
+
+                // Sparse hash for uniqueness
+                std::stringstream ss;
+                ss << std::fixed << std::setprecision(12);
+                for (size_t i = 0; i < dim; ++i) {
+                    if (std::abs(vec[i]) > 1e-10) {
+                        ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
                     }
                 }
+                std::string key = ss.str();
+                if (seen_hashes.count(key)) continue; // duplicate vector in this sector
+                seen_hashes.insert(key);
+
+                // Write vector to disk
+                const std::string out_file = sym_basis_dir + "/sym_basis" + std::to_string(total_written) + ".dat";
+                std::ofstream ofs(out_file);
+                for (size_t i = 0; i < dim; ++i) {
+                    if (std::abs(vec[i]) > 1e-10) {
+                        ofs << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
+                    }
                 }
+                ofs.close();
+
+                ++sector_basis_count;
+                ++total_written;
             }
-            
-            // Add batch_processed to processed_states for the next batch
-            processed_states.insert(batch_processed.begin(), batch_processed.end());
-            }
-            
-            hash_map.close();
+
             std::cout << std::endl;
-            
-            // Copy vectors to final location and cleanup temp files
-            for (size_t i = 0; i < sector_basis_count; i++) {
-            std::string src_file = sector_dir + "/vector_" + std::to_string(i) + ".dat";
-            std::string dst_file = sym_basis_dir + "/sym_basis" + std::to_string(unique_sym_basis.size() + i) + ".dat";
-            
-            // Copy file content
-            std::ifstream src(src_file, std::ios::binary);
-            std::ofstream dst(dst_file, std::ios::binary);
-            dst << src.rdbuf();
-            }
-            
-            // Update counts
-            symmetrized_block_ham_sizes[count] = sector_basis_count;
-            unique_sym_basis.resize(unique_sym_basis.size() + sector_basis_count); // Just resize to track count, not storing actual data
-            
-            // Remove temporary directory
-            std::string cleanup_command = "rm -rf " + sector_dir;
-            system(cleanup_command.c_str());
-            
-            std::cout << "Sector " << count + 1 << ": Found " << sector_basis_count << " basis vectors" << std::endl;
-            count++;
+            symmetrized_block_ham_sizes[sector_idx] = static_cast<int>(sector_basis_count);
+            std::cout << "Sector " << (sector_idx + 1) << ": Found " << sector_basis_count << " basis vectors" << std::endl;
         }
-        std::cout << std::endl;
-        // Write the number of unique basis vectors
-        std::cout << "Number of unique symmetrized basis vectors: " << unique_sym_basis.size() << std::endl;
+
+        // Summary and block sizes
+        std::cout << "\nNumber of unique symmetrized basis vectors: " << total_written << std::endl;
         std::cout << "Block sizes: ";
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
-            std::cout << symmetrized_block_ham_sizes[i] << " ";
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            std::cout << symmetrized_block_ham_sizes[i] << (i + 1 == symmetrized_block_ham_sizes.size() ? "" : " ");
         }
         std::cout << std::endl;
-        // Write the symmetrized block size to a file
+
+        // Persist block sizes
         std::ofstream block_size_file(dir + "/sym_basis/sym_block_sizes.txt");
         if (!block_size_file.is_open()) {
             throw std::runtime_error("Could not open file: " + dir + "/sym_basis/sym_block_sizes.txt");
         }
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); i++) {
-            block_size_file << symmetrized_block_ham_sizes[i] << std::endl;
-        }
+        for (int sz : symmetrized_block_ham_sizes) block_size_file << sz << "\n";
         block_size_file.close();
+
         std::cout << "Symmetrized basis generation complete." << std::endl;
     }
 

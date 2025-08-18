@@ -130,7 +130,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     int sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit to avoid overflow)
     
     ComplexVector Sz_exps(sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Sz2_exps(sublattice_size+1, Complex(0.0, 0.0));
@@ -145,7 +145,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
         // Calculate expectation values
         Complex Sz_exp = Complex(0.0, 0.0);
         
-        for (int j = 0; j < N; j++) {
+        for (size_t j = 0; j < N; j++) {
             Sz_exp += std::conj(tpq_state[j]) * Sz_psi[j];
         }
         
@@ -156,7 +156,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
         std::vector<Complex> Sz2_psi = Sz_ops[i].apply(std::move(Sz_psi));
 
         Complex Sz2_exp = Complex(0.0, 0.0);
-        for (int j = 0; j < N; j++) {
+    for (size_t j = 0; j < N; j++) {
             Sz2_exp += std::conj(tpq_state[j]) * Sz2_psi[j];
         }
         Sz2_exps[i] += Sz2_exp;
@@ -182,7 +182,7 @@ Complex calculateSpm_onsite(
     int sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
 
     Complex Spm_exp(0.0, 0.0);
     
@@ -193,7 +193,7 @@ Complex calculateSpm_onsite(
         // Apply operators - use direct vector construction to avoid copy
         std::vector<Complex> Spm_psi = Spm_ops[i].apply({tpq_state.begin(), tpq_state.end()});
 
-        for (int j = 0; j < N; j++) {
+    for (size_t j = 0; j < N; j++) {
             Spm_exp += std::conj(Spm_psi[j]) * Spm_psi[j];
         }
     }
@@ -237,7 +237,7 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
     int sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
     
     ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
@@ -262,10 +262,10 @@ std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
             Complex Spm_exp = Complex(0.0, 0.0);
 
 
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Szz_exp += std::conj(tpq_state[i]) * Szz_psi[i];
             }
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Spm_exp += std::conj(tpq_state[i]) * Spm_psi[i];
             }
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
@@ -292,7 +292,7 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
     int sublattice_size
 ){
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
     
     ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
     ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
@@ -327,16 +327,16 @@ std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std
             Complex Spp_exp = Complex(0.0, 0.0);
             Complex Spz_exp = Complex(0.0, 0.0);
 
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Szz_exp += std::conj(Szz_psi[i]) * Szz_psi2[i];
             }
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Spm_exp += std::conj(Spm_psi[i]) * Spm_psi2[i];
             }
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Spp_exp += std::conj(tpq_state[i]) * Spp_psi[i];
             }
-            for (int i = 0; i < N; i++) {
+            for (size_t i = 0; i < N; i++) {
                 Spz_exp += std::conj(Spm_psi[i]) * Szz_psi2[i];
             }
             Spm_exps[n1*sublattice_size+n2] += Spm_exp;
@@ -805,7 +805,7 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     bool print_output = true
 ) {
     // Calculate the dimension of the Hilbert space
-    int N = 1 << num_sites;  // 2^num_sites
+    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
     
     // Initialize expectations matrix: 3 rows (S^+, S^-, S^z) x num_sites columns
     std::vector<std::vector<Complex>> expectations(3, std::vector<Complex>(num_sites, Complex(0.0, 0.0)));
@@ -833,7 +833,7 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
         Complex Sm_exp = Complex(0.0, 0.0);
         Complex Sz_exp = Complex(0.0, 0.0);
         
-        for (int i = 0; i < N; i++) {
+    for (size_t i = 0; i < N; i++) {
             Sp_exp += std::conj(tpq_state[i]) * Sp_psi[i];
             Sm_exp += std::conj(tpq_state[i]) * Sm_psi[i];
             Sz_exp += std::conj(tpq_state[i]) * Sz_psi[i];

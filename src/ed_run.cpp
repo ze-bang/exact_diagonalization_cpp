@@ -369,9 +369,11 @@ int main(int argc, char* argv[]) {
     
     // Run standard diagonalization
     if (run_standard) {
-        std::cout << "==========================================" << std::endl;
+    std::cout << "==========================================" << std::endl;
         std::cout << "Starting Standard Exact Diagonalization" << std::endl;
         std::cout << "==========================================" << std::endl;
+    std::cerr << "[DEBUG] run_standard: num_sites=" << params.num_sites << ", spin_length=" << params.spin_length
+          << ", method=" << static_cast<int>(method) << std::endl;
         std::cout << "Method: ";
         switch (method) {
             case DiagonalizationMethod::LANCZOS: std::cout << "Lanczos"; break;
@@ -682,6 +684,8 @@ int main(int argc, char* argv[]) {
         }
         catch (const std::exception& e) {
             std::cerr << "Error in standard ED: " << e.what() << std::endl;
+            std::cerr << "[DEBUG] Exception during standard ED with num_sites=" << params.num_sites
+                      << ", method=" << static_cast<int>(method) << ", output_dir=" << standard_output << std::endl;
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();

@@ -754,6 +754,8 @@ EDResults exact_diagonalization_from_files(
     // 1. Determine the number of sites and create the Hamiltonian
     int num_sites = params.num_sites;
     Operator hamiltonian(num_sites, params.spin_length);  // Initialize with dummy size, will update later
+    std::cerr << "[DEBUG] exact_diagonalization_from_files: format=STANDARD, num_sites=" << num_sites
+              << ", method=" << static_cast<int>(method) << std::endl;
     
     switch (format) {
         case HamiltonianFileFormat::STANDARD: {            
@@ -790,7 +792,8 @@ EDResults exact_diagonalization_from_files(
     }
     
     // 2. Calculate the Hilbert space dimension
-    int hilbert_space_dim = pow(2, num_sites);  // 2^num_sites
+    int hilbert_space_dim = static_cast<int>(1ULL << num_sites);  // 2^num_sites using 64-bit safe shift
+    std::cerr << "[DEBUG] exact_diagonalization_from_files: hilbert_space_dim=" << hilbert_space_dim << std::endl;
     // 3. Create a lambda function to apply the Hamiltonian
     auto apply_hamiltonian = [&hamiltonian](const Complex* in, Complex* out, int n) {
         // Convert raw pointers to vectors for the Operator::apply method
@@ -835,6 +838,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat"
 ) {
+    std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" << params.num_sites
+              << ", method=" << static_cast<int>(method) << std::endl;
 
     // Check if automorphism results already exist
     std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
@@ -899,7 +904,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Generate symmetrized basis if needed
     if (!sym_basis_exists) {
         std::cout << "Symmetrized basis not found. Generating..." << std::endl;
-        hamiltonian.generateSymmetrizedBasis(directory);
+    hamiltonian.generateSymmetrizedBasis(directory);
     } else {
         std::cout << "Using existing symmetrized basis from " << sym_basis_dir << std::endl;
     }
@@ -944,6 +949,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // 4. Diagonalize each block separately    
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         int block_dim = block_sizes[block_idx];
+        std::cerr << "[DEBUG] Diagonalizing block " << block_idx << " dim=" << block_dim << std::endl;
         
         std::cout << "Diagonalizing block " << block_idx + 1 << "/" << block_sizes.size() 
                   << " (dimension: " << block_dim << ")" << std::endl;
@@ -1043,6 +1049,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                 }
 
                 std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
+                std::cerr << "[DEBUG] Transforming eigenvector to full dim=" << (1ULL<<params.num_sites) << std::endl;
                 
                 for (size_t i = 0; i < block_dim; ++i) {
                     std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);

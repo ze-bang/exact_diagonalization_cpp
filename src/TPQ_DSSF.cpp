@@ -149,7 +149,17 @@ int main(int argc, char* argv[]) {
         ham_op.apply(in, out, size);
     };
     
-    int N = 1 << num_sites;
+    // Use 64-bit to compute Hilbert space dimension and guard against int overflow
+    size_t N64 = 1ULL << num_sites;
+    if (N64 > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        if (rank == 0) {
+            std::cerr << "Error: 2^num_sites exceeds 32-bit int range (num_sites=" << num_sites
+                      << "). Refactor APIs to use size_t for N or reduce num_sites." << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    int N = static_cast<int>(N64);
     
     // Define momentum points
     const std::vector<std::vector<double>> momentum_points = {
