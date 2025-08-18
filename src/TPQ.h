@@ -713,6 +713,7 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
 std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
     const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_neg_q,
     const ComplexVector& tpq_state,
     int N,
     const int num_steps
@@ -1162,6 +1163,7 @@ void computeObservableDynamics_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
     const ComplexVector& tpq_state,
     const std::vector<Operator>& observables,
+    const std::vector<Operator>& observables_neg_q,
     const std::vector<std::string>& observable_names,
     int N,
     const std::string& dir,
@@ -1179,8 +1181,10 @@ void computeObservableDynamics_U_t(
     
     // Create array of operator functions
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_neg_q;
     operatorFuncs.reserve(observables.size());
-    
+    operatorFuncs_neg_q.reserve(observables_neg_q.size());
+
     for (size_t i = 0; i < observables.size(); i++) {
         operatorFuncs.emplace_back([&observables, i](const Complex* in, Complex* out, int size) {
             // Convert input to vector
@@ -1191,10 +1195,21 @@ void computeObservableDynamics_U_t(
             std::copy(result.begin(), result.end(), out);
         });
     }
-    
+
+    for (size_t i = 0; i < observables_neg_q.size(); i++) {
+        operatorFuncs_neg_q.emplace_back([&observables_neg_q, i](const Complex* in, Complex* out, int size) {
+            // Convert input to vector
+            std::vector<Complex> input(in, in + size);
+            // Apply operator
+            std::vector<Complex> result = observables_neg_q[i].apply(input);
+            // Copy result to output
+            std::copy(result.begin(), result.end(), out);
+        });
+    }
+
     // Forward-time correlations only
     auto time_correlations = calculate_spectral_function_from_tpq_U_t(
-        U_t, operatorFuncs, tpq_state, N, int(t_end/dt + 1));
+        U_t, operatorFuncs, operatorFuncs_neg_q, tpq_state, N, int(t_end/dt + 1));
 
     // Process and save results for each observable (t >= 0)
     for (size_t i = 0; i < observables.size(); i++) {
