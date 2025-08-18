@@ -1755,7 +1755,7 @@ void computeSpinStructureFactorKrylov(
                   << ": Q = [" << Q_vector[0] << ", " << Q_vector[1] << ", " << Q_vector[2] << "]" << std::endl;
         
         // Pre-compute negative Q vector
-        const std::vector<double> neg_Q_vector = {-Q_vector[0], -Q_vector[1], -Q_vector[2]};
+        const std::vector<double> neg_Q_vector = {Q_vector[0], Q_vector[1], Q_vector[2]};
         
         
         for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); combo_idx++) {
