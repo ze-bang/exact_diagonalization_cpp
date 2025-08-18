@@ -11,7 +11,7 @@
 #include <sys/stat.h>
 
 // #include "TPQ_cuda.cuh"
-#include "lanczos_cuda.cuh"
+// #include "lanczos_cuda.cuh"
 
 std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
@@ -887,11 +887,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Load the terms from files
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-
-
-    // if (method != DiagonalizationMethod::FULL){
-    //     hamiltonian.buildSparseMatrix();
-    // }
     
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";
@@ -913,6 +908,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Build and save symmetrized blocks if needed
     if (!sym_blocks_exists) {
         hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+    }else{
+        hamiltonian.loadAllSymmetrizedBlocks(directory);
     }
     // hamiltonian.printEntireSymmetrizedMatrix(directory);
     block_sizes = hamiltonian.symmetrized_block_ham_sizes;
@@ -1010,64 +1007,190 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             });
         }
         
-        // Transform and save eigenvectors if requested
-        if (params.compute_eigenvectors) {
-
-            // Make directory for eigenvectors
+        // Transform eigenvectors or TPQ states if requested
+        if (params.compute_eigenvectors || method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+            
+            // Make directory for eigenvectors/states
             std::string eigenvector_dir = params.output_dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + eigenvector_dir;
             system(cmd.c_str());
 
-
-            std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
-            
-            for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
-                // Path to the block eigenvector
-                std::string block_eigenvector_file = block_params.output_dir + 
-                                                   "/eigenvectors/eigenvector_" + std::to_string(eigen_idx) + ".dat";
-
-                std::cout << "Reading eigenvector from: " << block_eigenvector_file << std::endl;
-
-                // Read the block eigenvector
-                std::vector<Complex> block_eigenvector(block_dim);
-                std::ifstream eigen_file(block_eigenvector_file, std::ios::binary);
-                if (!eigen_file.is_open()) {
-                    std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
-                    continue;
-                }
-
-                eigen_file.read(reinterpret_cast<char*>(&block_eigenvector[0]), block_dim * sizeof(Complex));
-                eigen_file.close();
+            // Handle TPQ state transformation
+            if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA) {
+                std::cout << "Transforming TPQ states for block " << block_idx << std::endl;
                 
-                // Create a file for the transformed eigenvector
-                std::string transformed_file = params.output_dir + "/eigenvectors/eigenvector_block" + 
-                                            std::to_string(block_idx) + "_" + 
-                                            std::to_string(eigen_idx) + ".dat";
-                std::ofstream out_file(transformed_file);
-                if (!out_file.is_open()) {
-                    std::cerr << "Warning: Could not open file for transformed eigenvector: " << transformed_file << std::endl;
-                    continue;
-                }
-
-                std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
-                std::cerr << "[DEBUG] Transforming eigenvector to full dim=" << (1ULL<<params.num_sites) << std::endl;
+                // Search for all TPQ state files in the block directory (not in tpq_data subdirectory)
+                std::string temp_list_file = params.output_dir + "/tpq_state_files_" + std::to_string(block_idx) + ".txt";
+                std::string find_command = "find \"" + block_params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
                 
-                for (size_t i = 0; i < block_dim; ++i) {
-                    std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);
-                    transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string tpq_state_file;
+                    while (std::getline(file_list, tpq_state_file)) {
+                        if (tpq_state_file.empty()) continue;
+                        
+                        // Extract sample number and beta value from filename
+                        size_t sample_pos = tpq_state_file.find("tpq_state_");
+                        size_t beta_pos = tpq_state_file.find("_beta=");
+                        size_t dat_pos = tpq_state_file.find(".dat");
+                        
+                        if (sample_pos != std::string::npos && beta_pos != std::string::npos && dat_pos != std::string::npos) {
+                            std::string sample_str = tpq_state_file.substr(sample_pos + 10, beta_pos - sample_pos - 10);
+                            std::string beta_str = tpq_state_file.substr(beta_pos + 6, dat_pos - beta_pos - 6);
+                            
+                            std::cout << "Processing TPQ state: sample=" << sample_str << ", beta=" << beta_str << std::endl;
+                            
+                            // Read the block TPQ state
+                            ComplexVector block_tpq_state(block_dim);
+                            std::ifstream tpq_file(tpq_state_file, std::ios::binary);
+                            if (!tpq_file.is_open()) {
+                                std::cerr << "Warning: Could not open TPQ state file: " << tpq_state_file << std::endl;
+                                continue;
+                            }
+                            
+                            // Read the TPQ state (assuming binary format as in save_tpq_state)
+                            tpq_file.read(reinterpret_cast<char*>(block_tpq_state.data()), block_dim * sizeof(Complex));
+                            tpq_file.close();
+                            
+                            // Transform to full Hilbert space
+                            ComplexVector full_tpq_state(1ULL << params.num_sites, Complex(0.0, 0.0));
+                            
+                            for (int i = 0; i < block_dim; ++i) {
+                                std::vector<Complex> basis_vector = hamiltonian.read_sym_basis(i + block_start_dim, directory);
+                                for (size_t j = 0; j < full_tpq_state.size(); ++j) {
+                                    full_tpq_state[j] += basis_vector[j] * block_tpq_state[i];
+                                }
+                            }
+                            
+                            // Save the transformed TPQ state
+                            std::string transformed_file = params.output_dir + "/tpq_state_" + sample_str + 
+                                                          "_beta=" + beta_str + "_block" + std::to_string(block_idx) + ".dat";
+                            
+                            std::ofstream out_file(transformed_file, std::ios::binary);
+                            if (out_file.is_open()) {
+                                out_file.write(reinterpret_cast<const char*>(full_tpq_state.data()), 
+                                             full_tpq_state.size() * sizeof(Complex));
+                                out_file.close();
+                                std::cout << "Saved transformed TPQ state to: " << transformed_file << std::endl;
+                            } else {
+                                std::cerr << "Warning: Could not save transformed TPQ state to: " << transformed_file << std::endl;
+                            }
+                        }
+                    }
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
                 }
-                out_file << transformed_eigenvector.size() << std::endl;
-                // Write the transformed eigenvector to file
-                for (size_t i = 0; i < transformed_eigenvector.size(); ++i) {
-                    // Write only non-zero entries
-                    if (std::abs(transformed_eigenvector[i]) < 1e-10) continue;
-                    out_file << i << " " << transformed_eigenvector[i].real() << " " 
-                            << transformed_eigenvector[i].imag() << std::endl;
-                }
-                out_file << std::endl;
-
-                out_file.close();
             }
+            
+            // Handle regular eigenvector transformation
+            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && method != DiagonalizationMethod::mTPQ_CUDA) {
+                std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
+                
+                for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
+                    // Path to the block eigenvector
+                    std::string block_eigenvector_file = block_params.output_dir + 
+                                                       "/eigenvector_" + std::to_string(eigen_idx) + ".dat";
+
+                    std::cout << "Reading eigenvector from: " << block_eigenvector_file << std::endl;
+
+                    // Read the block eigenvector
+                    std::vector<Complex> block_eigenvector(block_dim);
+                    std::ifstream eigen_file(block_eigenvector_file, std::ios::binary);
+                    if (!eigen_file.is_open()) {
+                        std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+
+                    // Check file size matches expected
+                    eigen_file.seekg(0, std::ios::end);
+                    size_t file_size = eigen_file.tellg();
+                    size_t expected_size = block_dim * sizeof(Complex);
+                    if (file_size != expected_size) {
+                        std::cerr << "Warning: Eigenvector file size mismatch. Expected " << expected_size 
+                                  << " bytes, got " << file_size << " bytes for file: " << block_eigenvector_file << std::endl;
+                        eigen_file.close();
+                        continue;
+                    }
+                    eigen_file.seekg(0, std::ios::beg);
+
+                    eigen_file.read(reinterpret_cast<char*>(&block_eigenvector[0]), block_dim * sizeof(Complex));
+                    if (!eigen_file) {
+                        std::cerr << "Warning: Failed to read eigenvector data from: " << block_eigenvector_file << std::endl;
+                        eigen_file.close();
+                        continue;
+                    }
+                    eigen_file.close();
+                    
+                    // Verify the eigenvector is normalized and contains valid values
+                    double norm = 0.0;
+                    bool has_invalid_values = false;
+                    for (const auto& val : block_eigenvector) {
+                        if (!std::isfinite(val.real()) || !std::isfinite(val.imag())) {
+                            has_invalid_values = true;
+                            break;
+                        }
+                        norm += std::norm(val);
+                    }
+                    
+                    if (has_invalid_values) {
+                        std::cerr << "Warning: Eigenvector contains invalid (NaN/Inf) values in file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+                    
+                    norm = std::sqrt(norm);
+                    if (norm < 1e-10) {
+                        std::cerr << "Warning: Eigenvector has zero norm in file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+                    
+                    // Create a file for the transformed eigenvector
+                    std::string transformed_file = params.output_dir + "/eigenvector_block" + 
+                                                std::to_string(block_idx) + "_" + 
+                                                std::to_string(eigen_idx) + ".dat";
+                    std::ofstream out_file(transformed_file);
+                    if (!out_file.is_open()) {
+                        std::cerr << "Warning: Could not open file for transformed eigenvector: " << transformed_file << std::endl;
+                        continue;
+                    }
+
+                    std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
+                    std::cerr << "[DEBUG] Transforming eigenvector to full dim=" << (1ULL<<params.num_sites) << std::endl;
+                    
+                    for (size_t i = 0; i < block_dim; ++i) {
+                        std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);
+                        transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
+                    }
+                    
+                    // Normalize the transformed eigenvector
+                    double norm_squared = 0.0;
+                    for (const auto& val : transformed_eigenvector) {
+                        norm_squared += std::norm(val);  // |val|^2
+                    }
+                    norm = std::sqrt(norm_squared);
+                    
+                    if (norm > 1e-10) {  // Avoid division by zero
+                        for (auto& val : transformed_eigenvector) {
+                            val /= norm;
+                        }
+                    } else {
+                        std::cerr << "Warning: Transformed eigenvector has near-zero norm!" << std::endl;
+                    }
+                    
+                    out_file << transformed_eigenvector.size() << std::endl;
+                    // Write the transformed eigenvector to file
+                    for (size_t i = 0; i < transformed_eigenvector.size(); ++i) {
+                        // Write only non-zero entries
+                        if (std::abs(transformed_eigenvector[i]) < 1e-10) continue;
+                        out_file << i << " " << transformed_eigenvector[i].real() << " " 
+                                << transformed_eigenvector[i].imag() << std::endl;
+                    }
+                    out_file << std::endl;
+
+                    out_file.close();
+                }
+            }
+        
         }
         block_start_dim += block_dim;  // Update the starting dimension for the next block
     }

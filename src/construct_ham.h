@@ -1902,6 +1902,172 @@ public:
         return sparseMatrix_;
     }
 
+    // Load a symmetrized block matrix from file
+    // Supports two formats:
+    // 1) ASCII text:
+    //      first line: `<rows> <cols>`
+    //      subsequent lines: `row col real imag`
+    // 2) Binary (written by saveBlockMatrixOptimized):
+    //      int rows, int cols, size_t nnz, followed by nnz entries of
+    //      {int row, int col, double real, double imag}
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlock(const std::string& filepath) {
+        // First, try ASCII text parsing
+        {
+            std::ifstream tf(filepath);
+            if (!tf.is_open()) {
+                throw std::runtime_error("Could not open block file: " + filepath);
+            }
+
+            std::string firstLine;
+            if (std::getline(tf, firstLine)) {
+                std::istringstream hdr(firstLine);
+                int rows = 0, cols = 0;
+                if (hdr >> rows >> cols) {
+                    // Looks like ASCII format. Parse the remaining lines.
+                    std::vector<Eigen::Triplet<Complex>> triplets;
+                    triplets.reserve(1024); // start with a modest reservation
+
+                    int r, c;
+                    double real, imag;
+                    size_t count = 0;
+                    while (tf >> r >> c >> real >> imag) {
+                        // Basic sanity: skip out-of-bounds entries if present in file
+                        if (r >= 0 && r < rows && c >= 0 && c < cols) {
+                            triplets.emplace_back(r, c, Complex(real, imag));
+                            ++count;
+                        }
+                    }
+
+                    Eigen::SparseMatrix<Complex> blockMatrix(rows, cols);
+                    blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
+                    blockMatrix.makeCompressed();
+
+                    std::cout << "Loaded block matrix (ASCII): " << rows << "x" << cols
+                              << " with " << count << " non-zeros ("
+                              << std::fixed << std::setprecision(2)
+                              << (rows * cols > 0 ? (100.0 * count / (rows * cols)) : 0.0)
+                              << "% fill)" << std::endl;
+                    return blockMatrix;
+                }
+            }
+            // If first line didn't parse as two ints, fall through to binary path
+        }
+
+        // Binary fallback
+        std::ifstream file(filepath, std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open block file: " + filepath);
+        }
+
+        int rows = 0, cols = 0;
+        size_t nnz = 0;
+        file.read(reinterpret_cast<char*>(&rows), sizeof(int));
+        file.read(reinterpret_cast<char*>(&cols), sizeof(int));
+        file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
+
+        if (!file.good()) {
+            throw std::runtime_error("Failed to read header from: " + filepath);
+        }
+
+        // Sanity checks to avoid pathological reserves from corrupted headers
+        if (rows < 0 || cols < 0) {
+            throw std::runtime_error("Invalid header (negative dims) in: " + filepath);
+        }
+        const unsigned long long maxEntries = static_cast<unsigned long long>(rows) * static_cast<unsigned long long>(cols);
+        if (nnz > maxEntries) {
+            throw std::runtime_error("Invalid header (nnz > rows*cols) in: " + filepath);
+        }
+
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        triplets.reserve(nnz);
+
+        for (size_t i = 0; i < nnz; ++i) {
+            int row = 0, col = 0;
+            double real = 0.0, imag = 0.0;
+
+            file.read(reinterpret_cast<char*>(&row), sizeof(int));
+            file.read(reinterpret_cast<char*>(&col), sizeof(int));
+            file.read(reinterpret_cast<char*>(&real), sizeof(double));
+            file.read(reinterpret_cast<char*>(&imag), sizeof(double));
+
+            if (!file.good()) {
+                throw std::runtime_error("Failed to read matrix element " +
+                                       std::to_string(i) + " from: " + filepath);
+            }
+
+            if (row >= 0 && row < rows && col >= 0 && col < cols) {
+                triplets.emplace_back(row, col, Complex(real, imag));
+            }
+        }
+
+        Eigen::SparseMatrix<Complex> blockMatrix(rows, cols);
+        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
+        blockMatrix.makeCompressed();
+
+        std::cout << "Loaded block matrix (binary): " << rows << "x" << cols
+                  << " with " << triplets.size() << " non-zeros ("
+                  << std::fixed << std::setprecision(2)
+                  << (rows * cols > 0 ? (100.0 * triplets.size() / (rows * cols)) : 0.0)
+                  << "% fill)" << std::endl;
+
+        return blockMatrix;
+    }
+    
+    // Load all symmetrized blocks from a directory
+    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocks(const std::string& dir) {
+        std::string block_dir = dir + "/sym_blocks";
+        
+        // First, determine how many blocks exist
+        loadBlockSizesIfNeeded(dir);
+        
+        std::vector<Eigen::SparseMatrix<Complex>> blocks;
+        blocks.reserve(symmetrized_block_ham_sizes.size());
+        
+        std::cout << "Loading symmetrized Hamiltonian blocks from " << block_dir << std::endl;
+        
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
+            if (symmetrized_block_ham_sizes[block_idx] == 0) {
+                // Empty block - add an empty matrix
+                blocks.emplace_back(0, 0);
+                continue;
+            }
+            
+            std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
+            
+            try {
+                blocks.push_back(loadSymmetrizedBlock(filename));
+                std::cout << "  Loaded block " << block_idx << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not load block " << block_idx 
+                         << ": " << e.what() << std::endl;
+                // Add empty matrix for missing block
+                blocks.emplace_back(symmetrized_block_ham_sizes[block_idx], 
+                                  symmetrized_block_ham_sizes[block_idx]);
+            }
+        }
+        
+        std::cout << "Successfully loaded " << blocks.size() << " blocks" << std::endl;
+        return blocks;
+    }
+    
+    // Load a specific symmetrized block by index
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlockByIndex(const std::string& dir, size_t block_idx) {
+        loadBlockSizesIfNeeded(dir);
+        
+        if (block_idx >= symmetrized_block_ham_sizes.size()) {
+            throw std::out_of_range("Block index " + std::to_string(block_idx) + 
+                                   " out of range (max: " + 
+                                   std::to_string(symmetrized_block_ham_sizes.size() - 1) + ")");
+        }
+        
+        if (symmetrized_block_ham_sizes[block_idx] == 0) {
+            return Eigen::SparseMatrix<Complex>(0, 0);
+        }
+        
+        std::string filepath = dir + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
+        return loadSymmetrizedBlock(filepath);
+    }
+
 private:
     std::vector<TransformFunction> transforms_;
     int n_bits_; // Number of bits in the basis representation
