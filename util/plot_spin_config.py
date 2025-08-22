@@ -17,8 +17,8 @@ def read_eigenvector(filename):
             parts = line.strip().split()
             if len(parts) == 3:
                 idx = int(parts[0])
-                real_part = float(parts[1])/1e178
-                imag_part = float(parts[2])/1e178
+                real_part = float(parts[1])
+                imag_part = float(parts[2])
                 indices.append(idx)
                 data.append(complex(real_part, imag_part))
     
@@ -147,7 +147,6 @@ def get_collapsed_spin_configuration(state, n_sites):
     
     for site in range(n_sites):
         # In the Sz basis, collapsed state has definite Sz values
-        # Sx and Sy are zero since we're in an eigenstate of Sz
         sz[site] = 0.5 if get_bit(state, site) == 1 else -0.5
     
     return sx, sy, sz
@@ -181,7 +180,9 @@ def compute_spin_configuration(eigenvector_file, n_probable_states=5, verbose=Tr
     print(f"Top {n_probable_states} most probable basis states in superposition:")
     print("="*60)
     top_states = find_most_probable_states(eigenvector, n_top=n_probable_states)
+
     
+
     all_collapsed_configs = []
     for i, (state_idx, prob) in enumerate(top_states):
         config_str = state_to_string(state_idx, n_sites)
@@ -203,6 +204,62 @@ def compute_spin_configuration(eigenvector_file, n_probable_states=5, verbose=Tr
     sx_exp, sy_exp = compute_sx_sy_expectations(eigenvector, n_sites, verbose)
     
     return all_collapsed_configs, sx_exp, sy_exp, sz_exp, n_sites
+
+def select_equal_probability_top_states(eigenvector, atol=1e-6, rtol=1e-3):
+    """Select all basis states tied for the maximum probability within tolerance.
+
+    Returns:
+        indices (np.ndarray): indices of tied top-probability states
+        max_p (float): the maximum probability value
+    """
+    probabilities = np.abs(eigenvector) ** 2
+    if probabilities.size == 0:
+        return np.array([], dtype=np.int64), 0.0
+    max_p = probabilities.max()
+    if max_p <= 0:
+        return np.array([], dtype=np.int64), 0.0
+    mask = np.isclose(probabilities, max_p, rtol=rtol, atol=atol)
+    indices = np.flatnonzero(mask)
+    return indices, float(max_p)
+
+def build_equal_superposition_state(indices, dim):
+    """Build a normalized equal-superposition state over given basis state indices."""
+    psi = np.zeros(dim, dtype=np.complex128)
+    if len(indices) == 0: 
+        return psi
+    amp = 1.0 / np.sqrt(len(indices))
+    psi[indices] = amp
+    return psi
+
+def plot_expectations_per_site(sx, sy, sz, title="Expectation values", outfile="spin_expectations_equal_superposition.png"):
+    """Plot <Sx>, <Sy>, <Sz> vs site and save to file."""
+    try:
+        import matplotlib.pyplot as plt
+        sites = np.arange(len(sz))
+        plt.figure(figsize=(12, 3.2))
+        plt.plot(sites, sx, 'r.-', label='<Sx>')
+        plt.plot(sites, sy, 'g.-', label='<Sy>')
+        plt.plot(sites, sz, 'b.-', label='<Sz>', linewidth=2)
+        plt.axhline(0.0, color='k', alpha=0.3)
+        plt.grid(True, alpha=0.3)
+        plt.xlabel('Site')
+        plt.ylabel('Expectation value')
+        plt.title(title)
+        plt.legend(loc='best')
+        plt.tight_layout()
+        plt.savefig(outfile, dpi=150, bbox_inches='tight')
+        plt.show()
+        print(f"Plot saved as {outfile}")
+    except ImportError:
+        print("Matplotlib not available, skipping plot")
+
+def save_equal_superposition_expectations(sx, sy, sz, filename="spin_config_equal_superposition.dat"):
+    """Save per-site expectations for the equal superposition state."""
+    with open(filename, 'w') as f:
+        f.write("# Site    <Sx>           <Sy>           <Sz>\n")
+        for i in range(len(sz)):
+            f.write(f"{i:5d} {sx[i]:12.8f} {sy[i]:12.8f} {sz[i]:12.8f}\n")
+    print(f"Equal-superposition expectations saved to {filename}")
 
 def save_spin_configuration(all_collapsed_configs, sx_exp, sy_exp, sz_exp, 
                           output_file="spin_config.dat"):
@@ -438,3 +495,22 @@ if __name__ == "__main__":
     
     # Plot real space configurations
     plot_multiple_real_space_configurations(all_collapsed_configs, sx_exp, sy_exp, sz_exp, positions_file)
+
+    # Construct an equal superposition of the most-probable tied states and plot expectations
+    eigenvector_full, dim = read_eigenvector(eigenvector_file)
+    top_equal_indices, max_p = select_equal_probability_top_states(eigenvector_full)
+    if len(top_equal_indices) > 0:
+        print(f"\nEqual-superposition over {len(top_equal_indices)} tied top-probability states (p_max = {max_p:.6g}).")
+        print(f"Indices: {', '.join(map(str, top_equal_indices.tolist()))}")
+        psi_equal = build_equal_superposition_state(top_equal_indices, dim)
+        # Expectations for the equal superposition
+        sz_eq = compute_sz_expectation(psi_equal, n_sites)
+        sx_eq, sy_eq = compute_sx_sy_expectations(psi_equal, n_sites, verbose=False)
+        # Save and plot
+        save_equal_superposition_expectations(sx_eq, sy_eq, sz_eq)
+        plot_expectations_per_site(sx_eq, sy_eq, sz_eq,
+                                   title=f"Expectation values (Equal superposition of {len(top_equal_indices)} top states)",
+                                   outfile="spin_expectations_equal_superposition.png")
+        print(f"Totals (equal superposition): <Sx>={np.sum(sx_eq):.6f}, <Sy>={np.sum(sy_eq):.6f}, <Sz>={np.sum(sz_eq):.6f}")
+    else:
+        print("\nNo non-zero amplitudes found to construct an equal superposition.")

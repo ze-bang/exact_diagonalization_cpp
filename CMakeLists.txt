@@ -187,6 +187,17 @@ add_executable(TEST ${SRC_DIR}/test_observables.cpp)
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
 
+# Add MPI TPQ example executable (only if MPI is enabled)
+if(WITH_MPI)
+    set(MPI_EXAMPLE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/tpq_mpi_example.cpp)
+    if(EXISTS ${MPI_EXAMPLE_FILE})
+        add_executable(TPQ_MPI_EXAMPLE ${MPI_EXAMPLE_FILE})
+        message(STATUS "Adding MPI TPQ example executable")
+    else()
+        message(STATUS "MPI example file not found at: ${MPI_EXAMPLE_FILE}")
+    endif()
+endif()
+
 
 # Add CUDA example executable if CUDA is enabled and example exists
 if(WITH_CUDA)
@@ -242,6 +253,16 @@ if(TARGET TPQ_DSSF)
     )
 endif()
 
+# Link libraries for MPI TPQ example (only if it exists)
+if(TARGET TPQ_MPI_EXAMPLE)
+    target_link_libraries(TPQ_MPI_EXAMPLE
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
+
 # Link libraries for CUDA example if it exists
 if(TARGET CUDA_EXAMPLE)
     target_link_libraries(CUDA_EXAMPLE
@@ -270,6 +291,11 @@ if(WITH_MKL)
         
         if(TARGET TPQ_DSSF)
             target_link_libraries(TPQ_DSSF MKL::MKL)
+        endif()
+        
+        # Link MKL to MPI example if it exists
+        if(TARGET TPQ_MPI_EXAMPLE)
+            target_link_libraries(TPQ_MPI_EXAMPLE MKL::MKL)
         endif()
         
         # Link MKL to CUDA example if it exists
@@ -313,6 +339,16 @@ if(WITH_CUDA)
         )
     endif()
     
+    # Link CUDA libraries to MPI example if it exists
+    if(TARGET TPQ_MPI_EXAMPLE)
+        target_link_libraries(TPQ_MPI_EXAMPLE
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+        )
+    endif()
+    
     # Link CUDA libraries to example if it exists
     if(TARGET CUDA_EXAMPLE)
         target_link_libraries(CUDA_EXAMPLE
@@ -341,6 +377,11 @@ if(WITH_MPI)
     
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    # Link MPI to the new MPI example
+    if(TARGET TPQ_MPI_EXAMPLE)
+        target_link_libraries(TPQ_MPI_EXAMPLE ${MPI_CXX_LIBRARIES})
     endif()
     
     # Link MPI to CUDA example if it exists

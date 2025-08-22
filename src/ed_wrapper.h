@@ -1096,32 +1096,26 @@ EDResults exact_diagonalization_from_directory_symmetrized(
 
                     // Read the block eigenvector
                     std::vector<Complex> block_eigenvector(block_dim);
-                    std::ifstream eigen_file(block_eigenvector_file, std::ios::binary);
+                    std::ifstream eigen_file(block_eigenvector_file);
                     if (!eigen_file.is_open()) {
                         std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
                         continue;
                     }
+                    std::string line;
+                    int num_entries = 0;
+                    while(std::getline(eigen_file, line) && num_entries < block_dim) {
+                        if (line.empty()) continue;  // Skip empty lines
+                        std::istringstream iss(line);
+                        double real_part, imag_part;
+                        if (!(iss >> real_part >> imag_part)) {
+                            std::cerr << "Warning: Invalid line in eigenvector file: " << line << std::endl;
+                            continue;
+                        }
+                        block_eigenvector[num_entries] = Complex(real_part, imag_part);
+                        num_entries++;
 
-                    // Check file size matches expected
-                    eigen_file.seekg(0, std::ios::end);
-                    size_t file_size = eigen_file.tellg();
-                    size_t expected_size = block_dim * sizeof(Complex);
-                    if (file_size != expected_size) {
-                        std::cerr << "Warning: Eigenvector file size mismatch. Expected " << expected_size 
-                                  << " bytes, got " << file_size << " bytes for file: " << block_eigenvector_file << std::endl;
-                        eigen_file.close();
-                        continue;
                     }
-                    eigen_file.seekg(0, std::ios::beg);
 
-                    eigen_file.read(reinterpret_cast<char*>(&block_eigenvector[0]), block_dim * sizeof(Complex));
-                    if (!eigen_file) {
-                        std::cerr << "Warning: Failed to read eigenvector data from: " << block_eigenvector_file << std::endl;
-                        eigen_file.close();
-                        continue;
-                    }
-                    eigen_file.close();
-                    
                     // Verify the eigenvector is normalized and contains valid values
                     double norm = 0.0;
                     bool has_invalid_values = false;
@@ -1162,13 +1156,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                         transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
                     }
                     
-                    // Normalize the transformed eigenvector
-                    double norm_squared = 0.0;
-                    for (const auto& val : transformed_eigenvector) {
-                        norm_squared += std::norm(val);  // |val|^2
-                    }
-                    norm = std::sqrt(norm_squared);
-                    
+                    std::cout << " norm of transformed eigenvector: " << norm << std::endl;
                     if (norm > 1e-10) {  // Avoid division by zero
                         for (auto& val : transformed_eigenvector) {
                             val /= norm;
