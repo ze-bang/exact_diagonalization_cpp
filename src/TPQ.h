@@ -712,12 +712,13 @@ SpectralFunctionData calculate_spectral_function_from_tpq(
 
 std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
     const ComplexVector& tpq_state,
     int N,
     const int num_steps
 ) {
-    int num_operators = operators.size();
+    int num_operators = operators_1.size();
     
     // Pre-allocate all buffers needed for calculation
     std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));        // O|ψ> for each operator
@@ -731,7 +732,7 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     
     // Calculate O|ψ> once for each operator
     for (int op = 0; op < num_operators; op++) {
-        operators[op](state.data(), O_psi_vec[op].data(), N);
+        operators_1[op](state.data(), O_psi_vec[op].data(), N);
     }
     
     // Prepare time evolution
@@ -739,7 +740,7 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     
     // Calculate initial O†|ψ> for each operator
     for (int op = 0; op < num_operators; op++) {
-        operators[op](state.data(), O_dag_state_vec[op].data(), N);
+        operators_2[op](state.data(), O_dag_state_vec[op].data(), N);
         
         // Calculate initial correlation C(0) = <ψ|O†O|ψ>
         time_correlations[op][0] = Complex(0.0, 0.0);
@@ -761,7 +762,7 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
             U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
             
             // Calculate O†|ψ(t)>
-            operators[op](state_next.data(), O_dag_state_vec[op].data(), N);
+            operators_2[op](state_next.data(), O_dag_state_vec[op].data(), N);
             
             // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
             time_correlations[op][step] = Complex(0.0, 0.0);
@@ -1161,7 +1162,8 @@ void computeObservableDynamics(
 void computeObservableDynamics_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
     const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables,
+    const std::vector<Operator>& observables_1,
+    const std::vector<Operator>& observables_2,
     const std::vector<std::string>& observable_names,
     int N,
     const std::string& dir,
@@ -1175,18 +1177,28 @@ void computeObservableDynamics_U_t(
     save_tpq_state(tpq_state, state_file);
 
     std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << observables.size() << " observables" << std::endl;
+              << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
     
     // Create array of operator functions
-    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs;
-    operatorFuncs.reserve(observables.size());
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_1;
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_2;
+    operatorFuncs_1.reserve(observables_1.size());
+    operatorFuncs_2.reserve(observables_2.size());
 
-    for (size_t i = 0; i < observables.size(); i++) {
-        operatorFuncs.emplace_back([&observables, i](const Complex* in, Complex* out, int size) {
+    for (size_t i = 0; i < observables_1.size(); i++) {
+        operatorFuncs_1.emplace_back([&observables_1, i](const Complex* in, Complex* out, int size) {
             // Convert input to vector
             std::vector<Complex> input(in, in + size);
             // Apply operator
-            std::vector<Complex> result = observables[i].apply(input);
+            std::vector<Complex> result = observables_1[i].apply(input);
+            // Copy result to output
+            std::copy(result.begin(), result.end(), out);
+        });
+        operatorFuncs_2.emplace_back([&observables_2, i](const Complex* in, Complex* out, int size) {
+            // Convert input to vector
+            std::vector<Complex> input(in, in + size);
+            // Apply operator
+            std::vector<Complex> result = observables_2[i].apply(input);
             // Copy result to output
             std::copy(result.begin(), result.end(), out);
         });
@@ -1194,10 +1206,10 @@ void computeObservableDynamics_U_t(
 
     // Forward-time correlations only
     auto time_correlations = calculate_spectral_function_from_tpq_U_t(
-        U_t, operatorFuncs, tpq_state, N, int(t_end/dt + 1));
+        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1));
 
     // Process and save results for each observable (t >= 0)
-    for (size_t i = 0; i < observables.size(); i++) {
+    for (size_t i = 0; i < observables_1.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
                              + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
         
