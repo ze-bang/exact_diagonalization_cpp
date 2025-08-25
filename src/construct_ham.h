@@ -2192,9 +2192,12 @@ public:
 };
 
 
+
+
+
 /**
  * SumOperator class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ), where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
  */
 class SumOperator : public Operator {
 public:
@@ -2252,8 +2255,7 @@ public:
             });
         }
     }
-        
-private:
+
     /**
      * Read site positions from file
      * Expected format: Each line contains x y z coordinates for one site
@@ -2303,6 +2305,72 @@ private:
         return positions;
     }
 
+};
+
+
+/**
+ * SumOperator class represents a sum of single-site operators with position-dependent phases
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
+ */
+class SublatticeOperator : public SumOperator {
+public:
+    /**
+     * Constructor for sum operator with momentum-dependent phases
+     * @param i Sublattice site index 1
+     * @param unit_cel_size Size of the unit cell (number of sublattices)
+     * @param num_site Total number of sites/qubits
+     * @param spin_l Spin quantum number
+     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * @param Q_vector Momentum vector [Qx, Qy, Qz]
+     * @param positions_file Path to file containing site positions
+     */
+    SublatticeOperator(int i, int unit_cel_size, int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
+        : SumOperator(num_site, spin_l, op, Q_vector, positions_file) {
+
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        // Read positions from file
+        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        // Calculate phase factors for each site
+        std::vector<Complex> phase_factors(num_site);
+        
+        for (int i = 0; i < num_site; ++i) {
+            if (positions[i].size() < 3) {
+                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
+            }
+            
+            double phase = -Q_vector[0] * positions[i][0] + 
+                          -Q_vector[1] * positions[i][1] + 
+                          -Q_vector[2] * positions[i][2];
+            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
+        }
+        // Add transforms for each site with appropriate phase factor
+        for (int site = i; site < num_site; site+=unit_cel_size) {
+            Complex phase_factor = phase_factors[site];
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    // Sz operator
+                    int bit = (basis >> site) & 1;
+                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
+                } else {
+                    // S+ or S- operator
+                    if (((basis >> site) & 1) != op) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * double(spin_l * 2)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
 };
 
 #endif // CONSTRUCT_HAM_H
