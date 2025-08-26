@@ -202,20 +202,6 @@ Complex calculateSpm_onsite(
 }
 
 
-std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> createDoubleSiteOperators(int num_sites, float spin_length) {
-    std::vector<DoubleSiteOperator> Szz_ops;
-    std::vector<DoubleSiteOperator> Spm_ops;
-
-    for (int site = 0; site < num_sites; site++) {
-        for (int site2 = 0; site2 < num_sites; site2++) {
-            Szz_ops.emplace_back(num_sites, spin_length, 2, site, 2, site2);
-            Spm_ops.emplace_back(num_sites, spin_length, 0, site, 1, site2);
-        }
-    }
-    return {Szz_ops, Spm_ops};
-}
-
-
 std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> createSingleOperators_pair(int num_sites, float spin_length) {
     std::vector<SingleSiteOperator> Szz_ops;
     std::vector<SingleSiteOperator> Spm_ops;
@@ -228,137 +214,38 @@ std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> crea
 }
 
 
-
-std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
+std::tuple<std::vector<std::string>, std::vector<Complex>> calculateSzzSpm(
     const ComplexVector& tpq_state,
     int num_sites,
     float spin_length,
-    std::pair<std::vector<DoubleSiteOperator>, std::vector<DoubleSiteOperator>> double_site_ops,
-    int sublattice_size
+    std::vector<SublatticeOperator> double_site_ops,
+    int sublattice_size,
+    std::vector<std::string> spin_corr
 ){
     // Calculate the dimension of the Hilbert space
     size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
-    
-    ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
 
-    // Create S operators for each site
-    std::vector<DoubleSiteOperator> Szz_ops;
-    std::vector<DoubleSiteOperator> Spm_ops;
+    std::vector<Complex> S_exps(double_site_ops.size() * double_site_ops.size(), Complex(0.0, 0.0));
+    std::vector<std::string> S_names(double_site_ops.size() * double_site_ops.size()); 
 
-    Szz_ops = double_site_ops.first;
-    Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
-    for (int site = 0; site < num_sites; site++) {
-        for (int site2 = 0; site2 < num_sites; site2++) {
-            int n1 = site % sublattice_size;
-            int n2 = site2 % sublattice_size;
-
+    for (int site = 0; site < double_site_ops.size(); site++) {
+        for (int site2 = 0; site2 < double_site_ops.size(); site2++) {
             // Apply operators
-            std::vector<Complex> Szz_psi = Szz_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Spm_psi = Spm_ops[site*num_sites+site2].apply({tpq_state.begin(), tpq_state.end()});
-
+            std::vector<Complex> S_psi = double_site_ops[site].apply({tpq_state.begin(), tpq_state.end()});
+            std::vector<Complex> S_psi2 = double_site_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
             // Calculate expectation values
-            Complex Szz_exp = Complex(0.0, 0.0);
-            Complex Spm_exp = Complex(0.0, 0.0);
-
+            Complex S_exp = Complex(0.0, 0.0);
 
             for (size_t i = 0; i < N; i++) {
-                Szz_exp += std::conj(tpq_state[i]) * Szz_psi[i];
+                S_exp += std::conj(S_psi[i]) * S_psi2[i];
             }
-            for (size_t i = 0; i < N; i++) {
-                Spm_exp += std::conj(tpq_state[i]) * Spm_psi[i];
-            }
-            Spm_exps[n1*sublattice_size+n2] += Spm_exp;
-            Szz_exps[n1*sublattice_size+n2] += Szz_exp;
+
+            S_exps[site*sublattice_size+site2] += S_exp;
+            S_names[site*sublattice_size+site2] = spin_corr[site] + "_" + spin_corr[site2];
         }
     }
 
-    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-        Spm_exps[i] /= double(num_sites);
-        Szz_exps[i] /= double(num_sites);
-        Spm_exps[sublattice_size*sublattice_size] += Spm_exps[i];
-        Szz_exps[sublattice_size*sublattice_size] += Szz_exps[i];
-    }
-    
-    return {Szz_exps, Spm_exps};
-
-}
-
-std::tuple<std::vector<Complex>, std::vector<Complex>, std::vector<Complex>, std::vector<Complex>> calculateSzzSpm(
-    const ComplexVector& tpq_state,
-    int num_sites,
-    float spin_length,
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops,
-    int sublattice_size
-){
-    // Calculate the dimension of the Hilbert space
-    size_t N = 1ULL << num_sites;  // 2^num_sites (64-bit)
-    
-    ComplexVector Szz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    ComplexVector Spm_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    ComplexVector Spp_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    ComplexVector Spz_exps(sublattice_size*sublattice_size+1, Complex(0.0, 0.0));
-    // Create S operators for each site
-    std::vector<SingleSiteOperator> Szz_ops;
-    std::vector<SingleSiteOperator> Spm_ops;
-
-    Szz_ops = double_site_ops.first;
-    Spm_ops = double_site_ops.second;            // For each site, compute the expectation values
-    for (int site = 0; site < num_sites; site++) {
-        for (int site2 = 0; site2 < num_sites; site2++) {
-            int n1 = site % sublattice_size;
-            int n2 = site2 % sublattice_size;
-
-            // Apply operators
-            // SzSz
-            std::vector<Complex> Szz_psi = Szz_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Szz_psi2 = Szz_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
-
-            // S+S-
-            std::vector<Complex> Spm_psi = Spm_ops[site].apply({tpq_state.begin(), tpq_state.end()});
-            std::vector<Complex> Spm_psi2 = Spm_ops[site2].apply({tpq_state.begin(), tpq_state.end()});
-
-            // S+S+
-            std::vector<Complex> Spp_psi = Spm_ops[site2].apply({Spm_psi.begin(), Spm_psi.end()});
-
-            // Calculate expectation values
-            Complex Szz_exp = Complex(0.0, 0.0);
-            Complex Spm_exp = Complex(0.0, 0.0);
-            Complex Spp_exp = Complex(0.0, 0.0);
-            Complex Spz_exp = Complex(0.0, 0.0);
-
-            for (size_t i = 0; i < N; i++) {
-                Szz_exp += std::conj(Szz_psi[i]) * Szz_psi2[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spm_exp += std::conj(Spm_psi[i]) * Spm_psi2[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spp_exp += std::conj(tpq_state[i]) * Spp_psi[i];
-            }
-            for (size_t i = 0; i < N; i++) {
-                Spz_exp += std::conj(Spm_psi[i]) * Szz_psi2[i];
-            }
-            Spm_exps[n1*sublattice_size+n2] += Spm_exp;
-            Szz_exps[n1*sublattice_size+n2] += Szz_exp;
-            Spp_exps[n1*sublattice_size+n2] += Spp_exp;
-            Spz_exps[n1*sublattice_size+n2] += Spz_exp;
-
-        }
-    }
-
-    for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-        Spm_exps[i] /= double(num_sites);
-        Szz_exps[i] /= double(num_sites);
-        Spp_exps[i] /= double(num_sites);
-        Spz_exps[i] /= double(num_sites);
-        Spm_exps[sublattice_size*sublattice_size] += Spm_exps[i];
-        Szz_exps[sublattice_size*sublattice_size] += Szz_exps[i];
-        Spp_exps[sublattice_size*sublattice_size] += Spp_exps[i];
-        Spz_exps[sublattice_size*sublattice_size] += Spz_exps[i];
-    }
-    
-    return {Szz_exps, Spm_exps, Spp_exps, Spz_exps};
+    return {S_names, S_exps};
 
 }
 
@@ -896,19 +783,18 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
 
 void writeFluctuationData(
     const std::string& flct_file,
-    const std::vector<std::string>& spin_corr,
+    const std::vector<std::vector<std::string>>& spin_corr,
     double inv_temp,
     const ComplexVector& tpq_state,
     int num_sites,
     float spin_length,
     const std::vector<SingleSiteOperator>& Sz_ops,
-    const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
+    const std::vector<std::vector<SublatticeOperator>>& double_site_ops,
     int sublattice_size,
     int step
 ) {
     std::ofstream flct_out(flct_file, std::ios::app);
     auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
-    auto Spm2exp = calculateSpm_onsite(tpq_state, num_sites, spin_length, double_site_ops.second, sublattice_size);
 
     flct_out << std::setprecision(16) << inv_temp 
              << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
@@ -919,34 +805,15 @@ void writeFluctuationData(
                  << " " << Sz2[i].real() << " " << Sz2[i].imag();
     }
 
-    flct_out << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
-
     flct_out << " " << step << std::endl;   
-
-    auto [Szz, Spm, Spp, Spz] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
-    for (size_t idx = 0; idx < spin_corr.size(); idx++) {
-        std::ofstream corr_out(spin_corr[idx], std::ios::app);
+    for(int i = 0; i < double_site_ops.size(); ++i){
+        auto [S_name, S] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops[i], sublattice_size, spin_corr[i]);
         
-        corr_out << std::setprecision(16) << inv_temp;
-        
-        // Write total (last element)
-        std::vector<Complex>* data_ptr = nullptr;
-        if (idx == 0) data_ptr = &Szz;
-        else if (idx == 1) data_ptr = &Spm;
-        else if (idx == 2) data_ptr = &Spp;
-        else if (idx == 3) data_ptr = &Spz;
-        
-        corr_out << " " << (*data_ptr)[sublattice_size*sublattice_size].real() 
-                 << " " << (*data_ptr)[sublattice_size*sublattice_size].imag();
-        
-        // Write individual correlations
-        for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-            corr_out << " " << (*data_ptr)[i].real() 
-                     << " " << (*data_ptr)[i].imag();
+        for (int j =0; j < S.size(); ++j){
+            std::ofstream corr_out(S_name[j]);
+            corr_out << std::setprecision(16) << inv_temp;
+            corr_out << " " << S[j].real() << " " << S[j].imag();
         }
-        
-        corr_out << " " << step << std::endl;
-        corr_out.close();
     }
 }
 
@@ -1031,7 +898,7 @@ ComplexVector get_tpq_state_at_temperature(
  * @param sublattice_size Size of sublattice for measurements
  * @return Tuple of filenames (ss_file, norm_file, flct_file, spin_corr)
  */
-std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
+std::tuple<std::string, std::string, std::string> initializeTPQFiles(
     const std::string& dir,
     int sample,
     int sublattice_size
@@ -1040,14 +907,6 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
     std::string norm_file = dir + "/norm_rand" + std::to_string(sample) + ".dat";
     std::string flct_file = dir + "/flct_rand" + std::to_string(sample) + ".dat";
     
-    // Create vector of spin correlation files
-    std::vector<std::string> spin_corr_files;
-    std::vector<std::string> suffixes = {"SzSz", "SpSm", "SmSm", "SpSz"};
-    
-    for (const auto& suffix : suffixes) {
-        std::string filename = dir + "/spin_corr_" + suffix + "_rand" + std::to_string(sample) + ".dat";
-        spin_corr_files.push_back(filename);
-    }
     
     // Initialize output files
     {
@@ -1056,31 +915,10 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
         
         std::ofstream norm_out(norm_file);
         norm_out << "# inv_temp norm first_norm step" << std::endl;
-        
-        std::ofstream flct_out(flct_file);
-        flct_out << "# inv_temp sz(real) sz(imag) sz2(real) sz2(imag)";
 
-        for (int i = 0; i < sublattice_size; i++) {
-            flct_out << " sz" << i << "(real) sz" << i << "(imag)"  << " sz2" << i << "(real) sz2" << i << "(imag)";
-        }
-
-        flct_out << " Spm2(real) Spm2(imag)";
-
-        flct_out << " step" << std::endl;
-
-        // Initialize each spin correlation file
-        for (const auto& file : spin_corr_files) {
-            std::ofstream spin_out(file);
-            spin_out << "# inv_temp total(real) total(imag)";
-            
-            for (int i = 0; i < sublattice_size*sublattice_size; i++) {
-                spin_out << " site" << i << "(real) site" << i << "(imag)";
-            }
-            spin_out << " step" << std::endl;
-        }
     }
     
-    return {ss_file, norm_file, flct_file, spin_corr_files};
+    return {ss_file, norm_file, flct_file};
 }
 
 /**
@@ -1972,8 +1810,6 @@ void microcanonical_tpq(
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
-
     std::function<void(const Complex*, Complex*, int)> U_t;
     std::function<void(const Complex*, Complex*, int)> U_nt;
     std::vector<std::vector<double>> momentum_positions;
@@ -1982,7 +1818,6 @@ void microcanonical_tpq(
                              {0,0,4*M_PI},
                              {0,0,2*M_PI}};
     }
-
     std::string position_file;
     if (!dir.empty()) {
         size_t last_slash_pos = dir.find_last_of('/');
@@ -2001,7 +1836,17 @@ void microcanonical_tpq(
         }
     }
 
+    std::vector<std::vector<SublatticeOperator>> double_site_ops(momentum_positions.size());
+    std::vector<std::vector<std::string>> obs_mon(momentum_positions.size());
 
+    for(int i = 0; i < momentum_positions.size(); i++) {
+        for (int j = 0; j < 4; j++){
+            double_site_ops[i].emplace_back(j, sublattice_size, num_sites, spin_length, 0, momentum_positions[i], position_file);
+            obs_mon[i].emplace_back("operator_Sp_" + std::to_string(j) + "_Q_0_" + std::to_string(momentum_positions[i][0]) + "_Q_1_" + std::to_string(momentum_positions[i][1]) + "_Q_2_" + std::to_string(momentum_positions[i][2]));
+            double_site_ops[i].emplace_back(j, sublattice_size, num_sites, spin_length, 2, momentum_positions[i], position_file);
+            obs_mon[i].emplace_back("operator_Sz_" + std::to_string(j) + "_Q_0_" + std::to_string(momentum_positions[i][0]) + "_Q_1_" + std::to_string(momentum_positions[i][1]) + "_Q_2_" + std::to_string(momentum_positions[i][2]));
+        }
+    }
 
     const int num_temp_points = 20;
     std::vector<double> measure_inv_temp(num_temp_points);
@@ -2020,7 +1865,7 @@ void microcanonical_tpq(
         std::cout << "TPQ sample " << sample+1 << " of " << num_samples << std::endl;
         
         // Setup filenames
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+        auto [ss_file, norm_file, flct_file] = initializeTPQFiles(dir, sample, sublattice_size);
         
         // Generate initial random state
         unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
@@ -2099,7 +1944,7 @@ void microcanonical_tpq(
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 if (measure_sz){
-                    writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                    writeFluctuationData(flct_file, obs_mon, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
                 }
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
@@ -2178,7 +2023,43 @@ inline void microcanonical_tpq_cuda(
 
     // Pre-create host-side operator structures needed for fluctuation I/O
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
-    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+    
+    // Setup momentum positions and observables for fluctuation measurements
+    std::vector<std::vector<double>> momentum_positions;
+    if (compute_observables) {
+        momentum_positions = {{0,0,0},
+                             {0,0,4*M_PI},
+                             {0,0,2*M_PI}};
+    }
+    std::string position_file;
+    if (!dir.empty()) {
+        size_t last_slash_pos = dir.find_last_of('/');
+        if (last_slash_pos != std::string::npos) {
+            // Check if the last character is a slash, if so, find the previous one
+            if (last_slash_pos == dir.length() - 1) {
+                last_slash_pos = dir.find_last_of('/', last_slash_pos - 1);
+            }
+            if (last_slash_pos != std::string::npos) {
+                position_file = dir.substr(0, last_slash_pos) + "/positions.dat";
+            } else {
+                position_file = "positions.dat"; // In case dir is just a name without slashes
+            }
+        } else {
+            position_file = "positions.dat"; // Relative path
+        }
+    }
+
+    std::vector<std::vector<SublatticeOperator>> double_site_ops(momentum_positions.size());
+    std::vector<std::vector<std::string>> obs_mon(momentum_positions.size());
+
+    for(int i = 0; i < momentum_positions.size(); i++) {
+        for (int j = 0; j < 4; j++){
+            double_site_ops[i].emplace_back(j, sublattice_size, num_sites, spin_length, 0, momentum_positions[i], position_file);
+            obs_mon[i].emplace_back("operator_Sp_" + std::to_string(j) + "_Q_0_" + std::to_string(momentum_positions[i][0]) + "_Q_1_" + std::to_string(momentum_positions[i][1]) + "_Q_2_" + std::to_string(momentum_positions[i][2]));
+            double_site_ops[i].emplace_back(j, sublattice_size, num_sites, spin_length, 2, momentum_positions[i], position_file);
+            obs_mon[i].emplace_back("operator_Sz_" + std::to_string(j) + "_Q_0_" + std::to_string(momentum_positions[i][0]) + "_Q_1_" + std::to_string(momentum_positions[i][1]) + "_Q_2_" + std::to_string(momentum_positions[i][2]));
+        }
+    }
 
     // Temperature checkpoints (same as CPU path)
     const int num_temp_points = 20;
@@ -2197,7 +2078,7 @@ inline void microcanonical_tpq_cuda(
         std::cout << "TPQ (CUDA) sample " << sample+1 << " of " << num_samples << std::endl;
 
         // Setup filenames
-        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+        auto [ss_file, norm_file, flct_file] = initializeTPQFiles(dir, sample, sublattice_size);
 
         // Generate initial random state on host, then copy to device
         unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
@@ -2265,7 +2146,7 @@ inline void microcanonical_tpq_cuda(
             if ((measure_sz && (step % temp_interval == 0 || step == max_iter))) {
                 ComplexVector h_v0(N);
                 copyDeviceToHost(h_v0.data(), d_v0, N);
-                writeFluctuationData(flct_file, spin_corr, inv_temp, h_v0,
+                writeFluctuationData(flct_file, obs_mon, inv_temp, h_v0,
                                      num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
             }
 
