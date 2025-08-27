@@ -1959,15 +1959,14 @@ void microcanonical_tpq(
     double dt = 0.01,
     float spin_length = 0.5,
     bool measure_sz = false,
-    int sublattice_size = 1
+    int sublattice_size = 1,
+    int num_sites = 16
 ) {
     // Create output directory if needed
     if (!dir.empty()) {
         ensureDirectoryExists(dir);
     }
-    
-    int num_sites = static_cast<int>(std::log2(N));
-
+    double D_S = std::log2(N);
     eigenvalues.clear();
 
     // Create Sz operators
@@ -1982,7 +1981,7 @@ void microcanonical_tpq(
                              {0,0,4*M_PI},
                              {0,0,2*M_PI}};
     }
-
+    std::cout << "Begin TPQ calculation with dimension " << N << std::endl;
     std::string position_file;
     if (!dir.empty()) {
         size_t last_slash_pos = dir.find_last_of('/');
@@ -2029,12 +2028,11 @@ void microcanonical_tpq(
         // Apply hamiltonian to get v0 = H|v1⟩
         ComplexVector v0(N);
         H(v1.data(), v0.data(), N);
-
         // For each element, compute v0 = (L-H)|v1⟩ = Lv1 - v0
         for (int i = 0; i < N; i++) {
             v0[i] = (LargeValue * num_sites * v1[i]) - v0[i];
         }
-
+        H(v1.data(), v0.data(), N);
         
         // Write initial state (infinite temperature)
         double inv_temp = 0.0;
@@ -2043,7 +2041,7 @@ void microcanonical_tpq(
         // Calculate energy and variance for step 1
         auto [energy1, variance1] = calculateEnergyAndVariance(H, v0, N);
         double nsite = N; // This should be the actual number of sites, approximating as N for now
-        inv_temp = (2.0) / (LargeValue* num_sites - energy1);
+        inv_temp = (2.0) / (LargeValue* D_S - energy1);
 
         double first_norm = cblas_dznrm2(N, v0.data(), 1);
         Complex scale_factor = Complex(1.0/first_norm, 0.0);
@@ -2072,7 +2070,7 @@ void microcanonical_tpq(
             
             // For each element, compute v0 = (L-H)|v0⟩ = L*v0 - v1
             for (int i = 0; i < N; i++) {
-                v0[i] = (LargeValue * num_sites * v0[i]) - v1[i];
+                v0[i] = (LargeValue * D_S * v0[i]) - v1[i];
             }
 
             current_norm = cblas_dznrm2(N, v0.data(), 1);
@@ -2081,7 +2079,6 @@ void microcanonical_tpq(
             
             // Calculate energy and variance
             auto [energy_step, variance_step] = calculateEnergyAndVariance(H, v0, N);
-            
             // Update inverse temperature
             inv_temp = (2.0*step) / (LargeValue * num_sites - energy_step);
             
@@ -2122,8 +2119,156 @@ void microcanonical_tpq(
     }
 }
 
+// Canonical TPQ using imaginary-time propagation e^{-βH} |r>
+inline void imaginary_time_evolve_tpq_taylor(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& state,
+    int N,
+    double delta_beta,
+    int n_max = 50,
+    bool normalize = true
+){
+    // result = sum_{n=0}^{n_max} (-Δβ H)^n / n! |ψ⟩
+    ComplexVector term(N), Hterm(N), result(N);
+    std::copy(state.begin(), state.end(), term.begin());
+    std::copy(state.begin(), state.end(), result.begin());
+
+    // Iteratively build coefficients to avoid factorial overflow
+    // c0 = 1; c_{k} = c_{k-1} * (-Δβ) / k
+    double coef_real = 1.0;
+    for (int order = 1; order <= n_max; ++order) {
+        // term <- H * term
+        H(term.data(), Hterm.data(), N);
+        std::swap(term, Hterm);
+
+        coef_real *= (-delta_beta) / double(order) / 2;
+        Complex coef(coef_real, 0.0);
+
+        for (int i = 0; i < N; ++i) {
+            result[i] += coef * term[i];
+        }
+    }
+
+    std::swap(state, result);
+
+    if (normalize) {
+        double norm = cblas_dznrm2(N, state.data(), 1);
+        if (norm > 0.0) {
+            Complex scale(1.0 / norm, 0.0);
+            cblas_zscal(N, &scale, state.data(), 1);
+        }
+    }
+}
+
+void canonical_tpq(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    double beta_max,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& energies,
+    std::string dir = "",
+    double delta_beta = 0.1,
+    int taylor_order = 50,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1,
+    int num_sites = 16
+){
+    if (!dir.empty()) { ensureDirectoryExists(dir); }
+    energies.clear();
+
+    // Operators for fluctuations/correlations
+    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+
+    // Temperature checkpoints (log-spaced β for saving states)
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1.0);
+    double log_max = std::log10(1000.0);
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
+
+    int max_steps = std::max(1, int(std::ceil(beta_max / delta_beta)));
+
+    for (int sample = 0; sample < num_samples; ++sample) {
+        std::vector<bool> temp_measured(num_temp_points, false);
+        std::cout << "Canonical TPQ sample " << sample + 1 << " of " << num_samples << std::endl;
+
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+
+        // Initial random normalized state (β=0)
+        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+        ComplexVector psi = generateTPQVector(N, seed);
+
+        // Step 1: record β=0
+        {
+            auto [e0, var0] = calculateEnergyAndVariance(H, psi, N);
+            double inv_temp = 0.0;
+            writeTPQData(ss_file, inv_temp, e0, var0, /*norm*/1.0, /*step*/1);
+            std::ofstream norm_out(norm_file, std::ios::app);
+            norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << 1 << std::endl;
+        }
+
+        // Main imaginary-time loop
+        int step = 2;
+        double beta = 0.0;
+        for (int k = 1; k <= max_steps; ++k, ++step) {
+            beta += delta_beta;
+            if (beta > beta_max + 1e-15) { beta = beta_max; }
+
+            // Evolve by Δβ
+            imaginary_time_evolve_tpq_taylor(H, psi, N, delta_beta, taylor_order, /*normalize=*/true);
+
+            // Measurements
+            auto [e, var] = calculateEnergyAndVariance(H, psi, N);
+            double inv_temp = beta;
+
+            writeTPQData(ss_file, inv_temp, e, var, /*norm*/1.0, step);
+            {
+                std::ofstream norm_out(norm_file, std::ios::app);
+                norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
+            }
+
+            if ((measure_sz && (k % std::max(1, temp_interval) == 0 || k == max_steps))) {
+                writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
+                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+            }
+
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                    if (compute_observables) {
+                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
+                                               + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        save_tpq_state(psi, state_file);
+                    }
+                    temp_measured[i] = true;
+                }
+            }
+
+            if (k % std::max(1, max_steps / 10) == 0 || k == max_steps) {
+                std::cout << "  β = " << beta << " (" << k << "/" << max_steps << "), E = " << e << std::endl;
+            }
+        }
+
+        // Final energy at β_max
+        auto [ef, _varf] = calculateEnergyAndVariance(H, psi, N);
+        energies.push_back(ef);
+    }
+}
 
 #if defined(WITH_CUDA)
+
 // Device-side helper: energy and variance using GPU matvec and BLAS wrappers
 inline std::pair<double,double> calculateEnergyAndVariance_cuda(
     GpuMatvec H_dev,
@@ -2143,6 +2288,201 @@ inline std::pair<double,double> calculateEnergyAndVariance_cuda(
     Complex h2 = dz_dotc_device(N, d_v.ptr, d_H2v.ptr, ctx);
     double variance = h2.real() - energy * energy;
     return {energy, variance};
+}
+
+// Device-side imaginary-time evolution via truncated Taylor series
+inline void imaginary_time_evolve_tpq_taylor_cuda(
+    GpuMatvec H_dev,
+    DeviceVector& d_state,
+    int N,
+    double delta_beta,
+    int n_max,
+    CudaContext& ctx,
+    bool normalize = true
+){
+    DeviceVector d_term(N), d_Hterm(N), d_result(N);
+
+    // term = state; result = state
+    dz_copy_device(N, d_state.ptr, d_term.ptr, ctx);
+    dz_copy_device(N, d_state.ptr, d_result.ptr, ctx);
+
+    double coef_real = 1.0;
+    for (int order = 1; order <= n_max; ++order) {
+        // term <- H * term
+        H_dev(d_term.ptr, d_Hterm.ptr, N);
+        std::swap(d_term.ptr, d_Hterm.ptr);
+
+        coef_real *= (-delta_beta) / double(order);
+        Complex coef(coef_real, 0.0);
+
+        dz_axpy_device(N, coef, d_term.ptr, d_result.ptr, ctx);
+    }
+
+    // state <- result
+    dz_copy_device(N, d_result.ptr, d_state.ptr, ctx);
+
+    if (normalize) {
+        double norm = dz_nrm2_device(d_state.ptr, N, ctx);
+        if (norm > 0.0) {
+            dz_scal_device(N, Complex(1.0 / norm, 0.0), d_state.ptr, ctx);
+        }
+    }
+}
+
+// CUDA canonical TPQ
+inline void canonical_tpq_cuda(
+    GpuMatvec H_dev,
+    int N,
+    double beta_max,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& energies,
+    std::string dir = "",
+    double delta_beta = 0.1,
+    int taylor_order = 50,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1,
+    CudaContext* pCtx = nullptr
+){
+    if (!dir.empty()) { ensureDirectoryExists(dir); }
+    energies.clear();
+
+    int num_sites = static_cast<int>(std::log2(N));
+    std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
+
+    const int num_temp_points = 20;
+    std::vector<double> measure_inv_temp(num_temp_points);
+    double log_min = std::log10(1.0), log_max = std::log10(1000.0);
+    for (int i = 0; i < num_temp_points; ++i) {
+        measure_inv_temp[i] = std::pow(10.0, log_min + i * (log_max - log_min) / (num_temp_points - 1));
+    }
+
+    int max_steps = std::max(1, int(std::ceil(beta_max / delta_beta)));
+
+    CudaContext localCtx;
+    CudaContext& ctx = pCtx ? *pCtx : localCtx;
+
+    for (int sample = 0; sample < num_samples; ++sample) {
+        std::vector<bool> temp_measured(num_temp_points, false);
+        std::cout << "Canonical TPQ (CUDA) sample " << sample + 1 << " of " << num_samples << std::endl;
+
+        auto [ss_file, norm_file, flct_file, spin_corr] = initializeTPQFiles(dir, sample, sublattice_size);
+
+        // Host random state -> device
+        unsigned int seed = static_cast<unsigned int>(time(NULL)) + sample;
+        ComplexVector h_state = generateTPQVector(N, seed);
+        DeviceVector d_state(N);
+        copyHostToDevice(d_state, h_state.data(), N);
+
+        // Step 1: β=0
+        {
+            auto [e0, var0] = calculateEnergyAndVariance_cuda(H_dev, d_state, N, ctx);
+            double inv_temp = 0.0;
+            writeTPQData(ss_file, inv_temp, e0, var0, 1.0, 1);
+            std::ofstream norm_out(norm_file, std::ios::app);
+            norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << 1 << std::endl;
+        }
+
+        int step = 2;
+        double beta = 0.0;
+        for (int k = 1; k <= max_steps; ++k, ++step) {
+            beta += delta_beta;
+            if (beta > beta_max + 1e-15) { beta = beta_max; }
+
+            imaginary_time_evolve_tpq_taylor_cuda(H_dev, d_state, N, delta_beta, taylor_order, ctx, /*normalize=*/true);
+
+            auto [e, var] = calculateEnergyAndVariance_cuda(H_dev, d_state, N, ctx);
+            double inv_temp = beta;
+
+            writeTPQData(ss_file, inv_temp, e, var, 1.0, step);
+            {
+                std::ofstream norm_out(norm_file, std::ios::app);
+                norm_out << std::setprecision(16) << inv_temp << " " << 1.0 << " " << 1.0 << " " << step << std::endl;
+            }
+
+            if (measure_sz && (k % std::max(1, temp_interval) == 0 || k == max_steps)) {
+                ComplexVector h_v(N);
+                copyDeviceToHost(h_v.data(), d_state, N);
+                writeFluctuationData(flct_file, spin_corr, inv_temp, h_v,
+                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+            }
+
+            for (int i = 0; i < num_temp_points; ++i) {
+                if (!temp_measured[i] && std::abs(inv_temp - measure_inv_temp[i]) < 4e-3) {
+                    if (compute_observables) {
+                        ComplexVector h_v(N);
+                        copyDeviceToHost(h_v.data(), d_state, N);
+                        std::string state_file = dir + "/tpq_state_" + std::to_string(sample)
+                                               + "_beta=" + std::to_string(inv_temp) + ".dat";
+                        save_tpq_state(h_v, state_file);
+                    }
+                    temp_measured[i] = true;
+                }
+            }
+
+            if (k % std::max(1, max_steps / 10) == 0 || k == max_steps) {
+                std::cout << "  [CUDA] β = " << beta << " (" << k << "/" << max_steps << "), E = " << e << std::endl;
+            }
+        }
+
+        auto [ef, _varf] = calculateEnergyAndVariance_cuda(H_dev, d_state, N, ctx);
+        energies.push_back(ef);
+    }
+}
+
+// Unified CPU/CUDA entry for canonical TPQ
+inline void canonical_tpq_unified(
+    std::function<void(const Complex*, Complex*, int)> H,
+    int N,
+    double beta_max,
+    int num_samples,
+    int temp_interval,
+    std::vector<double>& energies,
+    std::string dir = "",
+    double delta_beta = 0.1,
+    int taylor_order = 50,
+    bool compute_observables = false,
+    std::vector<Operator> observables = {},
+    std::vector<std::string> observable_names = {},
+    double omega_min = -20.0,
+    double omega_max = 20.0,
+    int num_points = 10000,
+    double t_end = 50.0,
+    double dt = 0.01,
+    float spin_length = 0.5,
+    bool measure_sz = false,
+    int sublattice_size = 1,
+    bool use_cuda = false
+){
+    if (!use_cuda) {
+        canonical_tpq(H, N, beta_max, num_samples, temp_interval, energies, dir,
+                      delta_beta, taylor_order, compute_observables, observables, observable_names,
+                      omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size, /*num_sites=*/int(std::log2(N)));
+        return;
+    }
+
+    try {
+        CudaContext ctx;
+        GpuMatvec H_dev = wrap_host_matvec(H);
+        canonical_tpq_cuda(H_dev, N, beta_max, num_samples, temp_interval, energies, dir,
+                           delta_beta, taylor_order, compute_observables, observables, observable_names,
+                           omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size, &ctx);
+    } catch (const std::exception& e) {
+        std::cerr << "CUDA canonical TPQ failed (" << e.what() << "), falling back to CPU." << std::endl;
+        canonical_tpq(H, N, beta_max, num_samples, temp_interval, energies, dir,
+                      delta_beta, taylor_order, compute_observables, observables, observable_names,
+                      omega_min, omega_max, num_points, t_end, dt, spin_length, measure_sz, sublattice_size, /*num_sites=*/int(std::log2(N)));
+    }
 }
 
 // CUDA-optimized microcanonical TPQ main loop operating in device memory.
@@ -2337,6 +2677,7 @@ inline void microcanonical_tpq_unified(
     }
 }
 #endif // WITH_CUDA
+
 
 
 #endif // TPQ_H
