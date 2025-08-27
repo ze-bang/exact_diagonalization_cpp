@@ -1026,7 +1026,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             // Modify diagonalization parameters for the block
             EDParameters block_params = params;
             block_params.num_eigenvalues = std::min(10, block_dim);
-            block_params.max_iterations = 1000;
+            block_params.max_iterations = block_params.num_eigenvalues * 4 + 20;
             block_params.compute_eigenvectors = false;
             block_params.calc_observables = false;
             block_params.measure_spin = false;
@@ -1295,11 +1295,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                     std::string transformed_file = params.output_dir + "/eigenvector_block" + 
                                                 std::to_string(block_idx) + "_" + 
                                                 std::to_string(eigen_idx) + ".dat";
-                    std::ofstream out_file(transformed_file);
-                    if (!out_file.is_open()) {
-                        std::cerr << "Warning: Could not open file for transformed eigenvector: " << transformed_file << std::endl;
-                        continue;
-                    }
 
                     std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
                     std::cerr << "[DEBUG] Transforming eigenvector to full dim=" << (1ULL<<params.num_sites) << std::endl;
@@ -1318,17 +1313,7 @@ EDResults exact_diagonalization_from_directory_symmetrized(
                         std::cerr << "Warning: Transformed eigenvector has near-zero norm!" << std::endl;
                     }
                     
-                    out_file << transformed_eigenvector.size() << std::endl;
-                    // Write the transformed eigenvector to file
-                    for (size_t i = 0; i < transformed_eigenvector.size(); ++i) {
-                        // Write only non-zero entries
-                        if (std::abs(transformed_eigenvector[i]) < 1e-10) continue;
-                        out_file << i << " " << transformed_eigenvector[i].real() << " " 
-                                << transformed_eigenvector[i].imag() << std::endl;
-                    }
-                    out_file << std::endl;
-
-                    out_file.close();
+                    save_tpq_state(transformed_eigenvector, transformed_file);
                 }
             }
         
