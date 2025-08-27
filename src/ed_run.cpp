@@ -46,23 +46,23 @@ int main(int argc, char* argv[]) {
         std::cout << "  --dt=<value>           : Time step for time evolution" << std::endl;
         std::cout << "  --help                : Show this help message" << std::endl;
         std::cout << "  --sublattice_size=<value> : Size of the sublattice" << std::endl;
-    std::cout << "  ARPACK advanced options (when --method=ARPACK_ADVANCED):" << std::endl;
-    std::cout << "    --arpack-which=<SM|LM|SR|LR|...>         (default SM)" << std::endl;
-    std::cout << "    --arpack-ncv=<n>                         (subspace dim override)" << std::endl;
-    std::cout << "    --arpack-max-restarts=<n>                (default 2)" << std::endl;
-    std::cout << "    --arpack-ncv-growth=<factor>             (default 1.5)" << std::endl;
-    std::cout << "    --arpack-no-auto-enlarge-ncv             (disable auto enlarge ncv)" << std::endl;
-    std::cout << "    --arpack-no-two-phase                    (disable relaxed then refine)" << std::endl;
-    std::cout << "    --arpack-relaxed-tol=<val>               (first pass tol, default 1e-6)" << std::endl;
-    std::cout << "    --arpack-shift-invert                    (start in shift-invert mode)" << std::endl;
-    std::cout << "    --arpack-sigma=<val>                     (initial sigma)" << std::endl;
-    std::cout << "    --arpack-no-auto-switch-si               (disable auto switch to shift-invert)" << std::endl;
-    std::cout << "    --arpack-switch-sigma=<val>              (sigma for switch)" << std::endl;
-    std::cout << "    --arpack-no-adaptive-inner-tol           (disable adaptive inner tolerance)" << std::endl;
-    std::cout << "    --arpack-inner-tol-factor=<val>          (default 1e-2)" << std::endl;
-    std::cout << "    --arpack-inner-tol-min=<val>             (default 1e-14)" << std::endl;
-    std::cout << "    --arpack-inner-max-iter=<n>              (default 300)" << std::endl;
-    std::cout << "    --arpack-verbose                         (verbose escalation logging)" << std::endl;
+        std::cout << "  ARPACK advanced options (when --method=ARPACK_ADVANCED):" << std::endl;
+        std::cout << "    --arpack-which=<SM|LM|SR|LR|...>         (default SM)" << std::endl;
+        std::cout << "    --arpack-ncv=<n>                         (subspace dim override)" << std::endl;
+        std::cout << "    --arpack-max-restarts=<n>                (default 2)" << std::endl;
+        std::cout << "    --arpack-ncv-growth=<factor>             (default 1.5)" << std::endl;
+        std::cout << "    --arpack-no-auto-enlarge-ncv             (disable auto enlarge ncv)" << std::endl;
+        std::cout << "    --arpack-no-two-phase                    (disable relaxed then refine)" << std::endl;
+        std::cout << "    --arpack-relaxed-tol=<val>               (first pass tol, default 1e-6)" << std::endl;
+        std::cout << "    --arpack-shift-invert                    (start in shift-invert mode)" << std::endl;
+        std::cout << "    --arpack-sigma=<val>                     (initial sigma)" << std::endl;
+        std::cout << "    --arpack-no-auto-switch-si               (disable auto switch to shift-invert)" << std::endl;
+        std::cout << "    --arpack-switch-sigma=<val>              (sigma for switch)" << std::endl;
+        std::cout << "    --arpack-no-adaptive-inner-tol           (disable adaptive inner tolerance)" << std::endl;
+        std::cout << "    --arpack-inner-tol-factor=<val>          (default 1e-2)" << std::endl;
+        std::cout << "    --arpack-inner-tol-min=<val>             (default 1e-14)" << std::endl;
+        std::cout << "    --arpack-inner-max-iter=<n>              (default 300)" << std::endl;
+        std::cout << "    --arpack-verbose                         (verbose escalation logging)" << std::endl;
         return 0;
     }
 
@@ -369,9 +369,11 @@ int main(int argc, char* argv[]) {
     
     // Run standard diagonalization
     if (run_standard) {
-        std::cout << "==========================================" << std::endl;
+    std::cout << "==========================================" << std::endl;
         std::cout << "Starting Standard Exact Diagonalization" << std::endl;
         std::cout << "==========================================" << std::endl;
+    std::cerr << "[DEBUG] run_standard: num_sites=" << params.num_sites << ", spin_length=" << params.spin_length
+          << ", method=" << static_cast<int>(method) << std::endl;
         std::cout << "Method: ";
         switch (method) {
             case DiagonalizationMethod::LANCZOS: std::cout << "Lanczos"; break;
@@ -383,6 +385,16 @@ int main(int argc, char* argv[]) {
             default: std::cout << "Other"; break;
         }
         std::cout << std::endl;
+
+        if (method == DiagonalizationMethod::cTPQ) {
+            std::cout << "cTPQ settings: num_samples=" << params.num_samples
+                      << ", num_order=" << params.num_order
+                      << ", delta_tau=" << params.delta_tau
+                      << ", measure_freq=" << params.num_measure_freq
+                      << ", spin_length=" << params.spin_length
+                      << ", sublattice_size=" << params.sublattice_size
+                      << std::endl;
+        }
         
         auto start_time = std::chrono::high_resolution_clock::now();
         
@@ -682,6 +694,8 @@ int main(int argc, char* argv[]) {
         }
         catch (const std::exception& e) {
             std::cerr << "Error in standard ED: " << e.what() << std::endl;
+            std::cerr << "[DEBUG] Exception during standard ED with num_sites=" << params.num_sites
+                      << ", method=" << static_cast<int>(method) << ", output_dir=" << standard_output << std::endl;
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();
@@ -1094,17 +1108,6 @@ int main(int argc, char* argv[]) {
                     i+1
                 );
             }
-
-
-
-            // compute_spin_expectations(
-            //     directory + "/output",
-            //     obs_output_dir,
-            //     params.num_sites,
-            //     params.spin_length,
-            //     0.0,
-            //     true  // print output
-            // );
         }
 
         auto end_time = std::chrono::high_resolution_clock::now();

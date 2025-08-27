@@ -57,14 +57,13 @@ def run_nlce_for_order(order, args):
         f'--method={args.method}',
         f'--temp_min={args.temp_min}',
         f'--temp_max={args.temp_max}',
-        f'--temp_bins={args.temp_bins}'
+        f'--temp_bins={args.temp_bins}',
+        '--symmetrized'
     ]
     
     # Add optional arguments
     if args.thermo:
         cmd.append('--thermo')
-    if args.euler_resum:
-        cmd.append('--euler_resum')
     if args.parallel:
         cmd.append('--parallel')
     if args.num_cores:
@@ -294,9 +293,6 @@ def main():
     parser.add_argument('--temp_min', type=float, default=0.001, help='Minimum temperature')
     parser.add_argument('--temp_max', type=float, default=20.0, help='Maximum temperature')
     parser.add_argument('--temp_bins', type=int, default=100, help='Number of temperature bins')
-    
-    # NLCE parameters (same as nlce.py)
-    parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation for NLCE')
     
     # Control flow
     parser.add_argument('--skip_calculations', action='store_true', 

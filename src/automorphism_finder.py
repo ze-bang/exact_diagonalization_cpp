@@ -1,3 +1,4 @@
+# filepath: /home/pc_linux/exact_diagonalization_cpp/src/automorphism_finder.py
 import numpy as np
 from pynauty import Graph, autgrp
 from collections import defaultdict
@@ -53,73 +54,108 @@ def read_interall_file(filename):
                     })
     return edges
 
-def compute_vertex_colors(vertex_weights, edges):
-    """Compute vertex colors based on local environment."""
-    # Create adjacency list with edge weights
-    adj_list = defaultdict(list)
+def _round_tuple(t, decimals=8):
+    """Round all floats in a tuple to given decimals."""
+    return tuple(round(x, decimals) for x in t)
+
+def _edge_label(edge, decimals=8):
+    """Create a stable, undirected edge label from edge record."""
+    # Ensure the edge label is independent of direction
+    t1, t2 = edge['type1'], edge['type2']
+    w = _round_tuple(edge['weight'], decimals)
+    tmin, tmax = (t1, t2) if t1 <= t2 else (t2, t1)
+    return (tmin, tmax, w)
+
+def compute_vertex_colors(vertex_weights, edges, decimals=8, wl_iterations=5):
+    """Compute vertex colors using Weisfeiler-Lehman refinement with edge/vertex labels."""
+    # Collect all vertices that appear in either Trans.dat or edges
+    vertex_ids = set(vertex_weights.keys())
+    for e in edges:
+        vertex_ids.add(e['vertex1'])
+        vertex_ids.add(e['vertex2'])
+    vertex_ids = sorted(vertex_ids)
+
+    # Build adjacency with edge labels (preserve multiplicity)
+    adj_list = {v: [] for v in vertex_ids}
     for edge in edges:
         v1, v2 = edge['vertex1'], edge['vertex2']
-        weight = edge['weight']
-        adj_list[v1].append((v2, weight))
-        adj_list[v2].append((v1, weight))
-    
-    # Compute color for each vertex based on its local environment
-    vertex_environments = {}
-    for vertex in vertex_weights:
-        # Get vertex's own properties
-        own_props = vertex_weights[vertex]
-        
-        # Get properties of neighbors
-        neighbor_props = []
-        for neighbor, edge_weight in sorted(adj_list[vertex]):
-            if neighbor in vertex_weights:
-                neighbor_props.append((vertex_weights[neighbor], edge_weight))
-        
-        # Create a hashable representation of the local environment
-        env = (own_props, tuple(sorted(neighbor_props)))
-        vertex_environments[vertex] = env
-    
-    # Assign colors to unique environments
-    unique_envs = list(set(vertex_environments.values()))
-    env_to_color = {env: i for i, env in enumerate(unique_envs)}
-    
-    vertex_colors = {}
-    for vertex, env in vertex_environments.items():
-        vertex_colors[vertex] = env_to_color[env]
-    
+        elabel = _edge_label(edge, decimals=decimals)
+        if v1 != v2:
+            adj_list[v1].append((v2, elabel))
+            adj_list[v2].append((v1, elabel))
+
+    # Initial vertex labels (rounded to avoid floating noise)
+    init_label = {}
+    for v in vertex_ids:
+        vtype, wre, wim = vertex_weights.get(v, (0, 0.0, 0.0))
+        init_label[v] = ('v', int(vtype), round(wre, decimals), round(wim, decimals))
+
+    # WL refinement
+    # colors[v] is an integer color id; token[v] is a structural token used to assign ids deterministically
+    token = {v: init_label[v] for v in vertex_ids}
+    colors = {}
+    for it in range(wl_iterations):
+        # Assign integer colors deterministically by sorting unique tokens
+        unique_tokens = sorted(set(token.values()))
+        token_to_id = {tok: i for i, tok in enumerate(unique_tokens)}
+        colors_new = {v: token_to_id[token[v]] for v in vertex_ids}
+
+        # Build next iteration tokens
+        next_token = {}
+        for v in vertex_ids:
+            # multiset of neighbor (edge_label, neighbor_color)
+            neigh = [(lbl, colors_new.get(u, -1)) for (u, lbl) in adj_list[v]]
+            neigh.sort()
+            next_token[v] = (colors_new[v], tuple(neigh))
+
+        # Check stabilization
+        if all(token[v] == next_token[v] for v in vertex_ids):
+            colors = colors_new
+            break
+
+        token = next_token
+        colors = colors_new
+
+    # Final deterministic color compaction
+    unique_final = sorted(set(colors.values()))
+    final_map = {c: i for i, c in enumerate(unique_final)}
+    vertex_colors = {v: final_map[colors[v]] for v in vertex_ids}
     return vertex_colors
 
 def construct_colored_graph(vertex_weights, edges):
-    """Construct a colored undirected graph for pynauty."""
-    # Get vertex colors
+    """Construct a colored undirected graph for pynauty with robust vertex indexing."""
+    # Compute WL-refined vertex colors
     vertex_colors = compute_vertex_colors(vertex_weights, edges)
-    
-    # Find the number of vertices
-    num_vertices = len(vertex_weights)
-    
-    # Create adjacency dictionary
-    adjacency_dict = defaultdict(set)
+
+    # Build stable vertex index mapping 0..n-1
+    all_vertices = sorted(vertex_colors.keys())
+    vid_to_idx = {v: i for i, v in enumerate(all_vertices)}
+    n = len(all_vertices)
+
+    # Build adjacency dictionary in terms of contiguous indices
+    adjacency_dict = {i: [] for i in range(n)}
     for edge in edges:
         v1, v2 = edge['vertex1'], edge['vertex2']
-        if v1 != v2:  # Avoid self-loops
-            adjacency_dict[v1].add(v2)
-            adjacency_dict[v2].add(v1)
-    
-    # Convert to pynauty format
-    adjacency_dict = {v: list(neighbors) for v, neighbors in adjacency_dict.items()}
-    
-    # Create coloring list
-    coloring = []
+        if v1 == v2:
+            continue
+        if v1 not in vid_to_idx or v2 not in vid_to_idx:
+            continue
+        i, j = vid_to_idx[v1], vid_to_idx[v2]
+        # Avoid parallel edges at nauty level; WL already encoded multiplicity/labels into vertex colors
+        if j not in adjacency_dict[i]:
+            adjacency_dict[i].append(j)
+        if i not in adjacency_dict[j]:
+            adjacency_dict[j].append(i)
+
+    # Create vertex coloring as list of sets of indices
     color_to_vertices = defaultdict(list)
-    for vertex, color in vertex_colors.items():
-        color_to_vertices[color].append(vertex)
-    
-    for color in sorted(color_to_vertices.keys()):
-        coloring.append(set(color_to_vertices[color]))
-    
-    # Create pynauty graph
-    g = Graph(num_vertices, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
-    
+    for v, c in vertex_colors.items():
+        color_to_vertices[c].append(vid_to_idx[v])
+
+    coloring = [set(sorted(ids)) for _, ids in sorted(color_to_vertices.items(), key=lambda kv: kv[0])]
+
+    # Create pynauty graph (ensure keys are 0..n-1)
+    g = Graph(n, directed=False, adjacency_dict=adjacency_dict, vertex_coloring=coloring)
     return g, vertex_colors
 
 
@@ -263,33 +299,36 @@ class AutomorphismFinder:
         """Initialize the finder"""
         pass
     
-    def generate_all_automorphisms(self, generators):
+    def generate_all_automorphisms(self, generators, n):
         """Generate all automorphisms from the given generators"""
         if not generators:
-            return [list(range(len(generators[0]) if generators else 0))]
+            return [list(range(n))]
         
-        n = len(generators[0])
         identity = list(range(n))
         
         # Start with identity and generators
         automorphisms = [identity]
         automorphisms.extend([list(gen) for gen in generators])
         
-        # Generate all possible combinations
+        # Generate all possible combinations (closure under composition)
         queue = list(automorphisms)
         seen = {tuple(perm) for perm in automorphisms}
         
         while queue:
             perm1 = queue.pop(0)
-            
             for gen in generators:
-                # Compose perm1 with generator
-                new_perm = [perm1[gen[i]] for i in range(n)]
+                # Compose perm1 with generator and generator with perm1 for faster closure
+                new_perm1 = [perm1[gen[i]] for i in range(n)]  # perm1 ∘ gen
+                if tuple(new_perm1) not in seen:
+                    seen.add(tuple(new_perm1))
+                    automorphisms.append(new_perm1)
+                    queue.append(new_perm1)
                 
-                if tuple(new_perm) not in seen:
-                    seen.add(tuple(new_perm))
-                    automorphisms.append(new_perm)
-                    queue.append(new_perm)
+                new_perm2 = [gen[perm1[i]] for i in range(n)]  # gen ∘ perm1
+                if tuple(new_perm2) not in seen:
+                    seen.add(tuple(new_perm2))
+                    automorphisms.append(new_perm2)
+                    queue.append(new_perm2)
         
         return automorphisms
     
@@ -451,7 +490,7 @@ def main():
     aut_group = autgrp(graph)
     
     # Print results
-    print("Number of vertices:", len(vertex_weights))
+    print("Number of vertices:", len(vertex_colors))
     print("Number of edges:", len(edges))
     print("\nVertex colors:")
     for vertex in sorted(vertex_colors.keys()):
@@ -467,7 +506,8 @@ def main():
     finder = AutomorphismFinder()
     automorphisms_file = os.path.join(output_dir, "automorphisms.json")
     # Generate all automorphisms from generators
-    all_automorphisms = finder.generate_all_automorphisms(aut_group[0])
+    n_vertices = len(vertex_colors)
+    all_automorphisms = finder.generate_all_automorphisms(aut_group[0], n_vertices)
     
     # Save all automorphisms to JSON
     finder.save_automorphisms_json(all_automorphisms, automorphisms_file)

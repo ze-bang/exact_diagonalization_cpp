@@ -2,9 +2,10 @@ import os
 import numpy as np
 import glob
 import re
-import argparse
 from collections import defaultdict
 from scipy.optimize import curve_fit
+from scipy.linalg import lstsq
+import argparse
 
 #!/usr/bin/env python3
 """
@@ -12,145 +13,7 @@ NLC (Numerical Linked Cluster Expansion) summation utility.
 Calculates thermodynamic properties of a lattice using cluster expansion.
 """
 
-try:  # Optional plotting dependency
-    import matplotlib.pyplot as plt
-except Exception:  # pragma: no cover - plotting not essential for core logic
-    plt = None
-
-# ================= Resummation Utilities ======================
-
-def _forward_differences(a):
-    """Compute successive forward differences until exhausted."""
-    diffs = []
-    current = list(a)
-    while current:
-        diffs.append(current[0])
-        if len(current) == 1:
-            break
-        current = [current[i] - current[i+1] for i in range(len(current)-1)]
-    return diffs
-
-def euler_alternating_sum(terms):
-    """Euler transform for an alternating series sum (-1)^n a_n with a_n>=0.
-    terms: list of original alternating series terms t_n (including sign).
-    Returns accelerated sum estimate.
-    """
-    if not terms:
-        return 0.0
-    # Extract a_n with sign pattern relative to first term
-    sign0 = np.sign(terms[0]) if terms[0] != 0 else 1
-    a = []
-    for n, t in enumerate(terms):
-        expected = sign0 * ((-1)**n)
-        if np.sign(t) == 0:
-            a.append(0.0)
-        elif np.sign(t) != expected:
-            # Not strictly alternating – abort to simple sum
-            return sum(terms)
-        a.append(abs(t))
-    diffs = _forward_differences(a)
-    # Euler transformed partial sum
-    s = 0.0
-    factor = 0.5
-    for k, d in enumerate(diffs):
-        s += factor * d
-        factor *= 0.5
-    return s * sign0  # restore leading sign convention
-
-def shanks_transform(last_three_partial):
-    """Apply single Shanks transform using last three partial sums S_{n-2}, S_{n-1}, S_n."""
-    if len(last_three_partial) < 3:
-        return last_three_partial[-1]
-    S2, S1, S0 = last_three_partial  # note ordering passed should be [S_{n-2}, S_{n-1}, S_n]
-    denom = S0 - 2*S1 + S2
-    if denom == 0:
-        return S0
-    return (S0*S2 - S1*S1) / denom
-
-def wynn_epsilon(partial_sums):
-    """Basic Wynn epsilon algorithm implementation.
-    Returns (accelerated_value, table) where table is list of lists.
-    """
-    S = list(partial_sums)
-    n = len(S)
-    # epsilon table stored as list of rows; eps[-1][k] corresponds to epsilon_{k}^{(n)}
-    eps = [[0.0]*(n+1)]  # row 0 (k=-1) zeros
-    eps.append(S + [0.0])  # row 1 (k=0) initial sequence
-    best = S[-1]
-    for m in range(2, 2*n+1):
-        row = [0.0]*(n+1)
-        for k in range(n - (m//2)):
-            a = eps[m-2][k+1]
-            b = eps[m-1][k]
-            if a == b:
-                row[k] = np.inf
-            else:
-                row[k] = b + 1.0/(a - b)
-        eps.append(row)
-        # Even m rows give improved estimates at element 0
-        if m % 2 == 0:
-            val = row[0]
-            if np.isfinite(val):
-                best = val
-    return best, eps
-
-def analyze_sequence(terms):
-    """Analyze order contribution sequence.
-    Returns dict with diagnostics: alt_fraction, monotone_fraction, last_rel_change.
-    """
-    if len(terms) < 2:
-        return {
-            'alt_fraction': 0.0,
-            'monotone_fraction': 1.0,
-            'last_rel_change': 0.0
-        }
-    signs = np.sign(terms)
-    sign_changes = sum(1 for i in range(1,len(signs)) if signs[i]*signs[i-1] < 0)
-    alt_fraction = sign_changes / (len(signs)-1)
-    mags = [abs(x) for x in terms]
-    monotone = sum(1 for i in range(1,len(mags)) if mags[i] <= mags[i-1]) / (len(mags)-1)
-    partial_sums = np.cumsum(terms)
-    last_rel_change = abs(partial_sums[-1]-partial_sums[-2])/(abs(partial_sums[-2])+1e-12) if len(partial_sums)>1 else 0.0
-    return {
-        'alt_fraction': alt_fraction,
-        'monotone_fraction': monotone,
-        'last_rel_change': last_rel_change
-    }
-
-def auto_resum_sequence(order_terms, absolute_tolerance=1e-8, relative_tolerance=1e-4):
-    """Apply heuristic to choose Euler, Wynn (Shanks), or none.
-    order_terms: list of per-order contributions (NOT partial sums).
-    Returns dict with keys: value, method, diagnostics
-    """
-    if not order_terms:
-        return {'value':0.0,'method':'none','diagnostics':{}}
-    diagnostics = analyze_sequence(order_terms)
-    terms = order_terms
-    partial = np.cumsum(terms)
-    # Convergence check
-    if len(partial) >= 2:
-        delta = abs(partial[-1]-partial[-2])
-        if delta < absolute_tolerance or delta/(abs(partial[-2])+1e-12) < relative_tolerance:
-            return {'value': partial[-1], 'method':'none', 'diagnostics':diagnostics}
-    # Alternating & smooth decay? -> Euler
-    if diagnostics['alt_fraction'] > 0.6 and diagnostics['monotone_fraction'] > 0.7:
-        val = euler_alternating_sum(terms)
-        return {'value': val, 'method':'euler', 'diagnostics':diagnostics}
-    # Otherwise try Wynn / Shanks
-    if len(partial) >= 3:
-        shanks_val = shanks_transform(partial[-3:])
-    else:
-        shanks_val = partial[-1]
-    wynn_val, _ = wynn_epsilon(partial)
-    # Choose stabilized accelerated value if reasonable
-    candidates = []
-    if np.isfinite(wynn_val):
-        candidates.append(('wynn', wynn_val, abs(wynn_val-partial[-1])))
-    candidates.append(('shanks', shanks_val, abs(shanks_val-partial[-1])))
-    # Pick candidate with minimal deviation but some improvement (delta reduction)
-    candidates.sort(key=lambda x: x[2])
-    method, val, _ = candidates[0]
-    return {'value': val, 'method': method, 'diagnostics': diagnostics}
+import matplotlib.pyplot as plt
 
 class NLCExpansion:
     def __init__(self, cluster_dir, eigenvalue_dir, temp_min, temp_max, num_temps, measure_spin, SI_units=False):
@@ -173,8 +36,7 @@ class NLCExpansion:
 
         self.clusters = {}  # Will store {cluster_id: {order, multiplicity, eigenvalues, etc.}}
         self.weights = {}   # Will store calculated weights for each cluster and property
-        self.resum_diagnostics = {}
-
+        
     def read_clusters(self):
         """Read all cluster information from files in the cluster directory."""
         pattern = os.path.join(self.cluster_dir, "cluster_*_order_*.dat")
@@ -296,7 +158,6 @@ class NLCExpansion:
             # S = kB * [ln(Z) + βE]
             # where ln(Z) = ln(Z_shifted) + β*ground_state_energy
             entropy = (np.log(Z_shifted) + (energy - ground_state_energy) / (temp))
-
             if self.SI:
                 specific_heat *= (6.02214076e23  * 1.380649e-23)  # Convert to SI units (J/K)
                 entropy *= (6.02214076e23 * 1.380649e-23)
@@ -537,58 +398,392 @@ class NLCExpansion:
 
 
 
-    def sum_nlc(self, euler_resum=False, order_cutoff=None, auto_resum=False):
-        """Perform the NLC summation with optional Euler or automatic (Euler/Wynn/none) resummation.
-
-        The internal weight storage uses a property-first mapping: self.weights[prop][cluster_id] = weight_array.
-        This function reorganizes weights per order, then (optionally) applies a resummation heuristic
-        independently at each temperature.
+    def euler_resummation(self, partial_sums):
         """
-        # Initialize results container with zeros
-        props = ['energy', 'specific_heat', 'entropy'] + (['sp', 'sm', 'sz'] if self.measure_spin else [])
-        results = {p: np.zeros_like(self.temp_values) for p in props}
+        Apply Euler transformation for series acceleration.
+        
+        Args:
+            partial_sums: Array of partial sums S_n = sum_{k=0}^n a_k
+            
+        Returns:
+            Accelerated series approximation
+        """
+        n = len(partial_sums)
+        if n < 2:
+            return partial_sums[-1] if n > 0 else 0.0
+            
+        # Create difference table
+        diff_table = np.zeros((n, partial_sums.shape[1]) if len(partial_sums.shape) > 1 else (n,))
+        diff_table[0] = partial_sums[0]
+        
+        for i in range(1, n):
+            diff_table[i] = partial_sums[i] - partial_sums[i-1]
+            
+        # Apply Euler transformation: E_n = (1/2^n) * sum_{k=0}^n C(n,k) * S_k
+        euler_sum = np.zeros_like(partial_sums[-1])
+        
+        for k in range(n):
+            # Binomial coefficient C(n-1, k)
+            binomial_coeff = 1
+            for j in range(k):
+                binomial_coeff = binomial_coeff * (n - 1 - j) // (j + 1)
+            
+            euler_sum += binomial_coeff * diff_table[k]
+            
+        return euler_sum / (2**(n-1))
+    
+    def wynn_epsilon(self, sequence):
+        """
+        Apply Wynn's epsilon algorithm for series acceleration.
+        
+        Args:
+            sequence: Array of partial sums or sequence values
+            
+        Returns:
+            Accelerated approximation using epsilon algorithm
+        """
+        n = len(sequence)
+        if n < 3:
+            return sequence[-1] if n > 0 else 0.0
+            
+        # Initialize epsilon table
+        if len(sequence.shape) > 1:
+            eps = np.zeros((n + 1, n + 1, sequence.shape[1]))
+        else:
+            eps = np.zeros((n + 1, n + 1))
+            
+        # Set initial values
+        eps[0, :] = 0.0
+        for i in range(n):
+            eps[1, i] = sequence[i]
+            
+        # Fill epsilon table
+        for k in range(2, n + 1):
+            for i in range(n - k + 1):
+                denominator = eps[k-1, i+1] - eps[k-1, i]
+                # Avoid division by zero
+                if np.any(np.abs(denominator) < 1e-15):
+                    eps[k, i] = eps[k-1, i+1]
+                else:
+                    eps[k, i] = eps[k-2, i+1] + 1.0 / denominator
+                    
+        # Return the most accelerated value (highest even k)
+        max_even_k = 2 * ((n) // 2)
+        if max_even_k > 0:
+            return eps[max_even_k, 0]
+        else:
+            return sequence[-1]
+    
+    def pade_approximant(self, coefficients, m=None, n=None):
+        """
+        Construct Padé approximant [m/n] from series coefficients.
+        
+        Args:
+            coefficients: Series coefficients a_k
+            m: Degree of numerator (default: len(coeffs)//2)
+            n: Degree of denominator (default: len(coeffs)//2)
+            
+        Returns:
+            Function representing the Padé approximant
+        """
+        L = len(coefficients)
+        if m is None:
+            m = L // 2
+        if n is None:
+            n = L - m - 1
+            
+        if m + n + 1 > L:
+            m = L // 2
+            n = L - m - 1
+            
+        # Set up linear system for denominator coefficients
+        # c_k + sum_{j=1}^n b_j * c_{k-j} = 0 for k = m+1, ..., m+n
+        if n > 0:
+            A = np.zeros((n, n))
+            b_vec = np.zeros(n)
+            
+            for i in range(n):
+                k = m + 1 + i
+                if k < L:
+                    b_vec[i] = -coefficients[k]
+                    for j in range(n):
+                        if k - 1 - j >= 0 and k - 1 - j < L:
+                            A[i, j] = coefficients[k - 1 - j]
+                            
+            # Solve for denominator coefficients
+            try:
+                q_coeffs = np.linalg.solve(A, b_vec)
+                q_coeffs = np.concatenate([[1.0], q_coeffs])
+            except np.linalg.LinAlgError:
+                q_coeffs = np.array([1.0])
+                n = 0
+        else:
+            q_coeffs = np.array([1.0])
+            
+        # Calculate numerator coefficients
+        p_coeffs = np.zeros(m + 1)
+        for k in range(min(m + 1, L)):
+            p_coeffs[k] = coefficients[k]
+            for j in range(1, min(k + 1, len(q_coeffs))):
+                if k - j >= 0 and k - j < L:
+                    p_coeffs[k] += q_coeffs[j] * coefficients[k - j]
+                    
+        return p_coeffs, q_coeffs
+    
+    def evaluate_pade(self, p_coeffs, q_coeffs, x):
+        """Evaluate Padé approximant at point x."""
+        p_val = np.polyval(p_coeffs[::-1], x)
+        q_val = np.polyval(q_coeffs[::-1], x)
+        
+        # Avoid division by zero
+        mask = np.abs(q_val) > 1e-15
+        result = np.zeros_like(x)
+        result[mask] = p_val[mask] / q_val[mask]
+        result[~mask] = p_val[~mask]  # Use polynomial approximation when denominator is small
+        
+        return result
+    
+    def shanks_transform(self, sequence):
+        """
+        Apply Shanks transformation for series acceleration.
+        
+        Args:
+            sequence: Array of partial sums
+            
+        Returns:
+            Accelerated approximation
+        """
+        n = len(sequence)
+        if n < 3:
+            return sequence[-1] if n > 0 else 0.0
+            
+        # Shanks transformation: S' = (S_{n+1}*S_{n-1} - S_n^2) / (S_{n+1} - 2*S_n + S_{n-1})
+        s_prev = sequence[-3]
+        s_curr = sequence[-2] 
+        s_next = sequence[-1]
+        
+        denominator = s_next - 2*s_curr + s_prev
+        
+        # Avoid division by zero
+        if np.any(np.abs(denominator) < 1e-15):
+            return s_next
+        else:
+            return (s_next * s_prev - s_curr**2) / denominator
+    
+    def aitken_delta2(self, sequence):
+        """
+        Apply Aitken's Δ² method for series acceleration.
+        
+        Args:
+            sequence: Array of partial sums
+            
+        Returns:
+            Accelerated approximation
+        """
+        return self.shanks_transform(sequence)  # Aitken's Δ² is equivalent to Shanks
+    
+    def analyze_convergence(self, partial_sums):
+        """
+        Analyze convergence properties of the series.
+        
+        Args:
+            partial_sums: Array of partial sums
+            
+        Returns:
+            Dictionary with convergence metrics
+        """
+        n = len(partial_sums)
+        if n < 3:
+            return {'converged': False, 'oscillatory': False, 'ratio_test': None}
+            
+        # Calculate differences
+        diffs = np.diff(partial_sums, axis=0)
+        
+        # Check for convergence (differences getting smaller)
+        if n > 3:
+            recent_diffs = np.abs(diffs[-3:])
+            converged = np.all(recent_diffs[-1] <= recent_diffs[-2]) and np.all(recent_diffs[-2] <= recent_diffs[-3])
+        else:
+            converged = False
+            
+        # Check for oscillatory behavior
+        if n > 4:
+            signs = np.sign(diffs[-4:])
+            oscillatory = np.all(signs[1:] != signs[:-1])  # Alternating signs
+        else:
+            oscillatory = False
+            
+        # Ratio test for convergence
+        if n > 2:
+            ratios = np.abs(diffs[1:] / diffs[:-1])
+            avg_ratio = np.mean(ratios[-min(3, len(ratios)):])  # Average of last few ratios
+        else:
+            avg_ratio = None
+            
+        return {
+            'converged': converged,
+            'oscillatory': oscillatory, 
+            'ratio_test': avg_ratio
+        }
+    
+    def select_resummation_method(self, partial_sums):
+        """
+        Automatically select the best resummation method based on convergence analysis.
+        
+        Args:
+            partial_sums: Array of partial sums for analysis
+            
+        Returns:
+            String indicating the selected method
+        """
+        convergence = self.analyze_convergence(partial_sums)
+        n = len(partial_sums)
+        
+        # If already converged and not oscillatory, use direct sum
+        if convergence['converged'] and not convergence['oscillatory']:
+            return 'direct'
+            
+        # For oscillatory series, Euler works well
+        if convergence['oscillatory']:
+            return 'euler'
+            
+        # For small number of terms, use Shanks
+        if n <= 5:
+            return 'shanks'
 
-        for prop in props:
+        # For slowly converging series, try Wynn's epsilon
+        if convergence['ratio_test'] is not None and convergence['ratio_test'] > 0.5:
+            if n >= 5:  # Wynn needs at least 5 terms for stability
+                return 'wynn'
+            else:
+                return 'euler'
+                
+
+            
+        # Default to Wynn's epsilon for general case
+        return 'wynn'
+    
+    def apply_resummation(self, partial_sums, method='auto'):
+        """
+        Apply the specified resummation method.
+        
+        Args:
+            partial_sums: Array of partial sums
+            method: Resummation method ('auto', 'direct', 'euler', 'wynn', 'shanks', 'pade')
+            
+        Returns:
+            Accelerated series approximation
+        """
+        if len(partial_sums) == 0:
+            return np.zeros_like(self.temp_values)
+            
+        if method == 'auto':
+            method = self.select_resummation_method(partial_sums)
+            
+        print(f"Using resummation method: {method}")
+        
+        if method == 'direct':
+            return partial_sums[-1]
+        elif method == 'euler':
+            return self.euler_resummation(partial_sums)
+        elif method == 'wynn':
+            return self.wynn_epsilon(partial_sums)
+        elif method == 'shanks':
+            return self.shanks_transform(partial_sums)
+        elif method == 'aitken':
+            return self.aitken_delta2(partial_sums)
+        elif method == 'pade':
+            # For Padé, we need series coefficients, not partial sums
+            # Convert partial sums to coefficients
+            coeffs = np.diff(np.concatenate([[np.zeros_like(partial_sums[0])], partial_sums]), axis=0)
+            p_coeffs, q_coeffs = self.pade_approximant(coeffs)
+            # Evaluate at x=1 (summing the series)
+            return self.evaluate_pade(p_coeffs, q_coeffs, np.ones_like(self.temp_values))
+        else:
+            print(f"Unknown method {method}, using direct summation")
+            return partial_sums[-1]
+    
+    def sum_nlc(self, resummation_method='auto', order_cutoff=None):
+        """
+        Perform the NLC summation with automatic resummation method selection.
+        
+        Args:
+            resummation_method: Method for series acceleration ('auto', 'direct', 'euler', 'wynn', 'shanks', 'pade')
+            order_cutoff: Maximum order to include in the summation
+            
+        Returns:
+            Dictionary with summed properties
+        """
+
+        if self.measure_spin:
+            # Initialize results for spin expectation values
+            results = {
+                'energy': np.zeros_like(self.temp_values),
+                'specific_heat': np.zeros_like(self.temp_values),
+                'entropy': np.zeros_like(self.temp_values),
+                'sp': np.zeros_like(self.temp_values),
+                'sm': np.zeros_like(self.temp_values),
+                'sz': np.zeros_like(self.temp_values)
+            }
+            properties = ['energy', 'specific_heat', 'entropy', 'sp', 'sm', 'sz']
+        else:
+            results = {
+                'energy': np.zeros_like(self.temp_values),
+                'specific_heat': np.zeros_like(self.temp_values),
+                'entropy': np.zeros_like(self.temp_values)
+            }
+            properties = ['energy', 'specific_heat', 'entropy']
+    
+        # Calculate the NLC sum for each property
+        for prop in properties:
             if prop not in self.weights:
                 continue
-            # Map: order -> list of weight arrays (clusters of that order)
-            order_map = defaultdict(list)
-            for cid, warr in self.weights[prop].items():
-                order = self.clusters.get(cid, {}).get('order')
-                if order is None:
-                    continue
+                
+            print(f"Processing property: {prop}")
+            
+            # Sum by order
+            sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
+            
+            for cluster_id, weight in self.weights[prop].items():
+                order = self.clusters[cluster_id]['order']
                 if order_cutoff is not None and order > order_cutoff:
                     continue
-                order_map[order].append(np.array(warr))
-            if not order_map:
-                continue
-            # Aggregate contributions per order
-            order_sequences = []  # list of (order, contrib_array)
-            for o in sorted(order_map.keys()):
-                contrib = np.sum(order_map[o], axis=0)
-                order_sequences.append((o, contrib))
-            if not order_sequences:
-                continue
-            nT = len(self.temp_values)
-            out = np.zeros(nT)
-            diag_list = []
-            for ti in range(nT):
-                per_order_terms = [seq[1][ti] for seq in order_sequences]
-                if auto_resum:
-                    diag = auto_resum_sequence(per_order_terms)
-                    out[ti] = diag['value']
-                    diag['order_terms'] = per_order_terms
-                    diag_list.append(diag)
-                elif euler_resum:
-                    out[ti] = euler_alternating_sum(per_order_terms)
-                else:
-                    out[ti] = np.sum(per_order_terms)
-            results[prop] = out
-            if auto_resum:
-                self.resum_diagnostics[prop] = diag_list
+                    
+                sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
+            
+            # Create array of partial sums
+            if sum_by_order:
+                max_order = max(sum_by_order.keys())
+                partial_sums = []
+                cumulative_sum = np.zeros_like(self.temp_values)
+                
+                for order in range(max_order + 1):
+                    if order in sum_by_order:
+                        cumulative_sum += sum_by_order[order]
+                    partial_sums.append(cumulative_sum.copy())
+                
+                partial_sums = np.array(partial_sums)
+                
+                # Apply resummation
+                results[prop] = self.apply_resummation(partial_sums, method=resummation_method)
+            else:
+                print(f"Warning: No weights found for property {prop}")
+                results[prop] = np.zeros_like(self.temp_values)
+        
+        # Special handling for specific heat - can also compute as derivative of energy
+        if 'energy' in results:
+            # Calculate specific heat as derivative of energy
+            energy_derivative = -np.gradient(results['energy'], self.temp_values) / (self.temp_values**2)
+            
+            # Use the maximum of the two methods to avoid negative specific heat
+            if 'specific_heat' in results:
+                results['specific_heat'] = np.maximum(results['specific_heat'], energy_derivative)
+            else:
+                results['specific_heat'] = np.maximum(energy_derivative, 0.0)
+        
         return results
     
-    def run(self, euler_resum=False, order_cutoff=None, auto_resum=False):
+    def run(self, resummation_method='auto', order_cutoff=None):
         """Run the full NLC calculation."""
         print("Reading cluster information...")
         self.read_clusters()
@@ -600,9 +795,171 @@ class NLCExpansion:
         self.calculate_weights()
         
         print("Performing NLC summation...")
-        results = self.sum_nlc(euler_resum, order_cutoff, auto_resum=auto_resum)
-        
+        results = self.sum_nlc(resummation_method, order_cutoff)
+
         return results
+    
+    def compare_resummation_methods(self, order_cutoff=None, save_comparison=False):
+        """
+        Compare different resummation methods and provide diagnostic information.
+        
+        Args:
+            order_cutoff: Maximum order to include in summation
+            save_comparison: If True, save comparison plots and data
+            
+        Returns:
+            Dictionary with results from different methods and diagnostics
+        """
+        methods = ['direct', 'euler', 'wynn', 'shanks', 'aitken']
+        comparison_results = {}
+        
+        print("Comparing resummation methods...")
+        
+        # Get partial sums for analysis
+        prop = 'energy'  # Use energy as representative property
+        if prop not in self.weights:
+            print("No energy weights available for comparison")
+            return {}
+            
+        sum_by_order = defaultdict(lambda: np.zeros_like(self.temp_values))
+        
+        for cluster_id, weight in self.weights[prop].items():
+            order = self.clusters[cluster_id]['order']
+            if order_cutoff is not None and order > order_cutoff:
+                continue
+            sum_by_order[order] += weight * self.clusters[cluster_id]['multiplicity']
+        
+        if not sum_by_order:
+            print("No data available for comparison")
+            return {}
+            
+        # Create partial sums array
+        max_order = max(sum_by_order.keys())
+        partial_sums = []
+        cumulative_sum = np.zeros_like(self.temp_values)
+        
+        for order in range(max_order + 1):
+            if order in sum_by_order:
+                cumulative_sum += sum_by_order[order]
+            partial_sums.append(cumulative_sum.copy())
+        
+        partial_sums = np.array(partial_sums)
+        
+        # Analyze convergence
+        convergence_info = self.analyze_convergence(partial_sums)
+        comparison_results['convergence_analysis'] = convergence_info
+        
+        # Test each method
+        for method in methods:
+            try:
+                result = self.apply_resummation(partial_sums, method=method)
+                comparison_results[method] = {
+                    'result': result,
+                    'final_value_avg': np.mean(result),
+                    'final_value_std': np.std(result)
+                }
+                
+                # Calculate convergence metrics
+                if len(partial_sums) > 1:
+                    direct_result = partial_sums[-1]
+                    improvement = np.mean(np.abs(result - direct_result))
+                    comparison_results[method]['improvement_from_direct'] = improvement
+                    
+            except Exception as e:
+                print(f"Error with method {method}: {e}")
+                comparison_results[method] = {'error': str(e)}
+        
+        # Automatic selection
+        auto_method = self.select_resummation_method(partial_sums)
+        comparison_results['auto_selected'] = auto_method
+        
+        # Print summary
+        print("\nResummation Method Comparison:")
+        print("=" * 50)
+        print(f"Convergence Analysis:")
+        print(f"  Converged: {convergence_info['converged']}")
+        print(f"  Oscillatory: {convergence_info['oscillatory']}")
+        print(f"  Ratio test: {convergence_info['ratio_test']:.4f}" if convergence_info['ratio_test'] else "  Ratio test: N/A")
+        print(f"  Auto-selected method: {auto_method}")
+        print("\nMethod Results (average final values):")
+        
+        for method in methods:
+            if method in comparison_results and 'result' in comparison_results[method]:
+                avg_val = comparison_results[method]['final_value_avg']
+                print(f"  {method:10s}: {avg_val:.6e}")
+        
+        if save_comparison:
+            self._save_comparison_plots(comparison_results, partial_sums)
+            
+        return comparison_results
+    
+    def _save_comparison_plots(self, comparison_results, partial_sums):
+        """Save comparison plots for different resummation methods."""
+        try:
+            import matplotlib.pyplot as plt
+            
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+            
+            # Plot 1: Convergence of partial sums
+            orders = np.arange(len(partial_sums))
+            temp_mid = len(self.temp_values) // 2  # Use middle temperature for visualization
+            
+            ax1.plot(orders, partial_sums[:, temp_mid], 'bo-', label='Partial sums')
+            ax1.set_xlabel('Order')
+            ax1.set_ylabel('Energy (middle T)')
+            ax1.set_title('Convergence of Partial Sums')
+            ax1.legend()
+            ax1.grid(True)
+            
+            # Plot 2: Method comparison at middle temperature
+            methods = ['direct', 'euler', 'wynn', 'shanks', 'aitken']
+            values = []
+            labels = []
+            
+            for method in methods:
+                if method in comparison_results and 'result' in comparison_results[method]:
+                    values.append(comparison_results[method]['result'][temp_mid])
+                    labels.append(method)
+            
+            if values:
+                ax2.bar(labels, values)
+                ax2.set_ylabel('Energy (middle T)')
+                ax2.set_title('Method Comparison')
+                ax2.tick_params(axis='x', rotation=45)
+            
+            # Plot 3: Temperature dependence comparison
+            temp_range = self.temp_values
+            for method in methods:
+                if method in comparison_results and 'result' in comparison_results[method]:
+                    result = comparison_results[method]['result']
+                    ax3.plot(temp_range, result, label=method, alpha=0.7)
+            
+            ax3.set_xlabel('Temperature')
+            ax3.set_ylabel('Energy')
+            ax3.set_title('Temperature Dependence')
+            ax3.set_xscale('log')
+            ax3.legend()
+            ax3.grid(True)
+            
+            # Plot 4: Convergence analysis
+            if len(partial_sums) > 1:
+                diffs = np.abs(np.diff(partial_sums[:, temp_mid]))
+                ax4.semilogy(orders[1:], diffs, 'ro-')
+                ax4.set_xlabel('Order')
+                ax4.set_ylabel('|Difference|')
+                ax4.set_title('Convergence Rate')
+                ax4.grid(True)
+            
+            plt.tight_layout()
+            plt.savefig('resummation_comparison.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            print("Comparison plots saved to 'resummation_comparison.png'")
+            
+        except ImportError:
+            print("Matplotlib not available, skipping plots")
+        except Exception as e:
+            print(f"Error creating plots: {e}")
     
     def plot_results(self, results, save_path=None):
         """Plot energy and specific heat vs temperature."""
@@ -637,8 +994,10 @@ if __name__ == "__main__":
     parser.add_argument('--cluster_dir', required=True, help='Directory containing cluster information files')
     parser.add_argument('--eigenvalue_dir', required=True, help='Directory containing eigenvalue files from ED calculations')
     parser.add_argument('--output_dir', default='.', help='Directory to save output files')
-    parser.add_argument('--euler_resum', action='store_true', help='Force Euler resummation (overrides auto)')
-    parser.add_argument('--auto_resum', action='store_true', help='Automatically choose resummation (Euler/Wynn/none) per temperature')
+    parser.add_argument('--resummation_method', default='auto', 
+                       choices=['auto', 'direct', 'euler', 'wynn', 'shanks', 'aitken', 'pade'],
+                       help='Resummation method for series acceleration')
+    parser.add_argument('--euler_resum', action='store_true', help='Use Euler resummation (deprecated, use --resummation_method euler)')
     parser.add_argument('--order_cutoff', type=int, help='Maximum order to include in summation')
     parser.add_argument('--plot', action='store_true', help='Generate plot of results')
     parser.add_argument('--SI_units', action='store_true', help='Use SI units for output')
@@ -646,12 +1005,36 @@ if __name__ == "__main__":
     parser.add_argument('--temp_max', type=float, default=1.0, help='Maximum temperature for calculations')
     parser.add_argument('--temp_bins', type=int, default=200, help='Number of temperature points to calculate')
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin expectation values')
+    parser.add_argument('--compare_methods', action='store_true', help='Compare different resummation methods')
+    parser.add_argument('--save_comparison', action='store_true', help='Save comparison plots and data')
+    
     args = parser.parse_args()
+    
+    # Create output directory if it doesn't exist
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Create NLC instance
     nlc = NLCExpansion(args.cluster_dir, args.eigenvalue_dir, args.temp_min, args.temp_max, args.temp_bins, args.measure_spin, args.SI_units)
-    # Always run the full pipeline to ensure clusters/eigenvalues/weights are prepared,
-    # and pass through the auto_resum flag to control resummation behavior.
-    results = nlc.run(euler_resum=args.euler_resum, order_cutoff=args.order_cutoff, auto_resum=args.auto_resum)
+    
+    # Handle backward compatibility for euler_resum flag
+    resummation_method = args.resummation_method
+    if args.euler_resum and resummation_method == 'auto':
+        resummation_method = 'euler'
+        print("Note: --euler_resum flag is deprecated, use --resummation_method euler instead")
+    
+    # Run NLC calculation
+    results = nlc.run(resummation_method=resummation_method, order_cutoff=args.order_cutoff)
+    
+    # Compare methods if requested
+    if args.compare_methods:
+        print("\n" + "="*60)
+        print("COMPARING RESUMMATION METHODS")
+        print("="*60)
+        comparison = nlc.compare_resummation_methods(
+            order_cutoff=args.order_cutoff,
+            save_comparison=args.save_comparison
+        )
+    
     # Save results in separate files for each quantity
     energy_file = os.path.join(args.output_dir, "nlc_energy.txt")
     specific_heat_file = os.path.join(args.output_dir, "nlc_specific_heat.txt")
@@ -743,4 +1126,4 @@ if __name__ == "__main__":
             plt.close()
     
     print(f"NLC calculation completed! Results saved to {args.output_dir}")
-
+    

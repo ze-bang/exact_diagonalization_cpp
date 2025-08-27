@@ -8,6 +8,7 @@
 #include <regex>
 #include "construct_ham.h"
 #include "TPQ.h"
+#include "TPQ_MPI.h"
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -22,13 +23,14 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 8) {
+    if (argc < 6 || argc > 9) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end]" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps]" << std::endl;
             std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
             std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
+            std::cerr << "  method extended: krylov_mpi for distributed time evolution" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -42,7 +44,8 @@ int main(int argc, char* argv[]) {
     std::string method = (argc >= 7) ? std::string(argv[6]) : std::string("krylov");
     double dt_opt = 0.01;
     double t_end_opt = 50.0;
-    if (argc == 8) {
+    int steps_opt = -1; // optional
+    if (argc >= 8) {
         // Parse dt,t_end combined argument
         std::string dt_tend = argv[7];
         auto comma_pos = dt_tend.find(',');
@@ -56,6 +59,9 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+    }
+    if (argc == 9) {
+        try { steps_opt = std::stoi(argv[8]); } catch (...) { steps_opt = -1; }
     }
 
     // Parse spin combinations
@@ -149,13 +155,23 @@ int main(int argc, char* argv[]) {
         ham_op.apply(in, out, size);
     };
     
-    int N = 1 << num_sites;
+    // Use 64-bit to compute Hilbert space dimension and guard against int overflow
+    size_t N64 = 1ULL << num_sites;
+    if (N64 > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        if (rank == 0) {
+            std::cerr << "Error: 2^num_sites exceeds 32-bit int range (num_sites=" << num_sites
+                      << "). Refactor APIs to use size_t for N or reduce num_sites." << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    int N = static_cast<int>(N64);
     
     // Define momentum points
     const std::vector<std::vector<double>> momentum_points = {
         {0.0, 0.0, 0.0},
-        {0.0, 0.0, 4*M_PI},
-        {0.0, 0.0, 2*M_PI}
+        {M_PI, M_PI, 0},
+        {2*M_PI, 2*M_PI, 0}
     };
     
     // Create output directory (only rank 0)
@@ -280,6 +296,47 @@ int main(int argc, char* argv[]) {
                 spin_combinations,
                 spin_combination_names
             );
+        } else if (method == "krylov_mpi") {
+            // Distributed time evolution using MPI, evolving local segments cooperatively
+            int krylov_dim = krylov_dim_or_nmax;
+            if (rank == 0) {
+                std::cout << "Using distributed Krylov evolution (m=" << krylov_dim << ", dt=" << dt_opt << ")" << std::endl;
+            }
+            // Build local Hamiltonian adapter from existing H signature
+            auto H_local = [&, num_sites](const Complex* in_local, Complex* out_local, int local_size, int local_start, int total_sites) {
+                // Approximation: apply H on the local segment only. For production, add halo exchanges for off-rank couplings.
+                H(in_local, out_local, local_size);
+            };
+            // Create distributed state from dense tpq_state
+            DistributedComplexVector psi_dist(N, MPI_COMM_WORLD);
+            // Scatter contiguous slices into psi_dist
+            int world_size; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+            int world_rank; MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+            int base = N / world_size;
+            int rem = N % world_size;
+            int local_size = (world_rank < rem) ? (base + 1) : base;
+            int local_start = (world_rank < rem) ? (world_rank * (base + 1)) : (rem * (base + 1) + (world_rank - rem) * base);
+            for (int i = 0; i < local_size; ++i) {
+                psi_dist[i] = tpq_state[local_start + i];
+            }
+            psi_dist.normalize();
+            DistributedHamiltonian Hdist(H_local, num_sites, MPI_COMM_WORLD);
+            // Evolve for steps inferred from t_end/dt or explicit steps
+            int steps = steps_opt > 0 ? steps_opt : static_cast<int>(std::round(t_end_opt / dt_opt));
+            double t_accum = 0.0;
+            // Optionally create output dir for mpi
+            std::string mpi_dir = output_dir + "/krylov_mpi";
+            ensureDirectoryExists(mpi_dir);
+            for (int step_count = 0; step_count <= steps; ++step_count) {
+                if (step_count % std::max(1, steps/10) == 0 && world_rank == 0) {
+                    std::cout << "  [MPI] t=" << t_accum << " (" << step_count << "/" << steps << ")" << std::endl;
+                }
+                if (step_count < steps) {
+                    time_evolve_krylov_distributed(Hdist, psi_dist, krylov_dim, dt_opt, MPI_COMM_WORLD);
+                    t_accum += dt_opt;
+                }
+            }
+            // Optional: gather/save final state or compute distributed observables
         } else if (method == "taylor") {
             if (rank == 0) {
                 std::cout << "Using Taylor (create_time_evolution_operator) evolution (n_max=" << krylov_dim_or_nmax
@@ -289,19 +346,22 @@ int main(int argc, char* argv[]) {
             auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
 
             // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
-            // NOTE: computeObservableDynamics_U_t computes C_O(t)=<psi(t)|O^\u2020 O|psi(t)>; for non-Hermitian O this corresponds to specific ordering.
-            std::vector<Operator> observables;
+            std::vector<Operator> observables_1;
+            std::vector<Operator> observables_2;
             std::vector<std::string> observable_names;
             for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
                 const auto &Q = momentum_points[q_idx];
                 for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
                     int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
+                    int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
                     std::stringstream name_ss;
-                    name_ss << spin_combination_names[combo_idx] << "_q" << q_idx << "_op" << op_type_1;
+                    name_ss << spin_combination_names[combo_idx] << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
                     try {
                         SumOperator sum_op(num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
-                        observables.push_back(sum_op); // Slicing; acceptable since SumOperator derives from Operator
+                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
                         observable_names.push_back(name_ss.str());
+                        observables_1.push_back(std::move(sum_op));
+                        observables_2.push_back(std::move(sum_op_2));
                     } catch (const std::exception &e) {
                         if (rank == 0) {
                             std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
@@ -309,7 +369,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-            if (observables.empty()) {
+            if (observables_1.empty() && observables_2.empty()) {
                 if (rank == 0) {
                     std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
                 }
@@ -319,7 +379,8 @@ int main(int argc, char* argv[]) {
                 computeObservableDynamics_U_t(
                     U_t,
                     tpq_state,
-                    observables,
+                    observables_1,
+                    observables_2,
                     observable_names,
                     N,
                     taylor_dir,

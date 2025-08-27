@@ -9,9 +9,10 @@
 #include "observables.h"
 #include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
-
+#include <filesystem>
+#include <algorithm>
 // #include "TPQ_cuda.cuh"
-#include "lanczos_cuda.cuh"
+// #include "lanczos_cuda.cuh"
 
 std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
@@ -117,9 +118,9 @@ struct EDParameters {
     double temp_min = 1e-3;
     double temp_max = 20;
     int num_temp_bins = 100;
-    int num_order = 100; // order in which canonical ensemble is calculated
-    int num_measure_freq = 100; // frequency of measurements
-    int delta_tau = 1e-4; // time step for imaginary time evolution for cTPQ
+    int num_order = 100; // Order (steps) for canonical TPQ imaginary-time evolution
+    int num_measure_freq = 100; // Frequency of measurements
+    double delta_tau = 1e-2; // Time step for imaginary-time evolution (cTPQ)
     double large_value = 1e5; // Large value for TPQ
 
     mutable std::vector<Operator> observables = {}; // Observables to calculate for TPQ
@@ -365,16 +366,54 @@ EDResults exact_diagonalization_core(
 
 
             microcanonical_tpq(H, hilbert_space_dim,
-                             params.max_iterations, params.num_samples,
-                             params.num_measure_freq,
-                             results.eigenvalues,
-                             params.output_dir,
-                             params.compute_eigenvectors,
-                             params.large_value,
-                             params.calc_observables,params.observables, params.observable_names,
+                            params.max_iterations, params.num_samples,
+                            params.num_measure_freq,
+                            results.eigenvalues,
+                            params.output_dir,
+                            params.compute_eigenvectors,
+                            params.large_value,
+                            params.calc_observables,params.observables, params.observable_names,
                             params.omega_min, params.omega_max,
-                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size); 
+                            params.num_points, params.t_end, params.dt, params.spin_length, 
+                            params.measure_spin, params.sublattice_size, params.num_sites); 
             break;
+
+        case DiagonalizationMethod::cTPQ:
+            std::cout << "Using canonical TPQ method" << std::endl;
+
+            // Search for observable files and load them as operators
+            if (params.calc_observables) {
+                // If other parts of the code populate params.observables/observable_names, keep as-is
+                // otherwise, discovery/loading logic should reside where microcanonical TPQ does
+            }
+
+            // Invoke the canonical TPQ routine provided in TPQ.h
+            // Assumes signature analogous to microcanonical_tpq with (num_order, delta_tau)
+            canonical_tpq(
+                H,                      // Hamiltonian matvec
+                hilbert_space_dim,      // N
+                params.temp_max,        // beta_max (use configured max inverse temperature)
+                params.num_samples,     // num_samples
+                params.num_measure_freq,// temp_interval / measurement frequency
+                results.eigenvalues,    // energies output vector
+                params.output_dir,      // output dir
+                params.delta_tau,       // delta_beta (imaginary-time step)
+                params.num_order,       // taylor_order
+                params.calc_observables,// compute_observables
+                params.observables,     // observables
+                params.observable_names,// observable names
+                params.omega_min,       // omega_min
+                params.omega_max,       // omega_max
+                params.num_points,      // num_points
+                params.t_end,           // t_end
+                params.dt,              // dt
+                params.spin_length,     // spin length
+                params.measure_spin,    // measure Sz and fluctuations
+                params.sublattice_size, // sublattice size
+                params.num_sites        // number of sites
+            );
+            break;
+
 
         case DiagonalizationMethod::mTPQ_CUDA:
             std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
@@ -754,6 +793,8 @@ EDResults exact_diagonalization_from_files(
     // 1. Determine the number of sites and create the Hamiltonian
     int num_sites = params.num_sites;
     Operator hamiltonian(num_sites, params.spin_length);  // Initialize with dummy size, will update later
+    std::cerr << "[DEBUG] exact_diagonalization_from_files: format=STANDARD, num_sites=" << num_sites
+              << ", method=" << static_cast<int>(method) << std::endl;
     
     switch (format) {
         case HamiltonianFileFormat::STANDARD: {            
@@ -790,7 +831,8 @@ EDResults exact_diagonalization_from_files(
     }
     
     // 2. Calculate the Hilbert space dimension
-    int hilbert_space_dim = pow(2, num_sites);  // 2^num_sites
+    int hilbert_space_dim = static_cast<int>(1ULL << num_sites);  // 2^num_sites using 64-bit safe shift
+    std::cerr << "[DEBUG] exact_diagonalization_from_files: hilbert_space_dim=" << hilbert_space_dim << std::endl;
     // 3. Create a lambda function to apply the Hamiltonian
     auto apply_hamiltonian = [&hamiltonian](const Complex* in, Complex* out, int n) {
         // Convert raw pointers to vectors for the Operator::apply method
@@ -835,6 +877,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     const std::string& interaction_filename = "InterAll.dat",
     const std::string& single_site_filename = "Trans.dat"
 ) {
+    std::cerr << "[DEBUG] exact_diagonalization_from_directory_symmetrized: num_sites=" << params.num_sites
+              << ", method=" << static_cast<int>(method) << std::endl;
 
     // Check if automorphism results already exist
     std::string automorphism_file = directory + "/automorphism_results/automorphisms.json";
@@ -882,11 +926,6 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Load the terms from files
     hamiltonian.loadFromFile(single_site_file);
     hamiltonian.loadFromInterAllFile(interaction_file);
-
-
-    // if (method != DiagonalizationMethod::FULL){
-    //     hamiltonian.buildSparseMatrix();
-    // }
     
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";
@@ -899,15 +938,18 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     // Generate symmetrized basis if needed
     if (!sym_basis_exists) {
         std::cout << "Symmetrized basis not found. Generating..." << std::endl;
-        hamiltonian.generateSymmetrizedBasis(directory);
+    hamiltonian.generateSymmetrizedBasis(directory);
     } else {
         std::cout << "Using existing symmetrized basis from " << sym_basis_dir << std::endl;
     }
     std::vector<int> block_sizes;
 
     // Build and save symmetrized blocks if needed
-    // if (!sym_blocks_exists) {
-    hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+    if (!sym_blocks_exists) {
+        hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
+    }else{
+        hamiltonian.loadAllSymmetrizedBlocks(directory);
+    }
     // hamiltonian.printEntireSymmetrizedMatrix(directory);
     block_sizes = hamiltonian.symmetrized_block_ham_sizes;
     std::cout << "Found " << block_sizes.size() << " symmetrized blocks." << std::endl;
@@ -940,10 +982,78 @@ EDResults exact_diagonalization_from_directory_symmetrized(
     };
     std::vector<EigenInfo> all_eigen_info;
     
+    // We are are doing TPQ, we only need to perform TPQ at the sector containing the ground state. So
+    // Let us first perform a quick lanczos to find which has the lowest eigenvalues as well as estimate
+    // an appropriate large value.
+    double min_E_estimate = std::numeric_limits<double>::max();
+    double max_E_estimate = std::numeric_limits<double>::lowest();
+    int target_block = 0;
+
+    if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA || method == DiagonalizationMethod::cTPQ){
+        for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
+            int block_dim = block_sizes[block_idx];
+            std::cerr << "[DEBUG] Diagonalizing block " << block_idx << " dim=" << block_dim << std::endl;
+            
+            std::cout << "Diagonalizing block " << block_idx + 1 << "/" << block_sizes.size() 
+                    << " (dimension: " << block_dim << ")" << std::endl;
+            
+            // Load the block Hamiltonian from file
+            std::string block_file = directory + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
+            std::ifstream file(block_file);
+            if (!file.is_open()) {
+                throw std::runtime_error("Could not open symmetrized block file: " + block_file);
+            }
+            
+            // Close the preliminary stream and load the block using the helper that understands both ASCII and binary formats
+            file.close();
+
+            // Load the symmetrized block matrix saved by Operator::buildAndSaveSymmetrizedBlocks
+            // Supports both ASCII (rows cols; row col real imag ...) and binary (.dat) formats
+            Eigen::SparseMatrix<Complex> block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+
+            // Define how to apply this block Hamiltonian to a vector
+            // Use Eigen maps to avoid copies and leverage sparse mat-vec
+            std::function<void(const Complex*, Complex*, int)> apply_block_hamiltonian =
+                [block_matrix](const Complex* in, Complex* out, int n) {
+                if (n != block_matrix.rows()) {
+                    throw std::invalid_argument("Block apply: dimension mismatch with loaded matrix.");
+                }
+                Eigen::Map<const Eigen::VectorXcd> vin(in, n);
+                Eigen::Map<Eigen::VectorXcd> vout(out, n);
+                vout = block_matrix * vin;
+            };
+
+            // Modify diagonalization parameters for the block
+            EDParameters block_params = params;
+            block_params.num_eigenvalues = std::min(10, block_dim);
+            block_params.max_iterations = block_params.num_eigenvalues * 4 + 20;
+            block_params.compute_eigenvectors = false;
+            block_params.calc_observables = false;
+            block_params.measure_spin = false;
+            // Perform exact diagonalization on this block
+            EDResults block_results = exact_diagonalization_core(
+                apply_block_hamiltonian, block_dim, DiagonalizationMethod::LANCZOS, block_params
+            );
+            double min_block = *std::min_element(block_results.eigenvalues.begin(), block_results.eigenvalues.end());
+            double max_block = *std::max_element(block_results.eigenvalues.begin(), block_results.eigenvalues.end());
+            std::cout << "Block " << block_idx << ": min=" << min_block << ", max=" << max_block << std::endl;
+            if (min_block < min_E_estimate) {
+                min_E_estimate = min_block;
+                max_E_estimate = max_block;
+                target_block = block_idx;
+            }
+        }
+    }
+
+    std::cout << "Estimated ground state energy: " << min_E_estimate << std::endl;
+    std::cout << "Estimated max energy in ground state sector: " << max_E_estimate << std::endl;
+    std::cout << "Targeting block " << target_block << std::endl;
+
     int block_start_dim = 0;
     // 4. Diagonalize each block separately    
     for (size_t block_idx = 0; block_idx < block_sizes.size(); ++block_idx) {
         int block_dim = block_sizes[block_idx];
+        std::cerr << "[DEBUG] Diagonalizing block " << block_idx << " dim=" << block_dim << std::endl;
         
         std::cout << "Diagonalizing block " << block_idx + 1 << "/" << block_sizes.size() 
                   << " (dimension: " << block_dim << ")" << std::endl;
@@ -955,45 +1065,51 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             throw std::runtime_error("Could not open symmetrized block file: " + block_file);
         }
         
-        // Read the sparse matrix format (row, col, real, imag)
-        std::vector<std::tuple<int, int, Complex>> block_entries;
-        int row, col;
-        double real, imag;
-        
-        // Skip the first line which might contain header/metadata
-        std::string header_line;
-        std::getline(file, header_line);
-        while (file >> row >> col >> real >> imag) {
-            block_entries.emplace_back(row, col, Complex(real, imag));
-        }
+        // Close the preliminary stream and load the block using the helper that understands both ASCII and binary formats
         file.close();
-        
-        // Create a lambda to apply the block Hamiltonian
-        auto apply_block_hamiltonian = [&block_entries, block_dim](const Complex* in, Complex* out, int n) {
-            // Initialize output to zero
-            std::fill(out, out + n, Complex(0.0, 0.0));
-            
-            // Apply the sparse block matrix
-            for (const auto& [row, col, val] : block_entries) {
-                out[row] += val * in[col];
+
+        // Load the symmetrized block matrix saved by Operator::buildAndSaveSymmetrizedBlocks
+        // Supports both ASCII (rows cols; row col real imag ...) and binary (.dat) formats
+        Eigen::SparseMatrix<Complex> block_matrix = hamiltonian.loadSymmetrizedBlock(block_file);
+
+        // Define how to apply this block Hamiltonian to a vector
+        // Use Eigen maps to avoid copies and leverage sparse mat-vec
+        std::function<void(const Complex*, Complex*, int)> apply_block_hamiltonian =
+            [block_matrix](const Complex* in, Complex* out, int n) {
+            if (n != block_matrix.rows()) {
+                throw std::invalid_argument("Block apply: dimension mismatch with loaded matrix.");
             }
-        };
-        
+            Eigen::Map<const Eigen::VectorXcd> vin(in, n);
+            Eigen::Map<Eigen::VectorXcd> vout(out, n);
+            vout = block_matrix * vin;
+            };
+
         // Modify diagonalization parameters for the block
         EDParameters block_params = params;
         block_params.num_eigenvalues = std::min(params.num_eigenvalues - block_start_dim, block_dim);
 
         if (params.compute_eigenvectors) {
-            block_params.output_dir = params.output_dir + "/block_" + std::to_string(block_idx);
+            block_params.output_dir = params.output_dir + "/min_sector";
             std::string cmd = "mkdir -p " + block_params.output_dir;
             system(cmd.c_str());
         }
-        
+        EDResults block_results;
         // Perform exact diagonalization on this block
-        EDResults block_results = exact_diagonalization_core(
-            apply_block_hamiltonian, block_dim, method, block_params
-        );
-        
+        if (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA || method == DiagonalizationMethod::cTPQ) {
+            if (target_block == block_idx) {
+                block_params.large_value = std::max(max_E_estimate * 10, block_params.large_value);
+                std::cout << "Running sector mTPQ containing the ground state with large value " << block_params.large_value << std::endl;
+                block_results = exact_diagonalization_core(
+                    apply_block_hamiltonian, block_dim, method, block_params
+                );
+            }
+        }
+        if (!(method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA || method == DiagonalizationMethod::cTPQ)) {
+            block_results = exact_diagonalization_core(
+                apply_block_hamiltonian, block_dim, method, block_params
+            );
+        }
+            
         // Store the eigenvalues with their block and index information
         for (size_t i = 0; i < block_results.eigenvalues.size(); ++i) {
             all_eigen_info.push_back({
@@ -1003,67 +1119,207 @@ EDResults exact_diagonalization_from_directory_symmetrized(
             });
         }
         
-        // Transform and save eigenvectors if requested
-        if (params.compute_eigenvectors) {
-
-            // Make directory for eigenvectors
+        // Transform eigenvectors or TPQ states if requested
+        if (params.compute_eigenvectors || method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA || method == DiagonalizationMethod::cTPQ) {
+            
+            // Make directory for eigenvectors/states
             std::string eigenvector_dir = params.output_dir + "/eigenvectors";
             std::string cmd = "mkdir -p " + eigenvector_dir;
             system(cmd.c_str());
 
-
-            std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
-            
-            for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
-                // Path to the block eigenvector
-                std::string block_eigenvector_file = block_params.output_dir + 
-                                                   "/eigenvectors/eigenvector_" + std::to_string(eigen_idx) + ".dat";
-
-                std::cout << "Reading eigenvector from: " << block_eigenvector_file << std::endl;
-
-                // Read the block eigenvector
-                std::vector<Complex> block_eigenvector(block_dim);
-                std::ifstream eigen_file(block_eigenvector_file, std::ios::binary);
-                if (!eigen_file.is_open()) {
-                    std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
-                    continue;
-                }
-
-                eigen_file.read(reinterpret_cast<char*>(&block_eigenvector[0]), block_dim * sizeof(Complex));
-                eigen_file.close();
+            // Handle TPQ state transformation
+            if (block_idx == target_block && (method == DiagonalizationMethod::mTPQ || method == DiagonalizationMethod::mTPQ_CUDA || method == DiagonalizationMethod::cTPQ)) {
+                std::cout << "Transforming TPQ states for block " << block_idx << std::endl;
                 
-                // Create a file for the transformed eigenvector
-                std::string transformed_file = params.output_dir + "/eigenvectors/eigenvector_block" + 
-                                            std::to_string(block_idx) + "_" + 
-                                            std::to_string(eigen_idx) + ".dat";
-                std::ofstream out_file(transformed_file);
-                if (!out_file.is_open()) {
-                    std::cerr << "Warning: Could not open file for transformed eigenvector: " << transformed_file << std::endl;
-                    continue;
-                }
-
-                std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
+                // Search for all TPQ state files in the block directory (not in tpq_data subdirectory)
+                std::string temp_list_file = params.output_dir + "/tpq_state_files_" + std::to_string(block_idx) + ".txt";
+                std::string find_command = "find \"" + block_params.output_dir + "\" -name \"tpq_state_*.dat\" 2>/dev/null > \"" + temp_list_file + "\"";
+                system(find_command.c_str());
                 
-                for (size_t i = 0; i < block_dim; ++i) {
-                    std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);
-                    transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
-                }
-                out_file << transformed_eigenvector.size() << std::endl;
-                // Write the transformed eigenvector to file
-                for (size_t i = 0; i < transformed_eigenvector.size(); ++i) {
-                    // Write only non-zero entries
-                    if (std::abs(transformed_eigenvector[i]) < 1e-10) continue;
-                    out_file << i << " " << transformed_eigenvector[i].real() << " " 
-                            << transformed_eigenvector[i].imag() << std::endl;
-                }
-                out_file << std::endl;
+                std::ifstream file_list(temp_list_file);
+                if (file_list.is_open()) {
+                    std::string tpq_state_file;
+                    while (std::getline(file_list, tpq_state_file)) {
+                        if (tpq_state_file.empty()) continue;
+                        
+                        // Extract sample number and beta value from filename
+                        size_t sample_pos = tpq_state_file.find("tpq_state_");
+                        size_t beta_pos = tpq_state_file.find("_beta=");
+                        size_t dat_pos = tpq_state_file.find(".dat");
+                        
+                        if (sample_pos != std::string::npos && beta_pos != std::string::npos && dat_pos != std::string::npos) {
+                            std::string sample_str = tpq_state_file.substr(sample_pos + 10, beta_pos - sample_pos - 10);
+                            std::string beta_str = tpq_state_file.substr(beta_pos + 6, dat_pos - beta_pos - 6);
+                            
+                            std::cout << "Processing TPQ state: sample=" << sample_str << ", beta=" << beta_str << std::endl;
+                            
+                            // Read the block TPQ state saved by save_tpq_state (size_t header + raw Complex data)
+                            std::ifstream tpq_file(tpq_state_file, std::ios::binary);
+                            if (!tpq_file.is_open()) {
+                                std::cerr << "Warning: Could not open TPQ state file: " << tpq_state_file << std::endl;
+                                continue;
+                            }
 
-                out_file.close();
+                            // Read stored vector size
+                            size_t stored_size = 0;
+                            tpq_file.read(reinterpret_cast<char*>(&stored_size), sizeof(size_t));
+                            if (!tpq_file) {
+                                std::cerr << "Warning: Failed to read size header from TPQ state file: " << tpq_state_file << std::endl;
+                                tpq_file.close();
+                                continue;
+                            }
+
+                            if (stored_size != static_cast<size_t>(block_dim)) {
+                                std::cerr << "Warning: TPQ state size mismatch in file: " << tpq_state_file
+                                          << " (stored=" << stored_size << ", expected block_dim=" << block_dim
+                                          << "). Skipping." << std::endl;
+                                tpq_file.close();
+                                continue;
+                            }
+
+                            // Read vector data
+                            ComplexVector block_tpq_state(block_dim);
+                            tpq_file.read(reinterpret_cast<char*>(block_tpq_state.data()),
+                                          stored_size * sizeof(Complex));
+                            if (!tpq_file) {
+                                std::cerr << "Warning: Failed to read TPQ state data from: " << tpq_state_file << std::endl;
+                                tpq_file.close();
+                                continue;
+                            }
+                            tpq_file.close();
+
+                            // Normalize the vector
+                            double norm = 0.0;
+                            for (int i = 0; i < block_dim; ++i) {
+                                norm += std::norm(block_tpq_state[i]);
+                            }
+                            norm = std::sqrt(norm);
+                            if (norm > 0.0) {
+                                for (int i = 0; i < block_dim; ++i) {
+                                    block_tpq_state[i] /= norm;
+                                }
+                            } else {
+                                std::cerr << "Warning: TPQ state has zero norm in file: " << tpq_state_file << std::endl;
+                                continue;
+                            }
+
+
+                            
+                            // Transform to full Hilbert space
+                            ComplexVector full_tpq_state(1ULL << params.num_sites, Complex(0.0, 0.0));
+                            
+                            for (int i = 0; i < block_dim; ++i) {
+                                std::vector<Complex> basis_vector = hamiltonian.read_sym_basis(i + block_start_dim, directory);
+                                full_tpq_state += basis_vector * block_tpq_state[i];
+                            }
+
+                            // Save the transformed TPQ state
+                            std::string transformed_file = params.output_dir + "/tpq_state_" + sample_str + 
+                                                          "_beta=" + beta_str + ".dat";
+
+                            std::ofstream out_file(transformed_file);
+                            
+                            out_file << full_tpq_state.size() << std::endl;
+                            // Write the transformed eigenvector to file
+                            for (size_t i = 0; i < full_tpq_state.size(); ++i) {
+                                // Write only non-zero entries
+                                if (std::abs(full_tpq_state[i]) < 1e-10) continue;
+                                out_file << i << " " << full_tpq_state[i].real() << " " 
+                                        << full_tpq_state[i].imag() << std::endl;
+                            }
+                            out_file << std::endl;
+                            out_file.close();
+                        }
+                    }
+                    file_list.close();
+                    std::remove(temp_list_file.c_str());
+                }
             }
+            
+            // Handle regular eigenvector transformation
+            if (params.compute_eigenvectors && method != DiagonalizationMethod::mTPQ && method != DiagonalizationMethod::mTPQ_CUDA) {
+                std::cout << "Processing eigenvectors for block " << block_idx << std::endl;
+                
+                for (size_t eigen_idx = 0; eigen_idx < block_results.eigenvalues.size(); ++eigen_idx) {
+                    // Path to the block eigenvector
+                    std::string block_eigenvector_file = block_params.output_dir + 
+                                                       "/eigenvector_" + std::to_string(eigen_idx) + ".dat";
+
+                    std::cout << "Reading eigenvector from: " << block_eigenvector_file << std::endl;
+
+                    // Read the block eigenvector
+                    std::vector<Complex> block_eigenvector(block_dim);
+                    std::ifstream eigen_file(block_eigenvector_file);
+                    if (!eigen_file.is_open()) {
+                        std::cerr << "Warning: Could not open eigenvector file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+                    std::string line;
+                    int num_entries = 0;
+                    while(std::getline(eigen_file, line) && num_entries < block_dim) {
+                        if (line.empty()) continue;  // Skip empty lines
+                        std::istringstream iss(line);
+                        double real_part, imag_part;
+                        if (!(iss >> real_part >> imag_part)) {
+                            std::cerr << "Warning: Invalid line in eigenvector file: " << line << std::endl;
+                            continue;
+                        }
+                        block_eigenvector[num_entries] = Complex(real_part, imag_part);
+                        num_entries++;
+
+                    }
+
+                    // Verify the eigenvector is normalized and contains valid values
+                    double norm = 0.0;
+                    bool has_invalid_values = false;
+                    for (const auto& val : block_eigenvector) {
+                        if (!std::isfinite(val.real()) || !std::isfinite(val.imag())) {
+                            has_invalid_values = true;
+                            break;
+                        }
+                        norm += std::norm(val);
+                    }
+                    
+                    if (has_invalid_values) {
+                        std::cerr << "Warning: Eigenvector contains invalid (NaN/Inf) values in file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+                    
+                    norm = std::sqrt(norm);
+                    if (norm < 1e-10) {
+                        std::cerr << "Warning: Eigenvector has zero norm in file: " << block_eigenvector_file << std::endl;
+                        continue;
+                    }
+                    
+                    // Create a file for the transformed eigenvector
+                    std::string transformed_file = params.output_dir + "/eigenvector_block" + 
+                                                std::to_string(block_idx) + "_" + 
+                                                std::to_string(eigen_idx) + ".dat";
+
+                    std::vector<Complex> transformed_eigenvector((1ULL<<params.num_sites), Complex(0.0, 0.0));
+                    std::cerr << "[DEBUG] Transforming eigenvector to full dim=" << (1ULL<<params.num_sites) << std::endl;
+                    
+                    for (size_t i = 0; i < block_dim; ++i) {
+                        std::vector<Complex> temp_eigenvector = hamiltonian.read_sym_basis(i+block_start_dim, directory);
+                        transformed_eigenvector += temp_eigenvector * block_eigenvector[i];
+                    }
+                    
+                    std::cout << " norm of transformed eigenvector: " << norm << std::endl;
+                    if (norm > 1e-10) {  // Avoid division by zero
+                        for (auto& val : transformed_eigenvector) {
+                            val /= norm;
+                        }
+                    } else {
+                        std::cerr << "Warning: Transformed eigenvector has near-zero norm!" << std::endl;
+                    }
+                    
+                    save_tpq_state(transformed_eigenvector, transformed_file);
+                }
+            }
+        
         }
         block_start_dim += block_dim;  // Update the starting dimension for the next block
     }
-    
     // 5. Sort eigenvalues
     std::sort(all_eigen_info.begin(), all_eigen_info.end());
     

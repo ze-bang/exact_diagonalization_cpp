@@ -57,31 +57,10 @@ def build_diamond_supercell(L: int) -> nx.Graph:
 
 
 def diamond_node_position(node: DiamondNode) -> Tuple[float, float, float]:
-    """Return diamond node position in the same FCC coordinate convention as the backup.
-
-    We use FCC lattice vectors
-        a1 = (0,   0.5, 0.5)
-        a2 = (0.5, 0,   0.5)
-        a3 = (0.5, 0.5, 0)
-    and basis offsets of (0,0,0) for A (s=0) and (0.25,0.25,0.25) for B (s=1).
-
-    With this, midpoints of diamond edges land on pyrochlore sites at
-    coordinates with ±0.125 components, matching the backup script.
-    """
-    a1 = (0.0, 0.5, 0.5)
-    a2 = (0.5, 0.0, 0.5)
-    a3 = (0.5, 0.5, 0.0)
-
-    ox = node.i * a1[0] + node.j * a2[0] + node.k * a3[0]
-    oy = node.i * a1[1] + node.j * a2[1] + node.k * a3[1]
-    oz = node.i * a1[2] + node.j * a2[2] + node.k * a3[2]
-
     if node.s == 0:
-        dx, dy, dz = (0.0, 0.0, 0.0)
+        return (float(node.i), float(node.j), float(node.k))
     else:
-        dx, dy, dz = (0.25, 0.25, 0.25)
-
-    return (ox + dx, oy + dy, oz + dz)
+        return (node.i + 0.5, node.j + 0.5, node.k + 0.5)
 
 
 def midpoint(p: Tuple[float, float, float], q: Tuple[float, float, float]) -> Tuple[float, float, float]:
@@ -215,13 +194,6 @@ def topo_to_pyrochlore(tc: TopoCluster, latt: LatticeGraphs):
 
 
 def count_unique_subgraph_images(H: nx.Graph, G: nx.Graph) -> int:
-    """Count distinct images of H inside G (H <= G).
-
-    GraphMatcher(G, H) generates subgraph isomorphisms of H into G. The
-    returned mappings map nodes in G to nodes in H. The image node set in G
-    is mapping.keys(). We collect unique frozensets of those keys to avoid
-    overcounting automorphisms of H.
-    """
     GM = nx.algorithms.isomorphism.GraphMatcher(G, H)
     images: Set[FrozenSet[int]] = set()
     for mapping in GM.subgraph_isomorphisms_iter():
@@ -232,12 +204,11 @@ def count_unique_subgraph_images(H: nx.Graph, G: nx.Graph) -> int:
 
 def compute_multiplicities(clusters_by_order: Dict[int, List[TopoCluster]], latt: LatticeGraphs) -> None:
     Gd = latt.diamond
-    # Normalize per tetrahedron site. Each diamond node corresponds to one tetrahedron.
-    num_diamond_nodes = Gd.number_of_nodes()
+    num_diamond_edges = Gd.number_of_edges()
     for m, lst in clusters_by_order.items():
         for tc in lst:
             count = count_unique_subgraph_images(tc.diamond_subgraph, Gd)
-            tc.multiplicity_per_site = count / float(num_diamond_nodes) / 2
+            tc.multiplicity_per_site = count / float(num_diamond_edges)
 
 
 def compute_subclusters(clusters_by_order: Dict[int, List[TopoCluster]]) -> Dict[int, List[TopoCluster]]:
@@ -265,6 +236,8 @@ def write_cluster_files(output_dir: Path, clusters_by_order: Dict[int, List[Topo
         mx, my, mz = midpoint(pu, pv)
         pyro_coords[pid] = (pid, mx, my, mz)
 
+    # Use global cluster ID counter
+    global_cluster_id = 1
     # Use global cluster ID counter
     global_cluster_id = 1
     for m, lst in clusters_by_order.items():

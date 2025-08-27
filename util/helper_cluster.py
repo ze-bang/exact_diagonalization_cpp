@@ -180,8 +180,12 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
     write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublattice_indices, node_mapping)
     
     # Prepare Hamiltonian parameters
-    Jpm = Jxx
-    Jpmpm = Jyy
+
+    Jpm = -(Jxx+Jyy)/4
+    Jpmpm = (Jxx-Jyy)/4
+
+    # Jpm = Jxx
+    # Jpmpm = Jyy
     
     # Define local z-axes for pyrochlore lattice
     z_local = np.array([
@@ -214,7 +218,7 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
         i = site_id
         
         # Zeeman term
-        local_field = h * 5.5 * np.dot(field_dir, z_local[site_id % 4]) /2
+        local_field = h * 5.5 * np.dot(field_dir, z_local[site_id % 4])
         transfer.append([2, node_mapping[i], -local_field, 0])
 
         # Add random transverse field from a Lorentzian distribution
@@ -233,8 +237,8 @@ def prepare_hamiltonian_parameters(cluster_filepath, output_dir, Jxx, Jyy, Jzz, 
 
         # Sx component is 0.5 * (S+ + S-), so we add terms for S+ (op 0) and S- (op 1)
         # The coupling is -h_x * Sx = -0.5*h_x*S+ - 0.5*h_x*S-
-        transfer.append([0, node_mapping[i], -0.5 * random_h_x/2, 0]) # S+ term
-        transfer.append([1, node_mapping[i], -0.5 * random_h_x/2, 0]) # S- term
+        transfer.append([0, node_mapping[i], -0.5 * random_h_x, 0]) # S+ term
+        transfer.append([1, node_mapping[i], -0.5 * random_h_x, 0]) # S- term
         
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
