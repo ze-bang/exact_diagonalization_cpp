@@ -2,7 +2,7 @@
 #define ED_WRAPPER_H
 
 #include "TPQ.h"
-#include "TPQ_MPI.h"
+#include "TPQ_chunked.h"
 #include "CG.h"
 #include "arpack.h"
 #include "lanczos.h"
@@ -349,18 +349,6 @@ EDResults exact_diagonalization_core(
                             /*use_cuda=*/true);
             break;
         
-        case DiagonalizationMethod::mTPQ_MPI:
-            std::cout << "Using microcanonical TPQ method with MPI parallelization" << std::endl;
-
-            microcanonical_tpq_mpi(H, hilbert_space_dim,
-                            params.max_iterations, params.num_samples,
-                            params.num_measure_freq,
-                            results.eigenvalues,
-                            params.output_dir,
-                            params.large_value);
-            break;
-        
-                
 
         case DiagonalizationMethod::BLOCK_LANCZOS:
             std::cout << "Using block Lanczos method" << std::endl;
