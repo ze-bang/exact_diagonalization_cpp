@@ -235,8 +235,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 '--temp_max', f'{temp_max:.8f}',
                 '--temp_bins', str(fixed_params["temp_bins"]),
                 '--thermo',
-                '--SI_units',
-                '--auto_resum'
+                '--SI_units'
             ]
             
             # Only add symmetrization if not fitting random transverse field
@@ -258,8 +257,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 '--temp_bins', str(fixed_params["temp_bins"]),
                 '--thermo',
                 '--SI_units',
-                '--method=mTPQ',
-                '--auto_resum'
+                '--method=mTPQ'
             ]
 
         cmd.append('--skip_cluster_gen')
