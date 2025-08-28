@@ -1239,6 +1239,7 @@ def main():
         
         # Use ThreadPoolExecutor for parallel subprocess execution
         max_workers = min(args.num_workers, n_runs)
+        print(f"Using {max_workers} parallel workers for cluster generation")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
