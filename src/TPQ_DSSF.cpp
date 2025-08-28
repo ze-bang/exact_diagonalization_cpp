@@ -8,7 +8,6 @@
 #include <regex>
 #include "construct_ham.h"
 #include "TPQ.h"
-#include "TPQ_MPI.h"
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -30,7 +29,6 @@ int main(int argc, char* argv[]) {
             std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
-            std::cerr << "  method extended: krylov_mpi for distributed time evolution" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -296,47 +294,6 @@ int main(int argc, char* argv[]) {
                 spin_combinations,
                 spin_combination_names
             );
-        } else if (method == "krylov_mpi") {
-            // Distributed time evolution using MPI, evolving local segments cooperatively
-            int krylov_dim = krylov_dim_or_nmax;
-            if (rank == 0) {
-                std::cout << "Using distributed Krylov evolution (m=" << krylov_dim << ", dt=" << dt_opt << ")" << std::endl;
-            }
-            // Build local Hamiltonian adapter from existing H signature
-            auto H_local = [&, num_sites](const Complex* in_local, Complex* out_local, int local_size, int local_start, int total_sites) {
-                // Approximation: apply H on the local segment only. For production, add halo exchanges for off-rank couplings.
-                H(in_local, out_local, local_size);
-            };
-            // Create distributed state from dense tpq_state
-            DistributedComplexVector psi_dist(N, MPI_COMM_WORLD);
-            // Scatter contiguous slices into psi_dist
-            int world_size; MPI_Comm_size(MPI_COMM_WORLD, &world_size);
-            int world_rank; MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
-            int base = N / world_size;
-            int rem = N % world_size;
-            int local_size = (world_rank < rem) ? (base + 1) : base;
-            int local_start = (world_rank < rem) ? (world_rank * (base + 1)) : (rem * (base + 1) + (world_rank - rem) * base);
-            for (int i = 0; i < local_size; ++i) {
-                psi_dist[i] = tpq_state[local_start + i];
-            }
-            psi_dist.normalize();
-            DistributedHamiltonian Hdist(H_local, num_sites, MPI_COMM_WORLD);
-            // Evolve for steps inferred from t_end/dt or explicit steps
-            int steps = steps_opt > 0 ? steps_opt : static_cast<int>(std::round(t_end_opt / dt_opt));
-            double t_accum = 0.0;
-            // Optionally create output dir for mpi
-            std::string mpi_dir = output_dir + "/krylov_mpi";
-            ensureDirectoryExists(mpi_dir);
-            for (int step_count = 0; step_count <= steps; ++step_count) {
-                if (step_count % std::max(1, steps/10) == 0 && world_rank == 0) {
-                    std::cout << "  [MPI] t=" << t_accum << " (" << step_count << "/" << steps << ")" << std::endl;
-                }
-                if (step_count < steps) {
-                    time_evolve_krylov_distributed(Hdist, psi_dist, krylov_dim, dt_opt, MPI_COMM_WORLD);
-                    t_accum += dt_opt;
-                }
-            }
-            // Optional: gather/save final state or compute distributed observables
         } else if (method == "taylor") {
             if (rank == 0) {
                 std::cout << "Using Taylor (create_time_evolution_operator) evolution (n_max=" << krylov_dim_or_nmax

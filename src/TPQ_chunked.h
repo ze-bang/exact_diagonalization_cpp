@@ -56,24 +56,6 @@ ChunkedComplexVector generateLargeTPQVector(size_t N, unsigned int seed) {
 }
 
 /**
- * Create directory if it doesn't exist (same as original TPQ)
- */
-bool ensureDirectoryExists(const std::string& path) {
-    struct stat info;
-    if (stat(path.c_str(), &info) != 0) {
-        // Directory doesn't exist, create it
-        std::string cmd = "mkdir -p " + path;
-        return system(cmd.c_str()) == 0;
-    } else if (info.st_mode & S_IFDIR) {
-        // Path exists and is a directory
-        return true;
-    } else {
-        // Path exists but is not a directory
-        return false;
-    }
-}
-
-/**
  * Calculate energy and variance for a large TPQ state
  * 
  * @param H Hamiltonian operator function
@@ -104,18 +86,6 @@ std::pair<double, double> calculateLargeEnergyAndVariance(
     return {energy, variance};
 }
 
-/**
- * Write TPQ data to file (same format as original)
- */
-void writeTPQData(const std::string& filename, double inv_temp, double energy, 
-                 double variance, double norm, int step) {
-    std::ofstream file(filename, std::ios::app);
-    if (file.is_open()) {
-        file << std::setprecision(16) << inv_temp << " " << energy << " " 
-             << variance << " " << norm << " " << step << std::endl;
-        file.close();
-    }
-}
 
 /**
  * Imaginary time evolution using Taylor expansion for chunked vectors
@@ -312,42 +282,6 @@ bool load_chunked_tpq_state(ChunkedComplexVector& state, const std::string& file
     }
     
     return true;
-}
-
-/**
- * Initialize TPQ output files (same as original)
- */
-std::tuple<std::string, std::string, std::string, std::vector<std::string>> initializeTPQFiles(
-    const std::string& dir,
-    int sample,
-    int sublattice_size
-) {
-    std::string ss_file = dir + "/ss_" + std::to_string(sample) + ".dat";
-    std::string norm_file = dir + "/norm_" + std::to_string(sample) + ".dat";
-    std::string flct_file = dir + "/flct_" + std::to_string(sample) + ".dat";
-    
-    // Initialize specific heat file
-    std::ofstream ss_out(ss_file);
-    ss_out << "# inv_temp energy variance norm step" << std::endl;
-    ss_out.close();
-    
-    // Initialize norm file
-    std::ofstream norm_out(norm_file);
-    norm_out << "# inv_temp norm_before norm_after step" << std::endl;
-    norm_out.close();
-    
-    // Initialize fluctuation file
-    std::ofstream flct_out(flct_file);
-    flct_out << "# inv_temp";
-    for (int i = 0; i < sublattice_size; ++i) {
-        flct_out << " Sz_" << i << " Sz2_" << i;
-    }
-    flct_out << " step" << std::endl;
-    flct_out.close();
-    
-    // Spin correlation files (simplified for chunked version)
-    std::vector<std::string> spin_corr;
-    return {ss_file, norm_file, flct_file, spin_corr};
 }
 
 /**
