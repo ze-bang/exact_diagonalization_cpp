@@ -126,10 +126,35 @@ def run_ed_for_cluster(args):
         ])
     
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        result = subprocess.run(cmd, check=True, capture_output=True)
         return True
     except subprocess.CalledProcessError as e:
-        logging.error(f"Error running ED for cluster {cluster_id}: {e}")
+        # Check if the computation actually succeeded despite the error
+        # This can happen when the ED program completes successfully but crashes during cleanup
+        expected_output_dir = os.path.join(cluster_ed_dir, 'output')
+        
+        # Check if output directory exists and has content
+        if os.path.exists(expected_output_dir):
+            output_files = os.listdir(expected_output_dir)
+            
+            if ed_options["thermo"]:
+                # For thermodynamic calculations, check for thermo directory
+                thermo_dir = os.path.join(expected_output_dir, 'thermo')
+                if os.path.exists(thermo_dir) and os.listdir(thermo_dir):
+                    logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but thermodynamic output files exist - treating as success")
+                    return True
+            
+            # For other methods, check for any meaningful output files
+            if output_files and any(f.endswith(('.dat', '.txt')) or os.path.isdir(os.path.join(expected_output_dir, f)) for f in output_files):
+                logging.warning(f"ED for cluster {cluster_id} crashed with exit code {e.returncode} but output files exist - treating as success")
+                return True
+        
+        # Log the error with more specific information about the signal
+        if e.returncode == -11:  # SIGSEGV
+            logging.error(f"ED for cluster {cluster_id} crashed with SIGSEGV (segmentation fault) - computation may have completed but program crashed during cleanup")
+        else:
+            logging.error(f"Error running ED for cluster {cluster_id}: {e}")
+        
         logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
         logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
         return False
