@@ -544,11 +544,14 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         logging.info(log_msg)
     
     param_str = f"Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}"
+    if fit_random_transverse_field:
+        param_str += f", random_field_strength={params[3]:.4f}"
     if fit_broadening and len(params) > 3:
         sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(sigmas)])
         param_str += f", {sigma_str}"
     if fit_g_renorm:
         param_str += f", g_renorm={g_renorm:.4f}"
+
     logging.info(f"Parameters: {param_str}, Total Chi-squared={total_chi_squared:.4f}")
     
     return total_chi_squared
