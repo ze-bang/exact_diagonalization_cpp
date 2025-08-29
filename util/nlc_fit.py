@@ -29,6 +29,19 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 #!/usr/bin/env python3
 import matplotlib.pyplot as plt
 
+class NumpyJSONEncoder(json.JSONEncoder):
+    """Custom JSON encoder to handle NumPy data types"""
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
+
 def setup_logging(log_file):
     """Set up logging to file and console"""
     logging.basicConfig(
@@ -1574,10 +1587,10 @@ def main():
                 'Jzz': float(best_params[2])
             },
             'chi_squared': float(result.fun),
-            'success': getattr(result, 'success', None),
-            'message': getattr(result, 'message', ''),
-            'nfev': getattr(result, 'nfev', None),
-            'nit': getattr(result, 'nit', None)
+            'success': bool(getattr(result, 'success', None)) if getattr(result, 'success', None) is not None else None,
+            'message': str(getattr(result, 'message', '')),
+            'nfev': int(getattr(result, 'nfev', 0)) if getattr(result, 'nfev', None) is not None else None,
+            'nit': int(getattr(result, 'nit', 0)) if getattr(result, 'nit', None) is not None else None
         }
         
         # Add Bayesian optimization specific results
@@ -1616,7 +1629,7 @@ def main():
                 results_dict['g_renorm'] = float(best_params[g_renorm_idx])
         
         with open(results_file, 'w') as f:
-            json.dump(results_dict, f, indent=2)
+            json.dump(results_dict, f, indent=2, cls=NumpyJSONEncoder)
         
     finally:
         # Clean up temporary directory if created
