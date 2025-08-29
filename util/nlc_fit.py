@@ -1310,9 +1310,6 @@ def main():
         "peak_weight_factor": args.peak_weight_factor
     }
 
-    print(f"Fixed parameters: {fixed_params}")
-    logging.info(f"Fixed parameters: {fixed_params}")
-
     try:
         # Load experimental data
         if args.exp_config:
@@ -1485,8 +1482,6 @@ def main():
                 # Use traditional scipy.optimize.minimize
                 print(f"Using scipy.optimize.minimize with method {args.method}")
                 logging.info(f"Using scipy.optimize.minimize with method {args.method}")
-                print(f"Fixed parameters: {fixed_params}")
-                logging.info(f"Fixed parameters: {fixed_params}")
                 result = minimize(
                     calc_chi_squared,
                     initial_params,
