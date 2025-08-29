@@ -1163,7 +1163,7 @@ def main():
     # NLCE parameters
     parser.add_argument('--max_order', type=int, default=3, help='Maximum order for NLCE calculation')
     parser.add_argument('--h', type=float, default=0.0, help='Magnetic field strength')
-    parser.add_argument('--field_dir', type=float, nargs=3, default=[1, 1, 1]/np.sqrt(3), help='Field direction (x,y,z)')
+    parser.add_argument('--field_dir', type=float, nargs=3, default=(np.array([1.0, 1.0, 1.0]) / np.sqrt(3)).tolist(), help='Field direction (x,y,z)')
     parser.add_argument('--temp_bins', type=int, default=1000, help='Number of temperature bins')
 
 
