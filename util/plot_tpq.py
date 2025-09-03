@@ -47,14 +47,15 @@ def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None
     return broadened_data, broadening_factor if 'broadening_factor' in locals() else np.ones_like(data)
 
 def parse_filename_new(filename):
-    # "SzSz_q_0_Qx0_Qy0_Qz0_sample0_beta999.996548_time_correlation.dat"
+    # Example: "SzSz_q_0_Qx0_Qy0_Qz0_sample0_beta999.996548_time_correlation.dat"
     basename = os.path.basename(filename)
     m = re.match(r'^(.+?)_sample(\d+)_beta([0-9.+-eE]+)_time_correlation.dat$', basename)
     if m:
         species_with_momentum = m.group(1)
+        sample_idx = int(m.group(2))
         beta = float(m.group(3))
-        return species_with_momentum, beta
-    return None, None
+        return species_with_momentum, sample_idx, beta
+    return None, None, None
 
 def parse_QFI_data_new(structure_factor_dir):
     """Parse QFI data from the new directory structure."""
@@ -62,8 +63,9 @@ def parse_QFI_data_new(structure_factor_dir):
     beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
     # print(f"Found {len(beta_dirs)} beta directories.")
     
-    # Group files by species (including momentum), then by beta
-    species_data = defaultdict(lambda: defaultdict(list))
+    # Group files by species (including momentum), then by beta, then by sample
+    # species -> beta -> sample -> [file_paths]
+    species_data = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     species_names = set()
     
     for beta_dir in beta_dirs:
@@ -76,11 +78,11 @@ def parse_QFI_data_new(structure_factor_dir):
         files = glob.glob(os.path.join(beta_dir, '*_time_correlation.dat'))
 
         for file_path in files:
-            species_with_momentum, file_beta = parse_filename_new(file_path)
-            if species_with_momentum:
+            species_with_momentum, sample_idx, file_beta = parse_filename_new(file_path)
+            if species_with_momentum is not None:
                 species_names.add(species_with_momentum)
                 # Use the beta from directory name as primary, file beta as verification
-                species_data[species_with_momentum][beta_value].append(file_path)
+                species_data[species_with_momentum][beta_value][sample_idx].append(file_path)
     
     # print("Species (with momentum) found:")
     # for name in sorted(list(species_names)):
@@ -94,31 +96,43 @@ def parse_QFI_data_new(structure_factor_dir):
         # print(f"Processing species: {species}")
         
         # Process each beta group for the current species
-        for beta, file_list in beta_groups.items():
-            # print(f"  Processing beta={beta} with {len(file_list)} files")
+        for beta, samples_map in beta_groups.items():
+            # print(f"  Processing beta={beta} with {len(samples_map)} samples")
             
-            all_data = []
-            for file_path in file_list:
-                try:
-                    # Load the data (time, real, imag)
-                    data = np.loadtxt(file_path, comments='#')
-                    time = data[:, 0]
-                    real_part = data[:, 1]
-                    imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
-                    val = real_part + 1j * imag_part
-                    all_data.append((time, val))
-                except Exception as e:
-                    print(f"    Error reading {file_path}: {e}")
+            per_sample_corrs = []
+            reference_time = None
             
-            if not all_data:
+            for sample_idx, file_list in samples_map.items():
+                sample_vals = []
+                for file_path in file_list:
+                    try:
+                        # Load the data (time, real, imag)
+                        data = np.loadtxt(file_path, comments='#')
+                        time = data[:, 0]
+                        real_part = data[:, 1]
+                        imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
+                        val = real_part + 1j * imag_part
+                        if reference_time is None:
+                            reference_time = time
+                        else:
+                            # Basic consistency check on time grid
+                            if len(time) != len(reference_time) or not np.allclose(time, reference_time, rtol=1e-6, atol=1e-8):
+                                print(f"    Warning: time grid mismatch in {file_path}; skipping this file.")
+                                continue
+                        sample_vals.append(val)
+                    except Exception as e:
+                        print(f"    Error reading {file_path}: {e}")
+                if sample_vals:
+                    # Average within this sample (in case multiple files per sample)
+                    sample_mean = np.mean(np.vstack(sample_vals), axis=0)
+                    per_sample_corrs.append(sample_mean)
+            
+            if not per_sample_corrs or reference_time is None:
                 print(f"    No valid data for beta={beta}")
                 continue
             
-            reference_time = all_data[0][0]
-            
-            # Calculate mean correlation function
-            all_complex_values = np.vstack([data[1] for data in all_data])
-            mean_correlation = np.mean(all_complex_values, axis=0)
+            # Equal-weight average across samples
+            mean_correlation = np.mean(np.vstack(per_sample_corrs), axis=0)
             
             # Determine time step
             dt = reference_time[1] - reference_time[0] if len(reference_time) > 1 else 1.0
@@ -561,10 +575,31 @@ def plot_heatmaps_from_processed_data(data_dir):
             except Exception as e:
                 print(f"Error reading {deriv_file}: {e}")
     
-    # Build uniform beta grid from Jpm≈0.09, make separate heatmaps for Jpm<0 and Jpm>0, then stitch
-
     plot_outdir = os.path.join(data_dir, 'plots')
     os.makedirs(plot_outdir, exist_ok=True)
+    
+    # Save raw QFI data for all species
+    for species, data_points in all_qfi_data.items():
+        if not data_points:
+            continue
+        arr = np.array(data_points, dtype=float)
+        qfi_raw_filename = os.path.join(plot_outdir, f'qfi_raw_data_{species}.dat')
+        np.savetxt(qfi_raw_filename, arr, header='jpm beta qfi', 
+                   fmt='%.6f %.6f %.6f')
+        print(f"Saved QFI raw data: {qfi_raw_filename}")
+    
+    # Save raw derivative data for all species
+    for species, data_points in all_derivative_data.items():
+        if not data_points:
+            continue
+        arr = np.array(data_points, dtype=float)
+        deriv_raw_filename = os.path.join(plot_outdir, f'qfi_derivative_raw_data_{species}.dat')
+        np.savetxt(deriv_raw_filename, arr, header='jpm beta dqfi_dbeta', 
+                   fmt='%.6f %.6f %.6f')
+        print(f"Saved derivative raw data: {deriv_raw_filename}")
+
+    # Build uniform beta grid from Jpm≈0.09, make separate heatmaps for Jpm<0 and Jpm>0, then stitch
+
     try:
         for species, data_points in all_qfi_data.items():
             if not data_points:
@@ -622,8 +657,23 @@ def plot_heatmaps_from_processed_data(data_dir):
 
             if jpm_neg.size > 0:
                 Z_neg = np.column_stack([interp_at_jpm(j) for j in jpm_neg])
+                # Save interpolated heatmap data for negative Jpm
+                JN, BN = np.meshgrid(jpm_neg, target_beta)
+                heatmap_data_neg = np.column_stack([JN.flatten(), BN.flatten(), Z_neg.flatten()])
+                heatmap_neg_filename = os.path.join(plot_outdir, f'qfi_heatmap_data_neg_{species}.dat')
+                np.savetxt(heatmap_neg_filename, heatmap_data_neg, header='jpm beta qfi', 
+                          fmt='%.6f %.6f %.6f')
+                print(f"Saved negative Jpm heatmap data: {heatmap_neg_filename}")
+                
             if jpm_pos.size > 0:
                 Z_pos = np.column_stack([interp_at_jpm(j) for j in jpm_pos])
+                # Save interpolated heatmap data for positive Jpm
+                JP, BP = np.meshgrid(jpm_pos, target_beta)
+                heatmap_data_pos = np.column_stack([JP.flatten(), BP.flatten(), Z_pos.flatten()])
+                heatmap_pos_filename = os.path.join(plot_outdir, f'qfi_heatmap_data_pos_{species}.dat')
+                np.savetxt(heatmap_pos_filename, heatmap_data_pos, header='jpm beta qfi', 
+                          fmt='%.6f %.6f %.6f')
+                print(f"Saved positive Jpm heatmap data: {heatmap_pos_filename}")
 
             # Color scale unified across all panels
             z_list = []
@@ -706,6 +756,9 @@ def plot_heatmaps_from_processed_data(data_dir):
                 color = 'C0'
                 plotted = False
 
+                # Save line plot data
+                line_data = []
+
                 # Negative Jpm segment
                 if Z_neg is not None and Z_neg.size > 0:
                     y_neg = Z_neg[idx, :]
@@ -713,6 +766,8 @@ def plot_heatmaps_from_processed_data(data_dir):
                     if np.any(mask_neg):
                         plt.plot(jpm_neg[mask_neg], y_neg[mask_neg], '-', lw=1.8, color=color, label=f'β={b:.3g}')
                         plotted = True
+                        for j, q in zip(jpm_neg[mask_neg], y_neg[mask_neg]):
+                            line_data.append([j, b, q])
 
                 # Positive Jpm segment (same color, no duplicate label)
                 if Z_pos is not None and Z_pos.size > 0:
@@ -721,6 +776,16 @@ def plot_heatmaps_from_processed_data(data_dir):
                     if np.any(mask_pos):
                         plt.plot(jpm_pos[mask_pos], y_pos[mask_pos], '-', lw=1.8, color=color, label=None if plotted else f'β={b:.3g}')
                         plotted = True
+                        for j, q in zip(jpm_pos[mask_pos], y_pos[mask_pos]):
+                            line_data.append([j, b, q])
+
+                # Save line plot data
+                if line_data:
+                    line_data = np.array(line_data)
+                    line_filename = os.path.join(plot_outdir, f'qfi_vs_jpm_fixed_beta_data_{species}.dat')
+                    np.savetxt(line_filename, line_data, header='jpm beta qfi', 
+                              fmt='%.6f %.6f %.6f')
+                    print(f"Saved line plot data: {line_filename}")
 
                 plt.xlabel('Jpm')
                 plt.ylabel('QFI')
@@ -791,8 +856,23 @@ def plot_heatmaps_from_processed_data(data_dir):
 
             if jpm_neg.size > 0:
                 Z_neg = np.column_stack([interp_deriv_at_jpm(j) for j in jpm_neg])
+                # Save interpolated derivative heatmap data for negative Jpm
+                JN, BN = np.meshgrid(jpm_neg, target_beta)
+                heatmap_deriv_data_neg = np.column_stack([JN.flatten(), BN.flatten(), Z_neg.flatten()])
+                heatmap_deriv_neg_filename = os.path.join(plot_outdir, f'qfi_derivative_heatmap_data_neg_{species}.dat')
+                np.savetxt(heatmap_deriv_neg_filename, heatmap_deriv_data_neg, header='jpm beta dqfi_dbeta', 
+                          fmt='%.6f %.6f %.6f')
+                print(f"Saved negative Jpm derivative heatmap data: {heatmap_deriv_neg_filename}")
+                
             if jpm_pos.size > 0:
                 Z_pos = np.column_stack([interp_deriv_at_jpm(j) for j in jpm_pos])
+                # Save interpolated derivative heatmap data for positive Jpm
+                JP, BP = np.meshgrid(jpm_pos, target_beta)
+                heatmap_deriv_data_pos = np.column_stack([JP.flatten(), BP.flatten(), Z_pos.flatten()])
+                heatmap_deriv_pos_filename = os.path.join(plot_outdir, f'qfi_derivative_heatmap_data_pos_{species}.dat')
+                np.savetxt(heatmap_deriv_pos_filename, heatmap_deriv_data_pos, header='jpm beta dqfi_dbeta', 
+                          fmt='%.6f %.6f %.6f')
+                print(f"Saved positive Jpm derivative heatmap data: {heatmap_deriv_pos_filename}")
 
             # Color scale unified across all panels
             z_list = []
@@ -871,6 +951,9 @@ def plot_heatmaps_from_processed_data(data_dir):
                 color = 'C1'
                 plotted = False
 
+                # Save derivative line plot data
+                deriv_line_data = []
+
                 # Negative Jpm segment
                 if Z_neg is not None and Z_neg.size > 0:
                     y_neg = Z_neg[idx, :]
@@ -878,6 +961,8 @@ def plot_heatmaps_from_processed_data(data_dir):
                     if np.any(mask_neg):
                         plt.plot(jpm_neg[mask_neg], y_neg[mask_neg], '-', lw=1.8, color=color, label=f'β={b:.3g}')
                         plotted = True
+                        for j, d in zip(jpm_neg[mask_neg], y_neg[mask_neg]):
+                            deriv_line_data.append([j, b, d])
 
                 # Positive Jpm segment
                 if Z_pos is not None and Z_pos.size > 0:
@@ -886,6 +971,16 @@ def plot_heatmaps_from_processed_data(data_dir):
                     if np.any(mask_pos):
                         plt.plot(jpm_pos[mask_pos], y_pos[mask_pos], '-', lw=1.8, color=color, label=None if plotted else f'β={b:.3g}')
                         plotted = True
+                        for j, d in zip(jpm_pos[mask_pos], y_pos[mask_pos]):
+                            deriv_line_data.append([j, b, d])
+
+                # Save derivative line plot data
+                if deriv_line_data:
+                    deriv_line_data = np.array(deriv_line_data)
+                    deriv_line_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_jpm_fixed_beta_data_{species}.dat')
+                    np.savetxt(deriv_line_filename, deriv_line_data, header='jpm beta dqfi_dbeta', 
+                              fmt='%.6f %.6f %.6f')
+                    print(f"Saved derivative line plot data: {deriv_line_filename}")
 
                 plt.xlabel('Jpm')
                 plt.ylabel('dQFI/dβ')
