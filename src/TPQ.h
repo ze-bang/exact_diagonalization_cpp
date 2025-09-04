@@ -122,6 +122,22 @@ std::vector<SingleSiteOperator> createSzOperators(int num_sites, float spin_leng
     return Sz_ops;
 }
 
+std::vector<SingleSiteOperator> createSxOperators(int num_sites, float spin_length) {
+    std::vector<SingleSiteOperator> Sx_ops;
+    for (int site = 0; site < num_sites; site++) {
+        Sx_ops.emplace_back(num_sites, spin_length, 3, site);
+    }
+    return Sx_ops;
+}
+
+std::vector<SingleSiteOperator> createSyOperators(int num_sites, float spin_length) {
+    std::vector<SingleSiteOperator> Sy_ops;
+    for (int site = 0; site < num_sites; site++) {
+        Sy_ops.emplace_back(num_sites, spin_length, 4, site);
+    }
+    return Sy_ops;
+}
+
 std::pair<std::vector<Complex>, std::vector<Complex>> calculateSzandSz2(
     const ComplexVector& tpq_state,
     int num_sites,
@@ -901,15 +917,20 @@ void writeFluctuationData(
     const ComplexVector& tpq_state,
     int num_sites,
     float spin_length,
+    const std::vector<SingleSiteOperator>& Sx_ops,
+    const std::vector<SingleSiteOperator>& Sy_ops,
     const std::vector<SingleSiteOperator>& Sz_ops,
     const std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>>& double_site_ops,
     int sublattice_size,
     int step
 ) {
-    std::ofstream flct_out(flct_file, std::ios::app);
     auto [Sz, Sz2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sz_ops, sublattice_size);
+    auto [Sy, Sy2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sy_ops, sublattice_size);
+    auto [Sx, Sx2] = calculateSzandSz2(tpq_state, num_sites, spin_length, Sx_ops, sublattice_size);
+
     auto Spm2exp = calculateSpm_onsite(tpq_state, num_sites, spin_length, double_site_ops.second, sublattice_size);
 
+    std::ofstream flct_out(flct_file, std::ios::app);
     flct_out << std::setprecision(16) << inv_temp 
              << " " << Sz[sublattice_size].real() << " " << Sz[sublattice_size].imag() 
              << " " << Sz2[sublattice_size].real() << " " << Sz2[sublattice_size].imag();
@@ -922,6 +943,37 @@ void writeFluctuationData(
     flct_out << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
 
     flct_out << " " << step << std::endl;   
+
+    std::string flct_file_x_string = flct_file.substr(0,flct_file.size()-4) + "_Sx.dat";
+    std::ofstream flct_out_x(flct_file_x_string, std::ios::app);
+    flct_out_x << std::setprecision(16) << inv_temp 
+               << " " << Sx[sublattice_size].real() << " " << Sx[sublattice_size].imag() 
+               << " " << Sx2[sublattice_size].real() << " " << Sx2[sublattice_size].imag();
+    
+    for (int i = 0; i < sublattice_size; i++) {
+        flct_out_x << " " << Sx[i].real() << " " << Sx[i].imag() 
+                   << " " << Sx2[i].real() << " " << Sx2[i].imag();
+    }
+
+    flct_out_x << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
+
+    flct_out_x << " " << step << std::endl;
+
+    std::string flct_file_y_string = flct_file.substr(0,flct_file.size()-4) + "_Sy.dat";
+    std::ofstream flct_out_y(flct_file_y_string, std::ios::app);
+    flct_out_y << std::setprecision(16) << inv_temp 
+               << " " << Sy[sublattice_size].real() << " " << Sy[sublattice_size].imag() 
+               << " " << Sy2[sublattice_size].real() << " " << Sy2[sublattice_size].imag();
+    
+    for (int i = 0; i < sublattice_size; i++) {
+        flct_out_y << " " << Sy[i].real() << " " << Sy[i].imag() 
+                   << " " << Sy2[i].real() << " " << Sy2[i].imag();
+    }
+
+    flct_out_y << std::setprecision(16) << " " << Spm2exp.real() << " " << Spm2exp.imag();
+
+    flct_out_y << " " << step << std::endl;
+
 
     auto [Szz, Spm, Spp, Spz] = calculateSzzSpm(tpq_state, num_sites, spin_length, double_site_ops, sublattice_size);
     for (size_t idx = 0; idx < spin_corr.size(); idx++) {
@@ -1971,6 +2023,9 @@ void microcanonical_tpq(
 
     // Create Sz operators
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
+
     std::pair<std::vector<SingleSiteOperator>, std::vector<SingleSiteOperator>> double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
     std::function<void(const Complex*, Complex*, int)> U_t;
@@ -2096,7 +2151,7 @@ void microcanonical_tpq(
             // Write fluctuation data at specified intervals
             if (step % temp_interval == 0 || step == max_iter) {
                 if (measure_sz){
-                    writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                    writeFluctuationData(flct_file, spin_corr, inv_temp, v0, num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
                 }
             }
             // If inv_temp is at one of the specified inverse temperature points, compute observables
@@ -2188,6 +2243,8 @@ void canonical_tpq(
 
     // Operators for fluctuations/correlations
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
     auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
     // Temperature checkpoints (log-spaced β for saving states)
@@ -2242,7 +2299,7 @@ void canonical_tpq(
 
             if ((measure_sz && (k % std::max(1, temp_interval) == 0 || k == max_steps))) {
                 writeFluctuationData(flct_file, spin_corr, inv_temp, psi,
-                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                                     num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
             }
 
             for (int i = 0; i < num_temp_points; ++i) {
@@ -2357,6 +2414,8 @@ inline void canonical_tpq_cuda(
     energies.clear();
 
     int num_sites = static_cast<int>(std::log2(N));
+    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
     auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
@@ -2414,7 +2473,7 @@ inline void canonical_tpq_cuda(
                 ComplexVector h_v(N);
                 copyDeviceToHost(h_v.data(), d_state, N);
                 writeFluctuationData(flct_file, spin_corr, inv_temp, h_v,
-                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                                     num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
             }
 
             for (int i = 0; i < num_temp_points; ++i) {
@@ -2518,6 +2577,9 @@ inline void microcanonical_tpq_cuda(
 
     // Pre-create host-side operator structures needed for fluctuation I/O
     std::vector<SingleSiteOperator> Sz_ops = createSzOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sx_ops = createSxOperators(num_sites, spin_length);
+    std::vector<SingleSiteOperator> Sy_ops = createSyOperators(num_sites, spin_length);
+
     auto double_site_ops = createSingleOperators_pair(num_sites, spin_length);
 
     // Temperature checkpoints (same as CPU path)
@@ -2606,7 +2668,7 @@ inline void microcanonical_tpq_cuda(
                 ComplexVector h_v0(N);
                 copyDeviceToHost(h_v0.data(), d_v0, N);
                 writeFluctuationData(flct_file, spin_corr, inv_temp, h_v0,
-                                     num_sites, spin_length, Sz_ops, double_site_ops, sublattice_size, step);
+                                     num_sites, spin_length, Sx_ops, Sy_ops, Sz_ops, double_site_ops, sublattice_size, step);
             }
 
             // Save states near target inverse temperatures (for later observables)
