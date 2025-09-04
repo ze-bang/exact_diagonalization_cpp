@@ -47,26 +47,43 @@ def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None
     return broadened_data, broadening_factor if 'broadening_factor' in locals() else np.ones_like(data)
 
 def parse_filename_new(filename):
-    """Extract species (including momentum) and beta from filenames like:
-       time_corr_rand0_SmSp_q0_op0_beta=1.436681.dat
+    """Extract species (including momentum), beta, and sample index from filenames like:
+       time_corr_rand0_SmSp_q0_op0_beta=1.436681.dat or time_corr_sample3_...
+
+    Returns: (species_with_momentum: str, beta: float, sample_idx: int)
+    If parsing fails, returns (None, None, None).
     """
     basename = os.path.basename(filename)
-    m = re.match(r'^time_corr_rand(\d+)_(.+?)_beta=([0-9.+-eE]+)\.dat$', basename)
+    # Support both randN and sampleN prefixes
+    m = re.match(r'^time_corr_(?:rand|sample)(\d+)_(.+?)_beta=([0-9.+-eE]+)\.dat$', basename)
     if m:
+        sample_idx = int(m.group(1))
         species_with_momentum = m.group(2)
         beta = float(m.group(3))
-        return species_with_momentum, beta
-    return None, None
+        return species_with_momentum, beta, sample_idx
+    return None, None, None
 
-def parse_QFI_data_new(structure_factor_dir):
+def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
     """Parse QFI data from the new directory structure."""
     # Find all beta subdirectories
     beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
     print(f"Found {len(beta_dirs)} beta directories.")
     
-    # Group files by species (including momentum), then by beta
+    # Group files by species (including momentum), then by beta bins (tolerance-based)
+    # species_data[species][beta_bin_index] -> list of file paths for that species and beta bin
     species_data = defaultdict(lambda: defaultdict(list))
     species_names = set()
+    # Keep track of beta bin centers and values assigned (for labeling)
+    beta_bins = []               # list of representative beta centers
+    beta_bin_values = defaultdict(list)  # beta_bin_values[bin_idx] -> list of raw betas contributing
+
+    def assign_beta_bin(beta_val, bins, tol):
+        # Absolute tolerance grouping
+        for i, c in enumerate(bins):
+            if abs(beta_val - c) <= tol:
+                return i
+        bins.append(beta_val)
+        return len(bins) - 1
     
     for beta_dir in beta_dirs:
         # Extract beta value from directory name
@@ -74,15 +91,21 @@ def parse_QFI_data_new(structure_factor_dir):
         if not beta_match:
             continue
         beta_value = float(beta_match.group(1))
-        # Find all time correlation files in this beta directory
-        files = glob.glob(os.path.join(beta_dir+"/taylor/", 'time_corr_rand0_*.dat'))
+        # Map this directory beta to a tolerance-based bin index
+        bin_idx = assign_beta_bin(beta_value, beta_bins, beta_tol)
+        beta_bin_values[bin_idx].append(beta_value)
+
+        # Find all time correlation files in this beta directory, across all samples
+        taylor_dir = os.path.join(beta_dir, 'taylor')
+        files = []
+        files.extend(glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat')))
 
         for file_path in files:
-            species_with_momentum, file_beta = parse_filename_new(file_path)
+            species_with_momentum, file_beta, sample_idx = parse_filename_new(file_path)
             if species_with_momentum:
                 species_names.add(species_with_momentum)
-                # Use the beta from directory name as primary, file beta as verification
-                species_data[species_with_momentum][beta_value].append(file_path)
+                # Group by beta bin (use directory beta, tolerate small per-file beta deviations)
+                species_data[species_with_momentum][bin_idx].append(file_path)
     
     print("Species (with momentum) found:")
     for name in sorted(list(species_names)):
@@ -96,8 +119,11 @@ def parse_QFI_data_new(structure_factor_dir):
         print(f"Processing species: {species}")
         
         # Process each beta group for the current species
-        for beta, file_list in beta_groups.items():
-            print(f"  Processing beta={beta} with {len(file_list)} files")
+        for beta_bin_idx, file_list in beta_groups.items():
+            # Determine representative beta for this bin (mean of contributing values)
+            beta_vals = beta_bin_values.get(beta_bin_idx, [])
+            beta = float(np.mean(beta_vals)) if len(beta_vals) > 0 else np.nan
+            print(f"  Processing beta≈{beta} (bin {beta_bin_idx}) with {len(file_list)} files")
             
             all_data = []
             for file_path in file_list:
@@ -191,9 +217,9 @@ def parse_QFI_data_new(structure_factor_dir):
             # Apply compensation to the truncated spectral function
             s_omega_pos_compensated = s_omega_pos * compensation_factor
             
-            print(f"    Beta={beta}: Integral before truncation: {integral_before:.6f}")
-            print(f"    Beta={beta}: Integral after truncation: {integral_after:.6f}")
-            print(f"    Beta={beta}: Compensation factor: {compensation_factor:.6f}")
+            print(f"    Beta≈{beta:.6g}: Integral before truncation: {integral_before:.6f}")
+            print(f"    Beta≈{beta:.6g}: Integral after truncation: {integral_after:.6f}")
+            print(f"    Beta≈{beta:.6g}: Compensation factor: {compensation_factor:.6f}")
             
             # Calculate QFI using compensated positive frequencies
             integrand = s_omega_pos_compensated * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
@@ -201,16 +227,16 @@ def parse_QFI_data_new(structure_factor_dir):
             
             # Plot the spectral function
             plt.figure(figsize=(10, 6))
-            plt.scatter(omega_pos, s_omega_pos, label=f'Beta={beta} QFI={qfi:.4f}')
+            plt.scatter(omega_pos, s_omega_pos, label=f'Beta≈{beta:.6g} QFI={qfi:.4f}')
             plt.xlabel('Frequency (rad/s)')
             plt.ylabel('Spectral Function S(ω)')
             plt.xlim(0, 6)
-            plt.title(f'Spectral Function for {species} at Beta={beta}')
+            plt.title(f'Spectral Function for {species} at Beta≈{beta:.6g}')
             plt.grid(True)
             plt.legend()
             outdir = os.path.join(structure_factor_dir, 'processed_data', species)
             os.makedirs(outdir, exist_ok=True)
-            plot_filename = os.path.join(outdir, f'spectral_function_{species}_beta_{beta}.png')
+            plot_filename = os.path.join(outdir, f'spectral_function_{species}_beta_{beta:.6g}.png')
             plt.savefig(plot_filename, dpi=300)
             plt.close()
             
@@ -218,7 +244,7 @@ def parse_QFI_data_new(structure_factor_dir):
             
             # Save processed spectral data for each beta
             data_out = np.column_stack((omega, S_omega_real))
-            data_filename = os.path.join(outdir, f'spectral_beta_{beta}.dat')
+            data_filename = os.path.join(outdir, f'spectral_beta_{beta:.6g}.dat')
             np.savetxt(data_filename, data_out, header='freq spectral_function')
     
     # Plot QFI vs Beta for each species
@@ -364,83 +390,83 @@ def parse_QFI_across_Jpm(data_dir):
         plot_outdir = os.path.join(data_dir, 'plots')
         os.makedirs(plot_outdir, exist_ok=True)
         
-        # Plot QFI heatmaps
-        for species, data_points in all_qfi_data.items():
-            if not data_points:
-                continue
+        # # Plot QFI heatmaps
+        # for species, data_points in all_qfi_data.items():
+        #     if not data_points:
+        #         continue
                 
-            # Extract data
-            jpm_vals = np.array([point[0] for point in data_points])
-            beta_vals = np.array([point[1] for point in data_points])
-            qfi_vals = np.array([point[2] for point in data_points])
+        #     # Extract data
+        #     jpm_vals = np.array([point[0] for point in data_points])
+        #     beta_vals = np.array([point[1] for point in data_points])
+        #     qfi_vals = np.array([point[2] for point in data_points])
             
-            # Create interpolation grid
-            jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
-            beta_min, beta_max = beta_vals.min(), beta_vals.max()
+        #     # Create interpolation grid
+        #     jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
+        #     beta_min, beta_max = beta_vals.min(), beta_vals.max()
             
-            jpm_grid = np.linspace(jpm_min, jpm_max, 100)
-            beta_grid = np.logspace(np.log10(beta_min), np.log10(beta_max), 100)
-            JPM, BETA = np.meshgrid(jpm_grid, beta_grid)
+        #     jpm_grid = np.linspace(jpm_min, jpm_max, 100)
+        #     beta_grid = np.logspace(np.log10(beta_min), np.log10(beta_max), 100)
+        #     JPM, BETA = np.meshgrid(jpm_grid, beta_grid)
             
-            # Interpolate QFI values
-            QFI = griddata((jpm_vals, beta_vals), qfi_vals, (JPM, BETA), method='cubic')
+        #     # Interpolate QFI values
+        #     QFI = griddata((jpm_vals, beta_vals), qfi_vals, (JPM, BETA), method='cubic')
             
-            # Plot heatmap
-            plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JPM, BETA, QFI, shading='auto', cmap='viridis')
-            plt.colorbar(label='QFI')
+        #     # Plot heatmap
+        #     plt.figure(figsize=(12, 8))
+        #     plt.pcolormesh(JPM, BETA, QFI, shading='auto', cmap='viridis')
+        #     plt.colorbar(label='QFI')
             
-            # Overlay original data points
-            plt.scatter(jpm_vals, beta_vals, c='red', s=20, edgecolors='black')
+        #     # Overlay original data points
+        #     plt.scatter(jpm_vals, beta_vals, c='red', s=20, edgecolors='black')
             
-            plt.xlabel('Jpm')
-            plt.ylabel('Beta (β)')
-            plt.yscale('log')
-            plt.title(f'QFI Heatmap for {species}')
+        #     plt.xlabel('Jpm')
+        #     plt.ylabel('Beta (β)')
+        #     plt.yscale('log')
+        #     plt.title(f'QFI Heatmap for {species}')
             
-            heatmap_filename = os.path.join(plot_outdir, f'qfi_heatmap_{species}.png')
-            plt.savefig(heatmap_filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"Saved QFI heatmap for {species} to {heatmap_filename}")
+        #     heatmap_filename = os.path.join(plot_outdir, f'qfi_heatmap_{species}.png')
+        #     plt.savefig(heatmap_filename, dpi=300, bbox_inches='tight')
+        #     plt.close()
+        #     print(f"Saved QFI heatmap for {species} to {heatmap_filename}")
         
-        # Plot derivative heatmaps
-        for species, data_points in all_derivative_data.items():
-            if not data_points:
-                continue
+        # # Plot derivative heatmaps
+        # for species, data_points in all_derivative_data.items():
+        #     if not data_points:
+        #         continue
                 
-            # Extract data
-            jpm_vals = np.array([point[0] for point in data_points])
-            beta_vals = np.array([point[1] for point in data_points])
-            deriv_vals = np.array([point[2] for point in data_points])
+        #     # Extract data
+        #     jpm_vals = np.array([point[0] for point in data_points])
+        #     beta_vals = np.array([point[1] for point in data_points])
+        #     deriv_vals = np.array([point[2] for point in data_points])
             
-            # Create interpolation grid
-            jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
-            beta_min, beta_max = beta_vals.min(), beta_vals.max()
+        #     # Create interpolation grid
+        #     jpm_min, jpm_max = jpm_vals.min(), jpm_vals.max()
+        #     beta_min, beta_max = beta_vals.min(), beta_vals.max()
             
-            jpm_grid = np.linspace(jpm_min, jpm_max, 100)
-            beta_grid = np.logspace(np.log10(beta_min), np.log10(beta_max), 100)
-            JPM, BETA = np.meshgrid(jpm_grid, beta_grid)
+        #     jpm_grid = np.linspace(jpm_min, jpm_max, 100)
+        #     beta_grid = np.logspace(np.log10(beta_min), np.log10(beta_max), 100)
+        #     JPM, BETA = np.meshgrid(jpm_grid, beta_grid)
             
-            # Interpolate derivative values
-            DERIV = griddata((jpm_vals, beta_vals), deriv_vals, (JPM, BETA), method='cubic')
+        #     # Interpolate derivative values
+        #     DERIV = griddata((jpm_vals, beta_vals), deriv_vals, (JPM, BETA), method='cubic')
             
-            # Plot heatmap
-            plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JPM, BETA, DERIV, shading='auto', cmap='viridis')
-            plt.colorbar(label='dQFI/dβ')
+        #     # Plot heatmap
+        #     plt.figure(figsize=(12, 8))
+        #     plt.pcolormesh(JPM, BETA, DERIV, shading='auto', cmap='viridis')
+        #     plt.colorbar(label='dQFI/dβ')
 
-            # Overlay original data points
-            plt.scatter(jpm_vals, beta_vals, c='red', s=20, edgecolors='black')
+        #     # Overlay original data points
+        #     plt.scatter(jpm_vals, beta_vals, c='red', s=20, edgecolors='black')
 
-            plt.xlabel('Jpm')
-            plt.ylabel('Beta (β)')
-            plt.yscale('log')
-            plt.title(f'dQFI/dβ Heatmap for {species}')
+        #     plt.xlabel('Jpm')
+        #     plt.ylabel('Beta (β)')
+        #     plt.yscale('log')
+        #     plt.title(f'dQFI/dβ Heatmap for {species}')
             
-            heatmap_filename = os.path.join(plot_outdir, f'qfi_derivative_heatmap_{species}.png')
-            plt.savefig(heatmap_filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            print(f"Saved derivative heatmap for {species} to {heatmap_filename}")
+        #     heatmap_filename = os.path.join(plot_outdir, f'qfi_derivative_heatmap_{species}.png')
+        #     plt.savefig(heatmap_filename, dpi=300, bbox_inches='tight')
+        #     plt.close()
+        #     print(f"Saved derivative heatmap for {species} to {heatmap_filename}")
         
         print("Heatmap generation complete!")
         return jpm_qfi_data
@@ -574,7 +600,8 @@ def parse_QFI_across_hi(data_dir):
 
 
 def plot_heatmaps_from_processed_data(data_dir):
-    """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories."""
+    """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories.
+       Only plot rows where there is no NaN, and save all intermediate and plot data."""
     
     # Find all subdirectories matching the pattern Jpm=*
     subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
@@ -642,10 +669,29 @@ def plot_heatmaps_from_processed_data(data_dir):
             except Exception as e:
                 print(f"Error reading {deriv_file}: {e}")
     
-    # Build uniform beta grid from Jpm≈0.09, make separate heatmaps for Jpm<0 and Jpm>0, then stitch
-
     plot_outdir = os.path.join(data_dir, 'plots')
     os.makedirs(plot_outdir, exist_ok=True)
+
+    # Save raw assembled points for QFI and derivatives
+    for species, data_points in all_qfi_data.items():
+        if data_points:
+            arr = np.array(data_points, dtype=float)
+            np.savetxt(os.path.join(plot_outdir, f'qfi_points_{species}.dat'), arr,
+                       header='Jpm beta qfi')
+    for species, data_points in all_derivative_data.items():
+        if data_points:
+            arr = np.array(data_points, dtype=float)
+            np.savetxt(os.path.join(plot_outdir, f'qfi_derivative_points_{species}.dat'), arr,
+                       header='Jpm beta dQFI_dbeta')
+
+    def save_grid_txt(fname, beta, jpm, Z, value_label):
+        if Z is None or Z.size == 0:
+            return
+        header_cols = ['beta'] + [f'Jpm={v:g}' for v in jpm]
+        header = ' '.join(header_cols)
+        out = np.column_stack((beta, Z))
+        np.savetxt(fname, out, header=header)
+
     for species, data_points in all_qfi_data.items():
         if not data_points:
             continue
@@ -653,8 +699,8 @@ def plot_heatmaps_from_processed_data(data_dir):
         arr = np.array(data_points, dtype=float)
         jpm_vals, beta_vals, qfi_vals = arr[:, 0], arr[:, 1], arr[:, 2]
 
-        # Choose reference beta grid from Jpm closest to 0.09
-        ref_target = 0.09
+        # Choose reference beta grid from Jpm closest to 0.08
+        ref_target = 0.08
         unique_jpm = np.unique(jpm_vals)
         if unique_jpm.size == 0:
             continue
@@ -705,20 +751,61 @@ def plot_heatmaps_from_processed_data(data_dir):
         if jpm_pos.size > 0:
             Z_pos = np.column_stack([interp_at_jpm(j) for j in jpm_pos])
 
-        # Color scale unified across all panels
+        # Save unfiltered grids
+        if Z_neg is not None:
+            np.savez(os.path.join(plot_outdir, f'qfi_grid_neg_{species}.npz'),
+                     beta=target_beta, jpm=jpm_neg, Z=Z_neg)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_grid_neg_{species}.dat'),
+                          target_beta, jpm_neg, Z_neg, 'QFI')
+        if Z_pos is not None:
+            np.savez(os.path.join(plot_outdir, f'qfi_grid_pos_{species}.npz'),
+                     beta=target_beta, jpm=jpm_pos, Z=Z_pos)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_grid_pos_{species}.dat'),
+                          target_beta, jpm_pos, Z_pos, 'QFI')
+
+        # Filter rows: only keep rows with no NaN
+        Z_neg_f = None
+        Z_pos_f = None
+        mask_rows_neg = None
+        mask_rows_pos = None
+        if Z_neg is not None and Z_neg.size > 0:
+            mask_rows_neg = np.all(np.isfinite(Z_neg), axis=1)
+            if np.any(mask_rows_neg):
+                Z_neg_f = Z_neg[mask_rows_neg, :]
+        if Z_pos is not None and Z_pos.size > 0:
+            mask_rows_pos = np.all(np.isfinite(Z_pos), axis=1)
+            if np.any(mask_rows_pos):
+                Z_pos_f = Z_pos[mask_rows_pos, :]
+
+        # Save filtered grids
+        if Z_neg_f is not None:
+            beta_neg_f = target_beta[mask_rows_neg]
+            np.savez(os.path.join(plot_outdir, f'qfi_grid_neg_filtered_{species}.npz'),
+                     beta=beta_neg_f, jpm=jpm_neg, Z=Z_neg_f)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_grid_neg_filtered_{species}.dat'),
+                          beta_neg_f, jpm_neg, Z_neg_f, 'QFI')
+        if Z_pos_f is not None:
+            beta_pos_f = target_beta[mask_rows_pos]
+            np.savez(os.path.join(plot_outdir, f'qfi_grid_pos_filtered_{species}.npz'),
+                     beta=beta_pos_f, jpm=jpm_pos, Z=Z_pos_f)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_grid_pos_filtered_{species}.dat'),
+                          beta_pos_f, jpm_pos, Z_pos_f, 'QFI')
+
+        # Color scale unified across all plotted panels (filtered only)
         z_list = []
-        if Z_neg is not None: z_list.append(Z_neg)
-        if Z_pos is not None: z_list.append(Z_pos)
+        if Z_neg_f is not None: z_list.append(Z_neg_f)
+        if Z_pos_f is not None: z_list.append(Z_pos_f)
         if not z_list:
             continue
         vmin = np.nanmin([np.nanmin(z) for z in z_list])
         vmax = np.nanmax([np.nanmax(z) for z in z_list])
 
-        # Plot Jpm<0
-        if Z_neg is not None and Z_neg.size > 0:
-            JN, BN = np.meshgrid(jpm_neg, target_beta)
+        # Plot Jpm<0 using filtered rows only
+        if Z_neg_f is not None and Z_neg_f.size > 0:
+            beta_neg_f = target_beta[mask_rows_neg]
+            JN, BN = np.meshgrid(jpm_neg, beta_neg_f)
             plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JN, BN, Z_neg, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            plt.pcolormesh(JN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
             plt.yscale('log')
             plt.gca().invert_yaxis()  # large beta at bottom
             plt.xlabel('Jpm')
@@ -728,11 +815,12 @@ def plot_heatmaps_from_processed_data(data_dir):
             plt.savefig(os.path.join(plot_outdir, f'qfi_heatmap_neg_{species}.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Plot Jpm>0
-        if Z_pos is not None and Z_pos.size > 0:
-            JP, BP = np.meshgrid(jpm_pos, target_beta)
+        # Plot Jpm>0 using filtered rows only
+        if Z_pos_f is not None and Z_pos_f.size > 0:
+            beta_pos_f = target_beta[mask_rows_pos]
+            JP, BP = np.meshgrid(jpm_pos, beta_pos_f)
             plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JP, BP, Z_pos, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            plt.pcolormesh(JP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
             plt.yscale('log')
             plt.gca().invert_yaxis()  # large beta at bottom
             plt.xlabel('Jpm')
@@ -742,75 +830,97 @@ def plot_heatmaps_from_processed_data(data_dir):
             plt.savefig(os.path.join(plot_outdir, f'qfi_heatmap_pos_{species}.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Side-by-side (no gap) view for Jpm<0 and Jpm>0
-        if (Z_neg is not None and Z_neg.size > 0) and (Z_pos is not None and Z_pos.size > 0):
-            JN, BN = np.meshgrid(jpm_neg, target_beta)
-            JP, BP = np.meshgrid(jpm_pos, target_beta)
+        # Side-by-side (no gap) view for Jpm<0 and Jpm>0 using filtered rows
+        if (Z_neg_f is not None and Z_neg_f.size > 0) and (Z_pos_f is not None and Z_pos_f.size > 0):
+            beta_neg_f = target_beta[mask_rows_neg]
+            beta_pos_f = target_beta[mask_rows_pos]
 
-            # Ensure large beta (e.g., 1000) is at the bottom on a log scale
-            y_min, y_max = float(np.min(target_beta)), float(np.max(target_beta))
+            JN, BN = np.meshgrid(jpm_neg, beta_neg_f)
+            JP, BP = np.meshgrid(jpm_pos, beta_pos_f)
+
+            y_min = float(min(beta_neg_f.min(), beta_pos_f.min()))
+            y_max = float(max(beta_neg_f.max(), beta_pos_f.max()))
+
+            # Make left panel wider (dynamically scaled, lower bound 1.2x)
+            neg_span = float(np.ptp(jpm_neg)) if jpm_neg.size > 0 else 0.0
+            pos_span = float(np.ptp(jpm_pos)) if jpm_pos.size > 0 else 0.0
+            if pos_span > 0:
+                wr = neg_span / pos_span
+            else:
+                wr = 1.5
+            wr = float(np.clip(wr, 1.2, 3.0))
 
             fig, (axL, axR) = plt.subplots(
-            1, 2, figsize=(14, 8), sharey=True,
-            gridspec_kw={'wspace': 0.0, 'hspace': 0.0}
+                1, 2, figsize=(14, 8), sharey=True,
+                gridspec_kw={'wspace': 0.0, 'hspace': 0.0, 'width_ratios': [wr, 1.0]}
             )
-            mL = axL.pcolormesh(JN, BN, Z_neg, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-            mR = axR.pcolormesh(JP, BP, Z_pos, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            mL = axL.pcolormesh(JN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            mR = axR.pcolormesh(JP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
 
             for ax in (axL, axR):
                 ax.set_yscale('log')
-                # Explicitly set limits so bottom = largest beta
-                ax.set_ylim(y_max, y_min)
+                ax.set_ylim(y_max, y_min)  # large beta at bottom
                 ax.set_xlabel('Jpm')
             axL.set_ylabel('Beta (β)')
             axR.tick_params(labelleft=False)
 
-            # Remove any extra space between subplots
             fig.subplots_adjust(wspace=0.0)
-
-            # Single shared colorbar
             cbar = fig.colorbar(mL, ax=[axL, axR], location='right', pad=0.02)
             cbar.set_label('QFI')
 
             fig.suptitle(f'QFI Heatmap (Jpm<0 | Jpm>0) for {species}')
             fig.savefig(os.path.join(plot_outdir, f'qfi_heatmap_side_by_side_{species}.png'),
-                dpi=300, bbox_inches='tight')
+                        dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Line plot at the largest beta (QFI vs Jpm), same color for Jpm<0 and Jpm>0
-        if target_beta.size > 0:
-            idx = int(np.argmax(target_beta))  # index of largest beta
-            b = float(target_beta[idx])
+        # Line plot at the largest beta with no NaN per segment (QFI vs Jpm)
+        # Find largest beta row index satisfying no-NaN in each segment
+        idx_neg = None
+        idx_pos = None
+        if Z_neg is not None and Z_neg.size > 0 and mask_rows_neg is not None and np.any(mask_rows_neg):
+            valid_idxs = np.where(mask_rows_neg)[0]
+            if valid_idxs.size > 0:
+                idx_neg = valid_idxs[-1]
+        if Z_pos is not None and Z_pos.size > 0 and mask_rows_pos is not None and np.any(mask_rows_pos):
+            valid_idxs = np.where(mask_rows_pos)[0]
+            if valid_idxs.size > 0:
+                idx_pos = valid_idxs[-1]
 
+        if idx_neg is not None or idx_pos is not None:
             plt.figure(figsize=(10, 6))
             color = 'C0'
-            plotted = False
+            plotted_any = False
 
             # Negative Jpm segment
-            if Z_neg is not None and Z_neg.size > 0:
-                y_neg = Z_neg[idx, :]
-                mask_neg = np.isfinite(y_neg)
-                if np.any(mask_neg):
-                    plt.plot(jpm_neg[mask_neg], y_neg[mask_neg], '-', lw=1.8, color=color, label=f'β={b:.3g}')
-                    plotted = True
+            if idx_neg is not None:
+                b_neg = float(target_beta[idx_neg])
+                y_neg = Z_neg[idx_neg, :]
+                # All finite by construction of mask
+                plt.plot(jpm_neg, y_neg, '-', lw=1.8, color=color, label=f'β={b_neg:.3g} (neg)')
+                np.savetxt(os.path.join(plot_outdir, f'qfi_vs_jpm_fixed_beta_neg_{species}.dat'),
+                           np.column_stack((jpm_neg, np.full_like(jpm_neg, b_neg), y_neg)),
+                           header='Jpm beta QFI')
+                plotted_any = True
 
-            # Positive Jpm segment (same color, no duplicate label)
-            if Z_pos is not None and Z_pos.size > 0:
-                y_pos = Z_pos[idx, :]
-                mask_pos = np.isfinite(y_pos)
-                if np.any(mask_pos):
-                    plt.plot(jpm_pos[mask_pos], y_pos[mask_pos], '-', lw=1.8, color=color, label=None if plotted else f'β={b:.3g}')
-                    plotted = True
+            # Positive Jpm segment
+            if idx_pos is not None:
+                b_pos = float(target_beta[idx_pos])
+                y_pos = Z_pos[idx_pos, :]
+                plt.plot(jpm_pos, y_pos, '-', lw=1.8, color=color, label=f'β={b_pos:.3g} (pos)' if not plotted_any else f'β={b_pos:.3g} (pos)')
+                np.savetxt(os.path.join(plot_outdir, f'qfi_vs_jpm_fixed_beta_pos_{species}.dat'),
+                           np.column_stack((jpm_pos, np.full_like(jpm_pos, b_pos), y_pos)),
+                           header='Jpm beta QFI')
+                plotted_any = True
 
             plt.xlabel('Jpm')
             plt.ylabel('QFI')
-            plt.title(f'QFI vs Jpm at largest β for {species}')
+            plt.title(f'QFI vs Jpm at largest β rows (no NaN) for {species}')
             plt.grid(True, alpha=0.3)
-            if plotted:
+            if plotted_any:
                 plt.legend(fontsize=9)
                 fname = os.path.join(plot_outdir, f'qfi_vs_jpm_fixed_beta_{species}.png')
                 plt.savefig(fname, dpi=300, bbox_inches='tight')
-                plt.close()
+            plt.close()
 
     # Derivative plots (same pipeline)
     for species, data_points in all_derivative_data.items():
@@ -872,20 +982,61 @@ def plot_heatmaps_from_processed_data(data_dir):
         if jpm_pos.size > 0:
             Z_pos = np.column_stack([interp_deriv_at_jpm(j) for j in jpm_pos])
 
-        # Color scale unified across all panels
+        # Save unfiltered derivative grids
+        if Z_neg is not None:
+            np.savez(os.path.join(plot_outdir, f'qfi_derivative_grid_neg_{species}.npz'),
+                     beta=target_beta, jpm=jpm_neg, Z=Z_neg)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_derivative_grid_neg_{species}.dat'),
+                          target_beta, jpm_neg, Z_neg, 'dQFI_dbeta')
+        if Z_pos is not None:
+            np.savez(os.path.join(plot_outdir, f'qfi_derivative_grid_pos_{species}.npz'),
+                     beta=target_beta, jpm=jpm_pos, Z=Z_pos)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_derivative_grid_pos_{species}.dat'),
+                          target_beta, jpm_pos, Z_pos, 'dQFI_dbeta')
+
+        # Filter rows: only keep rows with no NaN
+        Z_neg_f = None
+        Z_pos_f = None
+        mask_rows_neg = None
+        mask_rows_pos = None
+        if Z_neg is not None and Z_neg.size > 0:
+            mask_rows_neg = np.all(np.isfinite(Z_neg), axis=1)
+            if np.any(mask_rows_neg):
+                Z_neg_f = Z_neg[mask_rows_neg, :]
+        if Z_pos is not None and Z_pos.size > 0:
+            mask_rows_pos = np.all(np.isfinite(Z_pos), axis=1)
+            if np.any(mask_rows_pos):
+                Z_pos_f = Z_pos[mask_rows_pos, :]
+
+        # Save filtered derivative grids
+        if Z_neg_f is not None:
+            beta_neg_f = target_beta[mask_rows_neg]
+            np.savez(os.path.join(plot_outdir, f'qfi_derivative_grid_neg_filtered_{species}.npz'),
+                     beta=beta_neg_f, jpm=jpm_neg, Z=Z_neg_f)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_derivative_grid_neg_filtered_{species}.dat'),
+                          beta_neg_f, jpm_neg, Z_neg_f, 'dQFI_dbeta')
+        if Z_pos_f is not None:
+            beta_pos_f = target_beta[mask_rows_pos]
+            np.savez(os.path.join(plot_outdir, f'qfi_derivative_grid_pos_filtered_{species}.npz'),
+                     beta=beta_pos_f, jpm=jpm_pos, Z=Z_pos_f)
+            save_grid_txt(os.path.join(plot_outdir, f'qfi_derivative_grid_pos_filtered_{species}.dat'),
+                          beta_pos_f, jpm_pos, Z_pos_f, 'dQFI_dbeta')
+
+        # Color scale unified across all plotted panels (filtered only)
         z_list = []
-        if Z_neg is not None: z_list.append(Z_neg)
-        if Z_pos is not None: z_list.append(Z_pos)
+        if Z_neg_f is not None: z_list.append(Z_neg_f)
+        if Z_pos_f is not None: z_list.append(Z_pos_f)
         if not z_list:
             continue
         vmin = np.nanmin([np.nanmin(z) for z in z_list])
         vmax = np.nanmax([np.nanmax(z) for z in z_list])
 
-        # Plot Jpm<0
-        if Z_neg is not None and Z_neg.size > 0:
-            JN, BN = np.meshgrid(jpm_neg, target_beta)
+        # Plot Jpm<0 using filtered rows
+        if Z_neg_f is not None and Z_neg_f.size > 0:
+            beta_neg_f = target_beta[mask_rows_neg]
+            JN, BN = np.meshgrid(jpm_neg, beta_neg_f)
             plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JN, BN, Z_neg, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            plt.pcolormesh(JN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
             plt.yscale('log')
             plt.gca().invert_yaxis()  # large beta at bottom
             plt.xlabel('Jpm')
@@ -895,11 +1046,12 @@ def plot_heatmaps_from_processed_data(data_dir):
             plt.savefig(os.path.join(plot_outdir, f'qfi_derivative_heatmap_neg_{species}.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Plot Jpm>0
-        if Z_pos is not None and Z_pos.size > 0:
-            JP, BP = np.meshgrid(jpm_pos, target_beta)
+        # Plot Jpm>0 using filtered rows
+        if Z_pos_f is not None and Z_pos_f.size > 0:
+            beta_pos_f = target_beta[mask_rows_pos]
+            JP, BP = np.meshgrid(jpm_pos, beta_pos_f)
             plt.figure(figsize=(12, 8))
-            plt.pcolormesh(JP, BP, Z_pos, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            plt.pcolormesh(JP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
             plt.yscale('log')
             plt.gca().invert_yaxis()  # large beta at bottom
             plt.xlabel('Jpm')
@@ -909,19 +1061,32 @@ def plot_heatmaps_from_processed_data(data_dir):
             plt.savefig(os.path.join(plot_outdir, f'qfi_derivative_heatmap_pos_{species}.png'), dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Side-by-side (no gap) view for Jpm<0 and Jpm>0
-        if (Z_neg is not None and Z_neg.size > 0) and (Z_pos is not None and Z_pos.size > 0):
-            JN, BN = np.meshgrid(jpm_neg, target_beta)
-            JP, BP = np.meshgrid(jpm_pos, target_beta)
+        # Side-by-side (no gap) view for Jpm<0 and Jpm>0 using filtered rows
+        if (Z_neg_f is not None and Z_neg_f.size > 0) and (Z_pos_f is not None and Z_pos_f.size > 0):
+            beta_neg_f = target_beta[mask_rows_neg]
+            beta_pos_f = target_beta[mask_rows_pos]
 
-            y_min, y_max = float(np.min(target_beta)), float(np.max(target_beta))
+            JN, BN = np.meshgrid(jpm_neg, beta_neg_f)
+            JP, BP = np.meshgrid(jpm_pos, beta_pos_f)
+
+            y_min = float(min(beta_neg_f.min(), beta_pos_f.min()))
+            y_max = float(max(beta_neg_f.max(), beta_pos_f.max()))
+
+            # Make left panel wider (dynamically scaled, lower bound 1.2x)
+            neg_span = float(np.ptp(jpm_neg)) if jpm_neg.size > 0 else 0.0
+            pos_span = float(np.ptp(jpm_pos)) if jpm_pos.size > 0 else 0.0
+            if pos_span > 0:
+                wr = neg_span / pos_span
+            else:
+                wr = 1.5
+            wr = float(np.clip(wr, 1.2, 3.0))
 
             fig, (axL, axR) = plt.subplots(
-            1, 2, figsize=(14, 8), sharey=True,
-            gridspec_kw={'wspace': 0.0, 'hspace': 0.0}
+                1, 2, figsize=(14, 8), sharey=True,
+                gridspec_kw={'wspace': 0.0, 'hspace': 0.0, 'width_ratios': [wr, 1.0]}
             )
-            mL = axL.pcolormesh(JN, BN, Z_neg, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-            mR = axR.pcolormesh(JP, BP, Z_pos, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            mL = axL.pcolormesh(JN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+            mR = axR.pcolormesh(JP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
 
             for ax in (axL, axR):
                 ax.set_yscale('log')
@@ -931,49 +1096,60 @@ def plot_heatmaps_from_processed_data(data_dir):
             axR.tick_params(labelleft=False)
 
             fig.subplots_adjust(wspace=0.0)
-
             cbar = fig.colorbar(mL, ax=[axL, axR], location='right', pad=0.02)
             cbar.set_label('dQFI/dβ')
 
             fig.suptitle(f'dQFI/dβ Heatmap (Jpm<0 | Jpm>0) for {species}')
             fig.savefig(os.path.join(plot_outdir, f'qfi_derivative_heatmap_side_by_side_{species}.png'),
-                dpi=300, bbox_inches='tight')
+                        dpi=300, bbox_inches='tight')
             plt.close()
 
-        # Line plot at the largest beta (dQFI/dβ vs Jpm), same color for Jpm<0 and Jpm>0
-        if target_beta.size > 0:
-            idx = int(np.argmax(target_beta))  # index of largest beta
-            b = float(target_beta[idx])
+        # Line plot at the largest beta with no NaN per segment (dQFI/dβ vs Jpm)
+        idx_neg = None
+        idx_pos = None
+        if Z_neg is not None and Z_neg.size > 0 and mask_rows_neg is not None and np.any(mask_rows_neg):
+            valid_idxs = np.where(mask_rows_neg)[0]
+            if valid_idxs.size > 0:
+                idx_neg = valid_idxs[-1]
+        if Z_pos is not None and Z_pos.size > 0 and mask_rows_pos is not None and np.any(mask_rows_pos):
+            valid_idxs = np.where(mask_rows_pos)[0]
+            if valid_idxs.size > 0:
+                idx_pos = valid_idxs[-1]
 
+        if idx_neg is not None or idx_pos is not None:
             plt.figure(figsize=(10, 6))
             color = 'C1'
-            plotted = False
+            plotted_any = False
 
             # Negative Jpm segment
-            if Z_neg is not None and Z_neg.size > 0:
-                y_neg = Z_neg[idx, :]
-                mask_neg = np.isfinite(y_neg)
-                if np.any(mask_neg):
-                    plt.plot(jpm_neg[mask_neg], y_neg[mask_neg], '-', lw=1.8, color=color, label=f'β={b:.3g}')
-                    plotted = True
+            if idx_neg is not None:
+                b_neg = float(target_beta[idx_neg])
+                y_neg = Z_neg[idx_neg, :]
+                plt.plot(jpm_neg, y_neg, '-', lw=1.8, color=color, label=f'β={b_neg:.3g} (neg)')
+                np.savetxt(os.path.join(plot_outdir, f'qfi_derivative_vs_jpm_fixed_beta_neg_{species}.dat'),
+                           np.column_stack((jpm_neg, np.full_like(jpm_neg, b_neg), y_neg)),
+                           header='Jpm beta dQFI_dbeta')
+                plotted_any = True
 
             # Positive Jpm segment
-            if Z_pos is not None and Z_pos.size > 0:
-                y_pos = Z_pos[idx, :]
-                mask_pos = np.isfinite(y_pos)
-                if np.any(mask_pos):
-                    plt.plot(jpm_pos[mask_pos], y_pos[mask_pos], '-', lw=1.8, color=color, label=None if plotted else f'β={b:.3g}')
-                    plotted = True
+            if idx_pos is not None:
+                b_pos = float(target_beta[idx_pos])
+                y_pos = Z_pos[idx_pos, :]
+                plt.plot(jpm_pos, y_pos, '-', lw=1.8, color=color, label=f'β={b_pos:.3g} (pos)' if not plotted_any else f'β={b_pos:.3g} (pos)')
+                np.savetxt(os.path.join(plot_outdir, f'qfi_derivative_vs_jpm_fixed_beta_pos_{species}.dat'),
+                           np.column_stack((jpm_pos, np.full_like(jpm_pos, b_pos), y_pos)),
+                           header='Jpm beta dQFI_dbeta')
+                plotted_any = True
 
             plt.xlabel('Jpm')
             plt.ylabel('dQFI/dβ')
-            plt.title(f'dQFI/dβ vs Jpm at largest β for {species}')
+            plt.title(f'dQFI/dβ vs Jpm at largest β rows (no NaN) for {species}')
             plt.grid(True, alpha=0.3)
-            if plotted:
-                plt.legend(fontsize=9)
+            if plotted_any:
                 fname = os.path.join(plot_outdir, f'qfi_derivative_vs_jpm_fixed_beta_{species}.png')
+                plt.legend(fontsize=9)
                 plt.savefig(fname, dpi=300, bbox_inches='tight')
-                plt.close()
+            plt.close()
 
 
 if __name__ == "__main__":

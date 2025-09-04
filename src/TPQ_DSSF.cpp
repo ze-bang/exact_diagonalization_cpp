@@ -6,8 +6,11 @@
 #include <sstream>
 #include <filesystem>
 #include <regex>
+#include <limits>
+#include <cstring>
 #include "construct_ham.h"
 #include "TPQ.h"
+#include "observables.h"
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
@@ -202,8 +205,17 @@ int main(int argc, char* argv[]) {
                 beta_values.push_back(std::stod(match[2]));
             }
         }
+
+        // Optionally include zero-temperature ground-state eigenvector
+        const std::string gs_file = tpq_directory + "/eigenvector_0.dat";
+        if (fs::exists(gs_file)) {
+            tpq_files.push_back(gs_file);
+            sample_indices.push_back(0); // use 0 as a conventional index for ground state
+            beta_strings.push_back("inf");
+            beta_values.push_back(std::numeric_limits<double>::infinity());
+        }
         
-        std::cout << "Found " << tpq_files.size() << " TPQ state files to process" << std::endl;
+        std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
         std::cout << "Using " << size << " MPI processes" << std::endl;
     }
     
@@ -266,10 +278,23 @@ int main(int argc, char* argv[]) {
         
         std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
         
-        // Load TPQ state
+        // Load state: TPQ binary or text eigenvector
         ComplexVector tpq_state;
-        if (!load_tpq_state(tpq_state, tpq_files[i])) {
-            std::cerr << "Rank " << rank << " failed to load TPQ state from " << filename << std::endl;
+        bool loaded_ok = false;
+        if (filename.find("eigenvector") != std::string::npos) {
+            // Text eigenvector format: first line dimension, then index real imag
+            tpq_state = load_eigenstate_from_file(tpq_files[i], N);
+            loaded_ok = !tpq_state.empty();
+        } else {
+            loaded_ok = load_tpq_state(tpq_state, tpq_files[i]);
+        }
+        if (!loaded_ok) {
+            std::cerr << "Rank " << rank << " failed to load state from " << filename << std::endl;
+            continue;
+        }
+        if ((int)tpq_state.size() != N) {
+            std::cerr << "Rank " << rank << ": state dimension mismatch for " << filename
+                      << ". got " << tpq_state.size() << ", expected " << N << std::endl;
             continue;
         }
         
