@@ -168,8 +168,8 @@ int main(int argc, char* argv[]) {
     // Define momentum points
     const std::vector<std::vector<double>> momentum_points = {
         {0.0, 0.0, 0.0},
-        {M_PI, M_PI, 0},
-        {2*M_PI, 2*M_PI, 0}
+        {0, 0, 2*M_PI},
+        {0, 0, 4*M_PI}
     };
     
     // Create output directory (only rank 0)
