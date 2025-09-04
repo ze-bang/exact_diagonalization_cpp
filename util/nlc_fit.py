@@ -143,7 +143,12 @@ def _run_single_nlce(args):
             logging.info(f"Starting NLCE run {run_idx+1}/{n_runs}")
         
         # logging.info(f"Command: {' '.join(cmd_updated)}")
-        subprocess.run(cmd_updated, check=True, capture_output=True)
+        # Set deterministic disorder seed and mode for this run
+        env = os.environ.copy()
+        base_seed = int(fixed_params.get("disorder_seed_base", 123456))
+        env['NLC_DISORDER_SEED'] = str(base_seed + run_idx)
+        env['NLC_DISORDER_MODE'] = 'prefix'
+        subprocess.run(cmd_updated, check=True, capture_output=True, env=env)
         
         nlc_dir = os.path.join(run_work_dir, f'nlc_results_order_{fixed_params["max_order"]}')
         spec_heat_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
@@ -293,7 +298,11 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             cmd.extend(['--base_dir', work_dir])
             try:
                 # logging.info(f"Command: {' '.join(cmd)}")
-                subprocess.run(cmd, check=True, capture_output=True)
+                env = os.environ.copy()
+                base_seed = int(fixed_params.get("disorder_seed_base", 123456))
+                env['NLC_DISORDER_SEED'] = str(base_seed)
+                env['NLC_DISORDER_MODE'] = 'prefix'
+                subprocess.run(cmd, check=True, capture_output=True, env=env)
                 nlc_dir = os.path.join(work_dir, f'nlc_results_order_{fixed_params["max_order"]}')
                 spec_heat_file = os.path.join(nlc_dir, 'nlc_specific_heat.txt')
                 if not os.path.exists(spec_heat_file):
@@ -1204,6 +1213,8 @@ def main():
                         help='Extra weight factor for points in peak region')
 
     parser.add_argument('--measure_spin', action='store_true', help='Measure spin instead of specific heat')
+    parser.add_argument('--disorder_seed_base', type=int, default=123456,
+                        help='Base seed for deterministic disorder sampling (common random numbers)')
 
     args = parser.parse_args()
     
@@ -1310,7 +1321,8 @@ def main():
         "num_workers": args.num_workers,
         "enable_peak_weighting": args.enable_peak_weighting,
         "peak_width_factor": args.peak_width_factor,
-        "peak_weight_factor": args.peak_weight_factor
+        "peak_weight_factor": args.peak_weight_factor,
+        "disorder_seed_base": args.disorder_seed_base
     }
 
     try:
