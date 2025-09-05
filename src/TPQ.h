@@ -604,6 +604,35 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename) {
     return true;
 }
 
+
+/**
+ * Load eigenvector data from a raw binary file
+ * 
+ * @param tpq_state TPQ state vector to load into
+ * @param filename Name of the file to load from
+ * @param N Expected size of the vector
+ * @return True if successful
+ */
+bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N) {
+    std::ifstream in(filename, std::ios::binary);
+    if (!in.is_open()) {
+        std::cerr << "Error: Could not open file " << filename << " for reading" << std::endl;
+        return false;
+    }
+    
+    tpq_state.resize(N);
+    in.read(reinterpret_cast<char*>(tpq_state.data()), N * sizeof(Complex));
+    
+    if (!in.good()) {
+        std::cerr << "Error: Failed to read data from " << filename << std::endl;
+        in.close();
+        return false;
+    }
+    
+    in.close();
+    return true;
+}
+
 /**
  * Calculate spectral function from a TPQ state using real-time evolution
  * 

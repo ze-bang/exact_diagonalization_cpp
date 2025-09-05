@@ -207,7 +207,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Optionally include zero-temperature ground-state eigenvector
-        const std::string gs_file = tpq_directory + "/eigenvector_0.dat";
+        const std::string gs_file = tpq_directory + "/eigenvectors/eigenvector_0.dat";
         if (fs::exists(gs_file)) {
             tpq_files.push_back(gs_file);
             sample_indices.push_back(0); // use 0 as a conventional index for ground state
@@ -283,8 +283,7 @@ int main(int argc, char* argv[]) {
         bool loaded_ok = false;
         if (filename.find("eigenvector") != std::string::npos) {
             // Text eigenvector format: first line dimension, then index real imag
-            tpq_state = load_eigenstate_from_file(tpq_files[i], N);
-            loaded_ok = !tpq_state.empty();
+            loaded_ok = load_raw_data(tpq_state, tpq_files[i], N64);
         } else {
             loaded_ok = load_tpq_state(tpq_state, tpq_files[i]);
         }
