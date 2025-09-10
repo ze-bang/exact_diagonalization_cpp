@@ -8,6 +8,7 @@
 #include <regex>
 #include <limits>
 #include <cstring>
+#include <iomanip> // added for std::setprecision and std::fixed
 #include "construct_ham.h"
 #include "TPQ.h"
 #include "observables.h"
@@ -16,6 +17,45 @@ using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 namespace fs = std::filesystem;
 #include <mpi.h>
+
+void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+    // Compute and print <S_i . S_j> for all pairs (i,j)
+    std::vector<std::vector<std::vector<Complex>>> result(2, std::vector<std::vector<Complex>>(num_sites, std::vector<Complex>(num_sites)));
+
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            SingleSiteOperator S_plus(num_sites, spin_length, 0, i);
+            SingleSiteOperator S_z(num_sites, spin_length, 2, j);
+
+            ComplexVector temp_plus(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_z(state.size(), Complex(0.0, 0.0));
+            S_plus.apply(state.data(), temp_plus.data(), state.size());
+            S_z.apply(state.data(), temp_z.data(), state.size());
+
+            Complex expectation_plus = 0.0;
+            for (size_t k = 0; k < state.size(); k++) {
+                expectation_plus += std::conj(temp_plus[k]) * temp_plus[k];
+            }
+            result[0][i][j] = expectation_plus;
+            Complex expectation_z = 0.0;
+            for (size_t k = 0; k < state.size(); k++) {
+                expectation_z += std::conj(temp_z[k]) * temp_z[k];
+            }
+            result[1][i][j] = expectation_z;
+        }
+    }
+    // Write results to file
+    std::ofstream outfile(dir + "/spin_correlation.txt");
+    outfile << std::fixed << std::setprecision(6);
+    outfile << "i j <S+_i S-_j> <Sz_i Sz_j>\n";
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            outfile << i << " " << j << " " << result[0][i][j] << " " << result[1][i][j] << "\n";
+        }
+    }
+    outfile.close();
+    std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+}
 
 int main(int argc, char* argv[]) {
     // Initialize MPI
@@ -371,6 +411,8 @@ int main(int argc, char* argv[]) {
                     dt_opt
                 );
             }
+        } else if (method == "spin_correlation") {
+            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
         } else {
             if (rank == 0) {
                 std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor" << std::endl;
