@@ -21,12 +21,20 @@ def generate_pyrochlore_cluster(dim1, dim2, dim3, use_pbc=False):
         node_mapping: Dictionary mapping original IDs to matrix indices
     """
     # Pyrochlore lattice parameters
+    # site_basis = np.array([
+    #     [-0.125, -0.125, -0.125],
+    #     [-0.125, 0.125, 0.125],
+    #     [0.125, -0.125, 0.125],
+    #     [0.125, 0.125, -0.125]
+    # ])
+
     site_basis = np.array([
-        [-0.125, -0.125, -0.125],
-        [-0.125, 0.125, 0.125],
-        [0.125, -0.125, 0.125],
-        [0.125, 0.125, -0.125]
+        [0, 0, 0],
+        [0, 0.25, 0.25],
+        [0.25, 0, 0.25],
+        [0.25, 0.25, 0]
     ])
+
     basis = np.array([
         [0, 0.5, 0.5],
         [0.5, 0, 0.5],

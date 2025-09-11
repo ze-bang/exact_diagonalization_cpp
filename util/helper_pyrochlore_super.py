@@ -41,13 +41,22 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
     ])
     
     # Site offsets within each tetrahedron
-    site_offsets = np.array([
-        [-0.125, -0.125, -0.125],
-        [-0.125, 0.125, 0.125],
-        [0.125, -0.125, 0.125],
-        [0.125, 0.125, -0.125]
-    ])
+    # site_offsets = np.array([
+    #     [-0.125, -0.125, -0.125],
+    #     [-0.125, 0.125, 0.125],
+    #     [0.125, -0.125, 0.125],
+    #     [0.125, 0.125, -0.125]
+    # ])
     
+
+    site_offsets = np.array([
+        [0, 0, 0],
+        [0, 0.25, 0.25],
+        [0.25, 0, 0.25],
+        [0.25, 0.25, 0]
+    ])
+
+
     # Unit cell lattice vectors
     lattice_vectors = np.array([
         [1, 0, 0],
