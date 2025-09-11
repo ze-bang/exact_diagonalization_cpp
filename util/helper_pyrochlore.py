@@ -22,10 +22,10 @@ def generate_pyrochlore_cluster(dim1, dim2, dim3, use_pbc=False):
     """
     # Pyrochlore lattice parameters
     site_basis = np.array([
-        [0.125, 0.125, 0.125],
-        [0.125, -0.125, -0.125],
-        [-0.125, 0.125, -0.125],
-        [-0.125, -0.125, 0.125]
+        [-0.125, -0.125, -0.125],
+        [-0.125, 0.125, 0.125],
+        [0.125, -0.125, 0.125],
+        [0.125, 0.125, -0.125]
     ])
     basis = np.array([
         [0, 0.5, 0.5],
@@ -240,7 +240,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             matrix_index = node_mapping.get(site_id, site_id)  # Use matrix index if available
             
             f.write(f"{site_id} {len(neighbors)}")
-            for neighbor in sorted(neighbors):
+            for neighbor in neighbors:
                 f.write(f" {neighbor}")
             f.write("\n")
     
@@ -262,10 +262,10 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         
         # Define the site basis and lattice vectors
         site_basis = np.array([
-            [0.125, 0.125, 0.125],
-            [0.125, -0.125, -0.125],
-            [-0.125, 0.125, -0.125],
-            [-0.125, -0.125, 0.125]
+            [-0.125, -0.125, -0.125],
+            [-0.125, 0.125, 0.125],
+            [0.125, -0.125, 0.125],
+            [0.125, 0.125, -0.125]
         ])
         basis = np.array([
             [0, 0.5, 0.5],

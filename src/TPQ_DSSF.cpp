@@ -24,22 +24,29 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
 
     for (int i = 0; i < num_sites; i++) {
         for (int j = 0; j < num_sites; j++) {
-            SingleSiteOperator S_plus(num_sites, spin_length, 0, i);
-            SingleSiteOperator S_z(num_sites, spin_length, 2, j);
+            SingleSiteOperator S_plus_i(num_sites, spin_length, 0, i);
+            SingleSiteOperator S_plus_j(num_sites, spin_length, 0, j);
+            SingleSiteOperator S_z_i(num_sites, spin_length, 2, i);
+            SingleSiteOperator S_z_j(num_sites, spin_length, 2, j);
 
-            ComplexVector temp_plus(state.size(), Complex(0.0, 0.0));
-            ComplexVector temp_z(state.size(), Complex(0.0, 0.0));
-            S_plus.apply(state.data(), temp_plus.data(), state.size());
-            S_z.apply(state.data(), temp_z.data(), state.size());
+            ComplexVector temp_plus_i(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_z_i(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_plus_j(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_z_j(state.size(), Complex(0.0, 0.0));
+
+            S_plus_i.apply(state.data(), temp_plus_i.data(), state.size());
+            S_z_i.apply(state.data(), temp_z_i.data(), state.size());
+            S_plus_j.apply(state.data(), temp_plus_j.data(), state.size());
+            S_z_j.apply(state.data(), temp_z_j.data(), state.size());
 
             Complex expectation_plus = 0.0;
             for (size_t k = 0; k < state.size(); k++) {
-                expectation_plus += std::conj(temp_plus[k]) * temp_plus[k];
+                expectation_plus += std::conj(temp_plus_i[k]) * temp_plus_j[k];
             }
             result[0][i][j] = expectation_plus;
             Complex expectation_z = 0.0;
             for (size_t k = 0; k < state.size(); k++) {
-                expectation_z += std::conj(temp_z[k]) * temp_z[k];
+                expectation_z += std::conj(temp_z_i[k]) * temp_z_j[k];
             }
             result[1][i][j] = expectation_z;
         }
@@ -54,6 +61,59 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
         }
     }
     outfile.close();
+
+    // Print sublattice correlations
+    std::ofstream subfile(dir + "/sublattice_correlation.txt");
+    subfile << std::fixed << std::setprecision(6);
+    subfile << "sub_i sub_j <S+_i S-_j>_sum <Sz_i Sz_j>_sum count\n";
+    
+    // Compute sublattice sums
+    std::vector<std::vector<Complex>> sublattice_sums_plus(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<Complex>> sublattice_sums_z(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<int>> sublattice_counts(4, std::vector<int>(4, 0));
+    
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            int sub_i = i % 4;
+            int sub_j = j % 4;
+            sublattice_sums_plus[sub_i][sub_j] += result[0][i][j];
+            sublattice_sums_z[sub_i][sub_j] += result[1][i][j];
+            sublattice_counts[sub_i][sub_j]++;
+        }
+    }
+    
+    // Write sublattice results
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        for (int sub_j = 0; sub_j < 4; sub_j++) {
+            subfile << sub_i << " " << sub_j << " " 
+                   << sublattice_sums_plus[sub_i][sub_j] << " "
+                   << sublattice_sums_z[sub_i][sub_j] << " "
+                   << sublattice_counts[sub_i][sub_j] << "\n";
+        }
+    }
+    subfile.close();
+
+    // Print total sums for verification
+    std::ofstream sumfile(dir + "/total_sums.txt");
+    sumfile << std::fixed << std::setprecision(6);
+
+    Complex total_plus_sum = 0.0;
+    Complex total_z_sum = 0.0;
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            total_plus_sum += result[0][i][j];
+            total_z_sum += result[1][i][j];
+        }
+    }
+
+    sumfile << "Total <S+_i S-_j> sum: " << total_plus_sum << "\n";
+    sumfile << "Total <Sz_i Sz_j> sum: " << total_z_sum << "\n";
+    sumfile.close();
+
+    std::cout << "Total correlation sums:" << std::endl;
+    std::cout << "  <S+_i S-_j> sum: " << total_plus_sum << std::endl;
+    std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum << std::endl;
+
     std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
 }
 
