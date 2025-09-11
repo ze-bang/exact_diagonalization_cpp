@@ -141,7 +141,7 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
                             structure_factor_dir, all_species_qfi_data)
     
     # # Step 3: Generate summary plots
-    # _create_summary_plots(all_species_qfi_data, structure_factor_dir)
+    _create_summary_plots(all_species_qfi_data, structure_factor_dir)
     
     print("\nProcessing complete!")
     return all_species_qfi_data
