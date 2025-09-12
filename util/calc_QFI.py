@@ -141,7 +141,7 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
                             structure_factor_dir, all_species_qfi_data)
     
     # # Step 3: Generate summary plots
-    # _create_summary_plots(all_species_qfi_data, structure_factor_dir)
+    _create_summary_plots(all_species_qfi_data, structure_factor_dir)
     
     print("\nProcessing complete!")
     return all_species_qfi_data
@@ -279,8 +279,42 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
     # Prepare time data
     t_full, C_full = _prepare_time_data(mean_correlation, reference_time)
     
+    # Subtract mean from correlation data
+    C_full = C_full - np.mean(C_full)
+    print(f"    Subtracted mean from correlation data (mean = {np.mean(C_full):.6e})")
+
+    # Apply taper to reduce spectral leakage
+    def apply_taper(t_data, c_data, taper_type='hann'):
+        """Apply a windowing function to the time data."""
+        n = len(t_data)
+        
+        if taper_type == 'hann':
+            window = np.hanning(n)
+        elif taper_type == 'hamming':
+            window = np.hamming(n)
+        elif taper_type == 'blackman':
+            window = np.blackman(n)
+        elif taper_type == 'tukey':
+            # Tukey window with 10% taper on each side
+            window = np.ones(n)
+            taper_fraction = 0.1
+            taper_len = int(n * taper_fraction)
+            # Apply cosine taper to both ends
+            for i in range(taper_len):
+                window[i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
+                window[n-1-i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
+        else:
+            # No taper
+            window = np.ones(n)
+        
+        return c_data * window
+    
+    # Apply taper
+    # C_full = apply_taper(t_full, C_full, taper_type='tukey')
+    print(f"    Applied Tukey taper to time data")
+
     # Apply broadening and compute FFT
-    gamma = 0.3
+    gamma = 0.15
     S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
     
     # Extract positive frequencies and compensate
