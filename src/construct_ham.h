@@ -2274,16 +2274,6 @@ public:
             phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
         }
 
-        // Debug output for phase factors
-        // std::cout << "Phase factors for Q = [" << Q_vector[0] << ", " << Q_vector[1] << ", " << Q_vector[2] << "]:\n";
-        // for (int i = 0; i < num_site; ++i) {
-        //     std::cout << "  Site " << i << " at position (" 
-        //               << positions[i][0] << ", " << positions[i][1] << ", " << positions[i][2] << ")"
-        //               << " -> phase factor: " << phase_factors[i].real() 
-        //               << " + " << phase_factors[i].imag() << "i"
-        //               << " (magnitude: " << std::abs(phase_factors[i]) << ")\n";
-        // }
-
         // Add transforms for each site with appropriate phase factor
         for (int site = 0; site < num_site; ++site) {
             Complex phase_factor = phase_factors[site];
@@ -2395,9 +2385,9 @@ public:
                 throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
             }
             
-            double phase = -Q_vector[0] * positions[i][0] + 
-                          -Q_vector[1] * positions[i][1] + 
-                          -Q_vector[2] * positions[i][2];
+            double phase = Q_vector[0] * positions[i][0] + 
+                          Q_vector[1] * positions[i][1] + 
+                          Q_vector[2] * positions[i][2];
             phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
         }
         // Add transforms for each site with appropriate phase factor

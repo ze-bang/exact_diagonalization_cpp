@@ -471,7 +471,65 @@ int main(int argc, char* argv[]) {
                     dt_opt
                 );
             }
-        } else if (method == "spin_correlation") {
+        } else if (method == "pedantic"){
+            if (rank == 0) {
+                std::cout << "Using Taylor (create_time_evolution_operator) evolution for sublattice operator evolution (n_max=" << krylov_dim_or_nmax
+                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+            }
+            // Build U(dt) and U(-dt)
+            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
+
+            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
+            std::vector<Operator> observables_1;
+            std::vector<Operator> observables_2;
+            std::vector<std::string> observable_names;
+            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+                const auto &Q = momentum_points[q_idx];
+                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                    for(size_t sublattice = 0; sublattice < 4; ++sublattice){
+                        for(size_t sublattice2 = 0; sublattice2 < 4; ++sublattice2){
+                            int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
+                            int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
+                            std::stringstream name_ss;
+                            name_ss << spin_combination_names[combo_idx] << "_sub" << sublattice << "_sub" << sublattice2 << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
+                            try {
+                                SublatticeOperator sum_op(sublattice, 4, num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
+                                SublatticeOperator sum_op_2(sublattice2, 4, num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
+                                observable_names.push_back(name_ss.str());
+                                observables_1.push_back(std::move(sum_op));
+                                observables_2.push_back(std::move(sum_op_2));
+                            } catch (const std::exception &e) {
+                                if (rank == 0) {
+                                    std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (observables_1.empty() && observables_2.empty()) {
+                if (rank == 0) {
+                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
+                }
+            } else {
+                std::string taylor_dir = output_dir + "/taylor";
+                ensureDirectoryExists(taylor_dir);
+                computeObservableDynamics_U_t(
+                    U_t,
+                    tpq_state,
+                    observables_1,
+                    observables_2,
+                    observable_names,
+                    N,
+                    taylor_dir,
+                    sample_index,
+                    beta,
+                    t_end_opt,
+                    dt_opt
+                );
+            }
+        }
+        else if (method == "spin_correlation") {
             printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
         } else {
             if (rank == 0) {
