@@ -3,6 +3,7 @@ import sys
 import os
 import re
 from mpl_toolkits.mplot3d import Axes3D
+import matplotlib as mpl
 
 import matplotlib.pyplot as plt
 
@@ -17,10 +18,10 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
     - (1/2, 1/2, 0)
     
     Each tetrahedron has 4 sites at offsets:
-    - (-0.125, -0.125, -0.125)
-    - (-0.125, 0.125, 0.125)
-    - (0.125, -0.125, 0.125)
-    - (0.125, 0.125, -0.125)
+    - (0, 0, 0)
+    - (0, 0.25, 0.25)
+    - (0.25, 0, 0.25)
+    - (0.25, 0.25, 0)
     
     Args:
         dim1, dim2, dim3: Dimensions of the lattice (number of unit cells)
@@ -31,6 +32,7 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
         edges: List of (vertex1, vertex2) tuples
         tetrahedra: List of (v1, v2, v3, v4) tuples
         node_mapping: Dictionary mapping original IDs to matrix indices
+        vertex_to_cell: Map vertex_id to (i, j, k, tet_idx, site_idx)
     """
     # Tetrahedron centers in the unit cell
     tetrahedron_centers = np.array([
@@ -41,21 +43,12 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
     ])
     
     # Site offsets within each tetrahedron
-    # site_offsets = np.array([
-    #     [-0.125, -0.125, -0.125],
-    #     [-0.125, 0.125, 0.125],
-    #     [0.125, -0.125, 0.125],
-    #     [0.125, 0.125, -0.125]
-    # ])
-    
-
     site_offsets = np.array([
         [0, 0, 0],
         [0, 0.25, 0.25],
         [0.25, 0, 0.25],
         [0.25, 0.25, 0]
     ])
-
 
     # Unit cell lattice vectors
     lattice_vectors = np.array([
@@ -68,6 +61,7 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
     vertices = {}
     vertex_id = 0
     vertex_to_cell = {}  # Map vertex_id to (i, j, k, tet_idx, site_idx)
+    cell_to_vertex = {}  # Map (i, j, k, tet_idx, site_idx) to vertex_id
     
     for i in range(dim1):
         for j in range(dim2):
@@ -84,30 +78,69 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
                         position = tet_center + site_offsets[site_idx]
                         vertices[vertex_id] = tuple(position)
                         vertex_to_cell[vertex_id] = (i, j, k, tet_idx, site_idx)
+                        cell_to_vertex[(i, j, k, tet_idx, site_idx)] = vertex_id
                         vertex_id += 1
     
+    # Helper function to get vertex id with PBC
+    def get_vertex_with_pbc(i, j, k, tet_idx, site_idx):
+        if use_pbc:
+            # Apply periodic boundary conditions
+            i = i % dim1
+            j = j % dim2
+            k = k % dim3
+        else:
+            # Check if out of bounds for open boundary conditions
+            if i < 0 or i >= dim1 or j < 0 or j >= dim2 or k < 0 or k >= dim3:
+                return None
+        
+        key = (i, j, k, tet_idx, site_idx)
+        return cell_to_vertex.get(key, None)
+    
     # Generate edges based on nearest neighbors
-    edges = []
+    edges = set()  # Use set to avoid duplicates
     
     for v1_id, v1_info in vertex_to_cell.items():
         i1, j1, k1, tet1, site1 = v1_info
         pos1 = np.array(vertices[v1_id])
         
-        for v2_id, v2_info in vertex_to_cell.items():
-            if v2_id <= v1_id:
-                continue
-                
-            i2, j2, k2, tet2, site2 = v2_info
-            pos2 = np.array(vertices[v2_id])
-            
-            # Calculate distance
-            dist = np.linalg.norm(pos1 - pos2)
-            
-            # Check if they are nearest neighbors
-            # Within same tetrahedron: distance = 2 * 0.125 * sqrt(2) ≈ 0.3536
-            # Between tetrahedra: slightly different but similar
-            if dist < 0.4:  # Threshold for nearest neighbors
-                edges.append((v1_id, v2_id))
+        # Check neighbors within same unit cell and adjacent cells
+        for di in [-1, 0, 1]:
+            for dj in [-1, 0, 1]:
+                for dk in [-1, 0, 1]:
+                    # Check all tetrahedra
+                    for tet2 in range(4):
+                        # Check all sites in the tetrahedron
+                        for site2 in range(4):
+                            v2_id = get_vertex_with_pbc(i1+di, j1+dj, k1+dk, tet2, site2)
+                            
+                            if v2_id is None or v2_id == v1_id:
+                                continue
+                            
+                            # Calculate actual distance (considering PBC if needed)
+                            pos2 = np.array(vertices[v2_id])
+                            
+                            if use_pbc:
+                                # Calculate minimum image distance
+                                delta = pos2 - pos1
+                                # Apply minimum image convention
+                                for dim_idx in range(3):
+                                    box_size = [dim1, dim2, dim3][dim_idx]
+                                    if delta[dim_idx] > box_size/2:
+                                        delta[dim_idx] -= box_size
+                                    elif delta[dim_idx] < -box_size/2:
+                                        delta[dim_idx] += box_size
+                                dist = np.linalg.norm(delta)
+                            else:
+                                dist = np.linalg.norm(pos2 - pos1)
+                            
+                            # Check if they are nearest neighbors
+                            # Threshold for nearest neighbors in pyrochlore
+                            if dist < 0.4 and dist > 0.01:  # Avoid self-connections
+                                edge = tuple(sorted([v1_id, v2_id]))
+                                edges.add(edge)
+    
+    # Convert edges set to list
+    edges = list(edges)
     
     # Generate tetrahedra list
     tetrahedra = []
@@ -116,8 +149,11 @@ def generate_pyrochlore_super_cluster(dim1, dim2, dim3, use_pbc=False):
             for k in range(dim3):
                 for tet_idx in range(4):
                     # Get the 4 vertices of this tetrahedron
-                    base_idx = (i * dim2 * dim3 * 16 + j * dim3 * 16 + k * 16 + tet_idx * 4)
-                    tetrahedra.append((base_idx, base_idx+1, base_idx+2, base_idx+3))
+                    tet_vertices = []
+                    for site_idx in range(4):
+                        v_id = cell_to_vertex[(i, j, k, tet_idx, site_idx)]
+                        tet_vertices.append(v_id)
+                    tetrahedra.append(tuple(tet_vertices))
     
     # Create node mapping
     node_mapping = {i: i for i in range(len(vertices))}
@@ -212,11 +248,12 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
         
         # Site offsets
         site_offsets = np.array([
-            [-0.125, -0.125, -0.125],
-            [-0.125, 0.125, 0.125],
-            [0.125, -0.125, 0.125],
-            [0.125, 0.125, -0.125]
+            [0, 0, 0],
+            [0, 0.25, 0.25],
+            [0.25, 0, 0.25],
+            [0.25, 0.25, 0]
         ])
+
         
         # Write tetrahedron centers
         f.write("# Tetrahedron centers in unit cell\n")
@@ -385,61 +422,115 @@ def write_two_body_correlations(output_dir, Op1, Op2, N, file_name):
 def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=None):
     """
     Plot the cluster showing sites and their nearest neighbor connections
+    Publication-quality plot for Physical Review Letters
     """
     try:
-        # Create 3D plot
-        fig = plt.figure(figsize=(12, 10))
+        import matplotlib.pyplot as plt
+        
+        # Set publication-quality parameters
+        mpl.rcParams['font.family'] = 'serif'
+        mpl.rcParams['font.serif'] = ['Computer Modern Roman', 'Times New Roman']
+        mpl.rcParams['font.size'] = 10
+        mpl.rcParams['axes.labelsize'] = 12
+        mpl.rcParams['axes.titlesize'] = 12
+        mpl.rcParams['xtick.labelsize'] = 10
+        mpl.rcParams['ytick.labelsize'] = 10
+        mpl.rcParams['legend.fontsize'] = 10
+        mpl.rcParams['figure.dpi'] = 100
+        mpl.rcParams['savefig.dpi'] = 300
+        mpl.rcParams['axes.linewidth'] = 1.0
+        mpl.rcParams['xtick.major.width'] = 0.8
+        mpl.rcParams['ytick.major.width'] = 0.8
+        
+        # Create figure with golden ratio
+        fig = plt.figure(figsize=(7, 7/1.618))
         ax = fig.add_subplot(111, projection='3d')
         
-        # Colors for each sublattice
-        colors = ['r', 'g', 'b', 'purple']
+        # Modern color palette (colorblind-friendly)
+        colors = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488']
         
-        # Plot vertices
-        for vertex_id, pos in vertices.items():
-            if sublattice_indices is None:
-                sub_idx = vertex_id % 4
-            else:
-                sub_idx = sublattice_indices[vertex_id]
-            
-            ax.scatter(pos[0], pos[1], pos[2], s=100, c=colors[sub_idx], marker='o', alpha=0.8)
-            
-            # Add vertex label for small clusters
-            if len(vertices) <= 32:
-                ax.text(pos[0], pos[1], pos[2], str(vertex_id), fontsize=8)
+        # Calculate positions for cleaner plotting
+        positions = np.array([vertices[v] for v in vertices])
         
-        # Plot edges
+        # Plot vertices by sublattice
+        for sub_idx in range(4):
+            mask = [sublattice_indices.get(v, v % 4) == sub_idx for v in vertices]
+            sub_positions = positions[mask]
+            if len(sub_positions) > 0:
+                ax.scatter(sub_positions[:, 0], sub_positions[:, 1], sub_positions[:, 2], 
+                          s=80, c=colors[sub_idx], marker='o', alpha=0.9,
+                          edgecolors='black', linewidth=0.5,
+                          label=f'Sublattice {sub_idx}', depthshade=True)
+        
+        # Plot edges with gradient effect
         for v1, v2 in edges:
-            pos1 = vertices[v1]
-            pos2 = vertices[v2]
+            pos1 = np.array(vertices[v1])
+            pos2 = np.array(vertices[v2])
             
             ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], [pos1[2], pos2[2]], 
-                   'k-', alpha=0.3, linewidth=0.5)
+                   'k-', alpha=0.2, linewidth=0.4, zorder=1)
         
-        # Set labels and title
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        ax.set_zlabel('Z')
-        ax.set_title(f'Pyrochlore Super Cluster: {cluster_name}')
+        # Set labels with LaTeX formatting
+        ax.set_xlabel(r'$x$ (a.u.)', fontsize=12, labelpad=8)
+        ax.set_ylabel(r'$y$ (a.u.)', fontsize=12, labelpad=8)
+        ax.set_zlabel(r'$z$ (a.u.)', fontsize=12, labelpad=8)
         
-        # Equal aspect ratio
-        max_range = np.array([vertices[v][i] for v in vertices for i in range(3)]).max()
-        min_range = np.array([vertices[v][i] for v in vertices for i in range(3)]).min()
-        ax.set_xlim([min_range, max_range])
-        ax.set_ylim([min_range, max_range])
-        ax.set_zlim([min_range, max_range])
+        # Remove title for cleaner publication look
+        # Title information should be in figure caption
         
-        # Add a legend for sublattices
-        for i in range(4):
-            ax.scatter([], [], [], c=colors[i], marker='o', label=f'Sublattice {i}')
-        ax.legend()
+        # Set equal aspect ratio and limits
+        positions_array = np.array(list(vertices.values()))
+        max_range = np.max(positions_array)
+        min_range = np.min(positions_array)
+        margin = 0.1 * (max_range - min_range)
         
-        # Save the figure
+        ax.set_xlim([min_range - margin, max_range + margin])
+        ax.set_ylim([min_range - margin, max_range + margin])
+        ax.set_zlim([min_range - margin, max_range + margin])
+        
+        # Set viewing angle for best visualization
+        ax.view_init(elev=20, azim=45)
+        
+        # Clean up the plot
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor('black')
+        ax.yaxis.pane.set_edgecolor('black')
+        ax.zaxis.pane.set_edgecolor('black')
+        ax.grid(True, alpha=0.3, linewidth=0.5)
+        
+        # Add minimalist legend
+        legend = ax.legend(loc='upper left', frameon=True, 
+                          fancybox=False, shadow=False,
+                          framealpha=0.9, edgecolor='black',
+                          borderpad=0.5, columnspacing=1.0,
+                          handlelength=1.5, handletextpad=0.5)
+        legend.get_frame().set_linewidth(0.5)
+        
+        # Tight layout
+        plt.tight_layout(pad=0.5)
+        
+        # Save in multiple formats
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", dpi=300, bbox_inches='tight')
+        
+        # High-quality PNG
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", 
+                   dpi=300, bbox_inches='tight', pad_inches=0.02)
+        
+        # Vector format for publication
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.pdf", 
+                   bbox_inches='tight', pad_inches=0.02)
+        
+        # EPS format (some journals prefer this)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.eps", 
+                   bbox_inches='tight', pad_inches=0.02)
+        
         plt.close()
         
         return True
+        
     except ImportError:
         print("Warning: matplotlib not installed, skipping cluster plot")
         return False
