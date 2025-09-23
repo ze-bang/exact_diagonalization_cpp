@@ -115,7 +115,139 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
     std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum << std::endl;
 
     std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+
+    // Print sublattice correlations
+    std::ofstream subfile_sans_diag(dir + "/sublattice_correlation_sans_diag.txt");
+    subfile_sans_diag << std::fixed << std::setprecision(6);
+    subfile_sans_diag << "sub_i sub_j <S+_i S-_j>_sum <Sz_i Sz_j>_sum count\n";
+
+    // Compute sublattice sums
+    std::vector<std::vector<Complex>> sublattice_sums_plus_sans_diag(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<Complex>> sublattice_sums_z_sans_diag(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<int>> sublattice_counts_sans_diag(4, std::vector<int>(4, 0));
+    
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            if (i == j) continue; // Skip diagonal elements
+            int sub_i = i % 4;
+            int sub_j = j % 4;
+            sublattice_sums_plus_sans_diag[sub_i][sub_j] += result[0][i][j];
+            sublattice_sums_z_sans_diag[sub_i][sub_j] += result[1][i][j];
+            sublattice_counts_sans_diag[sub_i][sub_j]++;
+        }
+    }
+    
+    // Write sublattice results
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        for (int sub_j = 0; sub_j < 4; sub_j++) {
+            subfile_sans_diag << sub_i << " " << sub_j << " " 
+                   << sublattice_sums_plus_sans_diag[sub_i][sub_j] << " "
+                   << sublattice_sums_z_sans_diag[sub_i][sub_j] << " "
+                   << sublattice_counts_sans_diag[sub_i][sub_j] << "\n";
+        }
+    }
+    subfile_sans_diag.close();
+
+    // Print total sums for verification
+    std::ofstream sumfile_sans_diag(dir + "/total_sums.txt");
+    sumfile_sans_diag << std::fixed << std::setprecision(6);
+
+    Complex total_plus_sum_sans_diag = 0.0;
+    Complex total_z_sum_sans_diag = 0.0;
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            if (i == j) continue; // Skip diagonal elements
+            total_plus_sum_sans_diag += result[0][i][j];
+            total_z_sum_sans_diag += result[1][i][j];
+        }
+    }
+
+    sumfile_sans_diag << "Total <S+_i S-_j> sum: " << total_plus_sum_sans_diag << "\n";
+    sumfile_sans_diag << "Total <Sz_i Sz_j> sum: " << total_z_sum_sans_diag << "\n";
+    sumfile_sans_diag.close();
+
+    std::cout << "Total correlation sums:" << std::endl;
+    std::cout << "  <S+_i S-_j> sum: " << total_plus_sum_sans_diag << std::endl;
+    std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum_sans_diag << std::endl;
+
+    std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+
+    // Print diagonal-only correlations
+    std::ofstream diagfile(dir + "/diagonal_correlation.txt");
+    diagfile << std::fixed << std::setprecision(6);
+    diagfile << "i <S+_i S-_i> <Sz_i Sz_i>\n";
+    
+    for (int i = 0; i < num_sites; i++) {
+        diagfile << i << " " << result[0][i][i] << " " << result[1][i][i] << "\n";
+    }
+    diagfile.close();
+    
+    // Print sublattice diagonal correlations
+    std::ofstream sub_diagfile(dir + "/sublattice_diagonal_correlation.txt");
+    sub_diagfile << std::fixed << std::setprecision(6);
+    sub_diagfile << "sub_i <S+_i S-_i>_sum <Sz_i Sz_i>_sum count\n";
+    
+    std::vector<Complex> sublattice_diag_plus(4, 0.0);
+    std::vector<Complex> sublattice_diag_z(4, 0.0);
+    std::vector<int> sublattice_diag_counts(4, 0);
+    
+    for (int i = 0; i < num_sites; i++) {
+        int sub_i = i % 4;
+        sublattice_diag_plus[sub_i] += result[0][i][i];
+        sublattice_diag_z[sub_i] += result[1][i][i];
+        sublattice_diag_counts[sub_i]++;
+    }
+    
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        sub_diagfile << sub_i << " " 
+                     << sublattice_diag_plus[sub_i] << " "
+                     << sublattice_diag_z[sub_i] << " "
+                     << sublattice_diag_counts[sub_i] << "\n";
+    }
+    sub_diagfile.close();
+    
+    std::cout << "Diagonal correlation data saved to diagonal_correlation.txt" << std::endl;
+
 }
+
+
+void printSpinExpectation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+    // Compute and print <S_i . S_j> for all pairs (i,j)
+    std::vector<std::vector<Complex>> result(2, std::vector<Complex>(num_sites));
+
+    for (int i = 0; i < num_sites; i++) {
+        SingleSiteOperator S_plus_i(num_sites, spin_length, 0, i);
+        SingleSiteOperator S_z_i(num_sites, spin_length, 2, i);
+
+        ComplexVector temp_plus_i(state.size(), Complex(0.0, 0.0));
+        ComplexVector temp_z_i(state.size(), Complex(0.0, 0.0));
+
+        S_plus_i.apply(state.data(), temp_plus_i.data(), state.size());
+        S_z_i.apply(state.data(), temp_z_i.data(), state.size());
+
+        Complex expectation_plus = 0.0;
+        for (size_t k = 0; k < state.size(); k++) {
+            expectation_plus += std::conj(state[k]) * temp_plus_i[k];
+        }
+        result[0][i] = expectation_plus;
+        Complex expectation_z = 0.0;
+        for (size_t k = 0; k < state.size(); k++) {
+            expectation_z += std::conj(state[k]) * temp_z_i[k];
+        }
+        result[1][i] = expectation_z;
+    }
+    // Write results to file
+    std::ofstream outfile(dir + "/spin_expectation.txt");
+    outfile << std::fixed << std::setprecision(6);
+    outfile << "i <S+_i> <Sz_i>\n";
+    for (int i = 0; i < num_sites; i++) {
+        outfile << i << " " << result[0][i] << " " << result[1][i] << "\n";
+    }
+    outfile.close();
+
+    std::cout << "Spin expectation data saved to spin_expectation.txt" << std::endl;
+}
+
 
 int main(int argc, char* argv[]) {
     // Initialize MPI
@@ -531,6 +663,7 @@ int main(int argc, char* argv[]) {
         }
         else if (method == "spin_correlation") {
             printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
+            printSpinExpectation(tpq_state, num_sites, spin_length, output_dir);
         } else {
             if (rank == 0) {
                 std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor" << std::endl;
