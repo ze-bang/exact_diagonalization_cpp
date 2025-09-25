@@ -775,7 +775,8 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     // Initialize state to tpq_state
     std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
     
-    // Calculate O|ψ> once for each operator
+    // Calculate O|ψ> once for each operator (parallel over operators)
+    #pragma omp parallel for schedule(static)
     for (int op = 0; op < num_operators; op++) {
         operators_1[op](state.data(), O_psi_vec[op].data(), N);
     }
@@ -783,15 +784,17 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     // Prepare time evolution
     std::vector<std::vector<Complex>> time_correlations(num_operators, std::vector<Complex>(num_steps));
     
-    // Calculate initial O†|ψ> for each operator
+    // Calculate initial O†|ψ> for each operator (parallel over operators)
+    #pragma omp parallel for schedule(static)
     for (int op = 0; op < num_operators; op++) {
         operators_2[op](state.data(), O_dag_state_vec[op].data(), N);
         
         // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-        time_correlations[op][0] = Complex(0.0, 0.0);
+        Complex init_corr = Complex(0.0, 0.0);
         for (int i = 0; i < N; i++) {
-            time_correlations[op][0] += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
+            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
         }
+        time_correlations[op][0] = init_corr;
     }
     
     std::cout << "Starting real-time evolution for correlation function..." << std::endl;
@@ -800,28 +803,30 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
     for (int step = 1; step < num_steps; step++) {
         // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
         U_t(state.data(), state_next.data(), N);
-        
-        // For each operator
+
+        // Parallel over operators for this time slice
+        #pragma omp parallel for schedule(static)
         for (int op = 0; op < num_operators; op++) {
-            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)0
+            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
             U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
-            
+
             // Calculate O†|ψ(t)>
             operators_2[op](state_next.data(), O_dag_state_vec[op].data(), N);
-            
+
             // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
-            time_correlations[op][step] = Complex(0.0, 0.0);
+            Complex corr = Complex(0.0, 0.0);
             for (int i = 0; i < N; i++) {
-                time_correlations[op][step] += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
+                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
             }
-            
-            // Update O_psi for next iteration
+            time_correlations[op][step] = corr;
+        }
+
+        // After parallel region: update O_psi buffers and state for next step
+        for (int op = 0; op < num_operators; op++) {
             std::swap(O_psi_vec[op], O_psi_next_vec[op]);
         }
-        
-        // Update state for next iteration
         std::swap(state, state_next);
-        
+
         if (step % 100 == 0) {
             std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
         }
@@ -1260,6 +1265,14 @@ void computeObservableDynamics_U_t(
     std::cout << "Computing dynamical susceptibility for sample " << sample 
               << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
     
+    // Prebuild sparse matrices for all observables to ensure thread-safe applies
+    for (const auto& op : observables_1) {
+        op.buildSparseMatrix();
+    }
+    for (const auto& op : observables_2) {
+        op.buildSparseMatrix();
+    }
+
     // Create array of operator functions
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_1;
     std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_2;

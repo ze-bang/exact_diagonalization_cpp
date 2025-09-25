@@ -9,6 +9,8 @@
 #include <limits>
 #include <cstring>
 #include <iomanip> // added for std::setprecision and std::fixed
+#include <cstdlib> // for getenv, setenv
+#include <omp.h>   // for OpenMP thread control
 #include "construct_ham.h"
 #include "TPQ.h"
 #include "observables.h"
@@ -117,6 +119,73 @@ void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length
     std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
 }
 
+// Helper function to distribute operators among ranks
+struct OperatorInfo {
+    size_t q_idx;
+    size_t combo_idx;
+    size_t sublattice_1;
+    size_t sublattice_2;
+    std::string name;
+};
+
+std::vector<OperatorInfo> distributeOperators(int rank, int size, 
+    const std::vector<std::vector<double>>& momentum_points,
+    const std::vector<std::pair<int, int>>& spin_combinations,
+    const std::vector<const char*>& spin_combination_names,
+    const std::string& method) {
+    
+    std::vector<OperatorInfo> all_operators;
+    
+    // Build complete operator list based on method
+    if (method == "taylor") {
+        for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+            const auto &Q = momentum_points[q_idx];
+            for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                OperatorInfo op_info;
+                op_info.q_idx = q_idx;
+                op_info.combo_idx = combo_idx;
+                op_info.sublattice_1 = 0; // Not used for taylor
+                op_info.sublattice_2 = 0; // Not used for taylor
+                
+                std::stringstream name_ss;
+                name_ss << spin_combination_names[combo_idx] << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
+                op_info.name = name_ss.str();
+                all_operators.push_back(op_info);
+            }
+        }
+    } else if (method == "pedantic") {
+        for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+            const auto &Q = momentum_points[q_idx];
+            for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                for (size_t sublattice = 0; sublattice < 4; ++sublattice) {
+                    for (size_t sublattice2 = 0; sublattice2 < 4; ++sublattice2) {
+                        OperatorInfo op_info;
+                        op_info.q_idx = q_idx;
+                        op_info.combo_idx = combo_idx;
+                        op_info.sublattice_1 = sublattice;
+                        op_info.sublattice_2 = sublattice2;
+                        
+                        std::stringstream name_ss;
+                        name_ss << spin_combination_names[combo_idx] << "_sub" << sublattice 
+                               << "_sub" << sublattice2 << "_q" << "_Qx" << Q[0] 
+                               << "_Qy" << Q[1] << "_Qz" << Q[2];
+                        op_info.name = name_ss.str();
+                        all_operators.push_back(op_info);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Distribute operators to this rank
+    std::vector<OperatorInfo> local_operators;
+    for (size_t i = rank; i < all_operators.size(); i += size) {
+        local_operators.push_back(all_operators[i]);
+    }
+    
+    return local_operators;
+}
+
 int main(int argc, char* argv[]) {
     // Initialize MPI
     MPI_Init(&argc, &argv);
@@ -125,13 +194,59 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
+    // Configure OpenMP to avoid resource exhaustion
+    // Set reasonable defaults if not already set
+    char* omp_num_threads = std::getenv("OMP_NUM_THREADS");
+    if (omp_num_threads == nullptr) {
+        // Default: use 1 thread per MPI rank to avoid oversubscription
+        omp_set_num_threads(1);
+        if (rank == 0) {
+            std::cout << "OMP_NUM_THREADS not set. Using 1 OpenMP thread per MPI rank." << std::endl;
+        }
+    } else {
+        int num_omp_threads = std::atoi(omp_num_threads);
+        if (num_omp_threads <= 0) {
+            omp_set_num_threads(1);
+            if (rank == 0) {
+                std::cout << "Invalid OMP_NUM_THREADS value. Using 1 OpenMP thread per MPI rank." << std::endl;
+            }
+        } else {
+            omp_set_num_threads(num_omp_threads);
+            if (rank == 0) {
+                std::cout << "Using " << num_omp_threads << " OpenMP threads per MPI rank." << std::endl;
+            }
+        }
+    }
+    
+    // Report thread configuration
+    if (rank == 0) {
+        std::cout << "MPI Configuration: " << size << " ranks" << std::endl;
+        std::cout << "OpenMP Configuration: " << omp_get_max_threads() << " threads per rank" << std::endl;
+        std::cout << "Total threads: " << size * omp_get_max_threads() << std::endl;
+        
+        // Warn about potential oversubscription
+        int total_threads = size * omp_get_max_threads();
+        if (total_threads > 64) {  // Reasonable threshold for most systems
+            std::cout << "WARNING: Using " << total_threads << " total threads." << std::endl;
+            std::cout << "         This may cause resource exhaustion on some systems." << std::endl;
+            std::cout << "         Consider reducing OMP_NUM_THREADS if you encounter errors." << std::endl;
+        }
+        std::cout << std::endl;
+    }
+    
     if (argc < 6 || argc > 9) {
         if (rank == 0) {
             std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
-            std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | pedantic" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor/pedantic): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
+            std::cerr << "  Note: Operator-level parallelization - each rank evolves a subset of operators" << std::endl;
+            std::cerr << std::endl;
+            std::cerr << "Threading recommendations:" << std::endl;
+            std::cerr << "  For large systems, set: export OMP_NUM_THREADS=1" << std::endl;
+            std::cerr << "  Or use: export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK))" << std::endl;
+            std::cerr << "  Total threads should not exceed available CPU cores" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -233,6 +348,9 @@ int main(int argc, char* argv[]) {
         std::cout << "Loading Hamiltonian..." << std::endl;
     }
     
+    // Ensure consistent threading during Hamiltonian operations
+    int saved_num_threads = omp_get_max_threads();
+    
     Operator ham_op(num_sites, spin_length);
     
     std::string interall_file = directory + "/InterAll.dat";
@@ -248,9 +366,21 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
-    // Load Hamiltonian
-    ham_op.loadFromInterAllFile(interall_file);
-    ham_op.loadFromFile(trans_file);
+    // Load Hamiltonian with controlled threading
+    try {
+        ham_op.loadFromInterAllFile(interall_file);
+        ham_op.loadFromFile(trans_file);
+        
+        if (rank == 0) {
+            std::cout << "Hamiltonian loaded successfully." << std::endl;
+        }
+    } catch (const std::exception& e) {
+        if (rank == 0) {
+            std::cerr << "Error loading Hamiltonian: " << e.what() << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
     
     auto H = [&ham_op](const Complex* in, Complex* out, int size) {
         ham_op.apply(in, out, size);
@@ -272,7 +402,8 @@ int main(int argc, char* argv[]) {
     const std::vector<std::vector<double>> momentum_points = {
         {0.0, 0.0, 0.0},
         {0, 0, 2*M_PI},
-        {0, 0, 4*M_PI}
+        {0, 0, 4*M_PI},
+        {4*M_PI, 4*M_PI, 0}
     };
     
     // Create output directory (only rank 0)
@@ -284,7 +415,7 @@ int main(int argc, char* argv[]) {
     // Synchronize all processes
     MPI_Barrier(MPI_COMM_WORLD);
     
-    // Collect all tpq_state files from the output subdirectory (only rank 0)
+    // Collect all tpq_state files from the output subdirectory (all ranks need this info)
     std::vector<std::string> tpq_files;
     std::vector<int> sample_indices;
     std::vector<double> beta_values;
@@ -316,7 +447,7 @@ int main(int argc, char* argv[]) {
         }
         
         std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
-        std::cout << "Using " << size << " MPI processes" << std::endl;
+        std::cout << "Using " << size << " MPI processes for operator-level parallelization" << std::endl;
     }
     
     // Broadcast the number of files to all processes
@@ -368,186 +499,206 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(sample_indices.data(), num_files, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(beta_values.data(), num_files, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     
-    // Process files assigned to this rank
-    int local_processed_count = 0;
-    for (int i = rank; i < num_files; i += size) {
-        int sample_index = sample_indices[i];
-        double beta = beta_values[i];
-        std::string beta_str = beta_strings[i];
-        std::string filename = fs::path(tpq_files[i]).filename().string();
-        
-        std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
-        
-        // Load state: TPQ binary or text eigenvector
-        ComplexVector tpq_state;
-        bool loaded_ok = false;
-        if (filename.find("eigenvector") != std::string::npos) {
-            // Text eigenvector format: first line dimension, then index real imag
-            loaded_ok = load_raw_data(tpq_state, tpq_files[i], N64);
-        } else {
-            loaded_ok = load_tpq_state(tpq_state, tpq_files[i]);
-        }
-        if (!loaded_ok) {
-            std::cerr << "Rank " << rank << " failed to load state from " << filename << std::endl;
-            continue;
-        }
-        if ((int)tpq_state.size() != N) {
-            std::cerr << "Rank " << rank << ": state dimension mismatch for " << filename
-                      << ". got " << tpq_state.size() << ", expected " << N << std::endl;
-            continue;
-        }
-        
-        // Create output directory for this beta (each process creates its own)
-        std::string output_dir = output_base_dir + "/beta_" + beta_str;
-        ensureDirectoryExists(output_dir);
-        
-        if (method == "krylov") {
-            int krylov_dim = krylov_dim_or_nmax;
-            computeTPQSpinStructureFactorKrylov(
-                H,
-                tpq_state,
-                positions_file,
-                N,
-                num_sites,
-                spin_length,
-                output_dir,
-                sample_index,
-                beta,
-                momentum_points,
-                krylov_dim,
-                spin_combinations,
-                spin_combination_names
-            );
-        } else if (method == "taylor") {
-            if (rank == 0) {
-                std::cout << "Using Taylor (create_time_evolution_operator) evolution (n_max=" << krylov_dim_or_nmax
-                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
-            }
-            // Build U(dt) and U(-dt)
-            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
-
-            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
-            std::vector<Operator> observables_1;
-            std::vector<Operator> observables_2;
-            std::vector<std::string> observable_names;
-            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
-                const auto &Q = momentum_points[q_idx];
-                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
-                    int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
-                    int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
-                    std::stringstream name_ss;
-                    name_ss << spin_combination_names[combo_idx] << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
-                    try {
-                        SumOperator sum_op(num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
-                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
-                        observable_names.push_back(name_ss.str());
-                        observables_1.push_back(std::move(sum_op));
-                        observables_2.push_back(std::move(sum_op_2));
-                    } catch (const std::exception &e) {
-                        if (rank == 0) {
-                            std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
-                        }
-                    }
-                }
-            }
-            if (observables_1.empty() && observables_2.empty()) {
-                if (rank == 0) {
-                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
-                }
-            } else {
-                std::string taylor_dir = output_dir + "/taylor";
-                ensureDirectoryExists(taylor_dir);
-                computeObservableDynamics_U_t(
-                    U_t,
-                    tpq_state,
-                    observables_1,
-                    observables_2,
-                    observable_names,
-                    N,
-                    taylor_dir,
-                    sample_index,
-                    beta,
-                    t_end_opt,
-                    dt_opt
-                );
-            }
-        } else if (method == "pedantic"){
-            if (rank == 0) {
-                std::cout << "Using Taylor (create_time_evolution_operator) evolution for sublattice operator evolution (n_max=" << krylov_dim_or_nmax
-                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
-            }
-            // Build U(dt) and U(-dt)
-            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
-
-            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
-            std::vector<Operator> observables_1;
-            std::vector<Operator> observables_2;
-            std::vector<std::string> observable_names;
-            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
-                const auto &Q = momentum_points[q_idx];
-                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
-                    for(size_t sublattice = 0; sublattice < 4; ++sublattice){
-                        for(size_t sublattice2 = 0; sublattice2 < 4; ++sublattice2){
-                            int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
-                            int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
-                            std::stringstream name_ss;
-                            name_ss << spin_combination_names[combo_idx] << "_sub" << sublattice << "_sub" << sublattice2 << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
-                            try {
-                                SublatticeOperator sum_op(sublattice, 4, num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
-                                SublatticeOperator sum_op_2(sublattice2, 4, num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
-                                observable_names.push_back(name_ss.str());
-                                observables_1.push_back(std::move(sum_op));
-                                observables_2.push_back(std::move(sum_op_2));
-                            } catch (const std::exception &e) {
-                                if (rank == 0) {
-                                    std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if (observables_1.empty() && observables_2.empty()) {
-                if (rank == 0) {
-                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
-                }
-            } else {
-                std::string taylor_dir = output_dir + "/taylor";
-                ensureDirectoryExists(taylor_dir);
-                computeObservableDynamics_U_t(
-                    U_t,
-                    tpq_state,
-                    observables_1,
-                    observables_2,
-                    observable_names,
-                    N,
-                    taylor_dir,
-                    sample_index,
-                    beta,
-                    t_end_opt,
-                    dt_opt
-                );
-            }
-        }
-        else if (method == "spin_correlation") {
-            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
-        } else {
-            if (rank == 0) {
-                std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor" << std::endl;
-            }
-        }
-        
-        local_processed_count++;
-        std::cout << "Rank " << rank << " completed structure factor calculation for sample " << sample_index << ", beta = " << beta << std::endl;
+    // Distribute operators among ranks for operator-level parallelization
+    auto local_operators = distributeOperators(rank, size, momentum_points, 
+                                             spin_combinations, spin_combination_names, method);
+    
+    if (rank == 0) {
+        std::cout << "Total operators: " << (momentum_points.size() * spin_combinations.size() * 
+                     (method == "pedantic" ? 16 : 1)) << std::endl;
+        std::cout << "Rank 0 handling " << local_operators.size() << " operators" << std::endl;
     }
     
-    // Gather total processed count
+    // Process all TPQ files for the operators assigned to this rank
+    int local_processed_count = 0;
+    
+    if (method == "spin_correlation") {
+        // Special case: spin_correlation doesn't use operator parallelization
+        for (int file_idx = 0; file_idx < num_files; file_idx++) {
+            if (file_idx % size != rank) continue; // Simple file-level distribution for this method
+            
+            int sample_index = sample_indices[file_idx];
+            double beta = beta_values[file_idx];
+            std::string beta_str = beta_strings[file_idx];
+            std::string filename = fs::path(tpq_files[file_idx]).filename().string();
+            
+            std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
+            
+            // Load state
+            ComplexVector tpq_state;
+            bool loaded_ok = false;
+            if (filename.find("eigenvector") != std::string::npos) {
+                loaded_ok = load_raw_data(tpq_state, tpq_files[file_idx], N64);
+            } else {
+                loaded_ok = load_tpq_state(tpq_state, tpq_files[file_idx]);
+            }
+            if (!loaded_ok || (int)tpq_state.size() != N) {
+                std::cerr << "Rank " << rank << " failed to load or validate state from " << filename << std::endl;
+                continue;
+            }
+            
+            std::string output_dir = output_base_dir + "/beta_" + beta_str;
+            ensureDirectoryExists(output_dir);
+            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
+            local_processed_count++;
+        }
+    } else if (method == "krylov") {
+        // Use existing krylov method (file-level parallelization for now)
+        for (int file_idx = 0; file_idx < num_files; file_idx++) {
+            if (file_idx % size != rank) continue;
+            
+            int sample_index = sample_indices[file_idx];
+            double beta = beta_values[file_idx];
+            std::string beta_str = beta_strings[file_idx];
+            std::string filename = fs::path(tpq_files[file_idx]).filename().string();
+            
+            std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
+            
+            ComplexVector tpq_state;
+            bool loaded_ok = false;
+            if (filename.find("eigenvector") != std::string::npos) {
+                loaded_ok = load_raw_data(tpq_state, tpq_files[file_idx], N64);
+            } else {
+                loaded_ok = load_tpq_state(tpq_state, tpq_files[file_idx]);
+            }
+            if (!loaded_ok || (int)tpq_state.size() != N) {
+                std::cerr << "Rank " << rank << " failed to load or validate state from " << filename << std::endl;
+                continue;
+            }
+            
+            std::string output_dir = output_base_dir + "/beta_" + beta_str;
+            ensureDirectoryExists(output_dir);
+            
+            int krylov_dim = krylov_dim_or_nmax;
+            computeTPQSpinStructureFactorKrylov(
+                H, tpq_state, positions_file, N, num_sites, spin_length,
+                output_dir, sample_index, beta, momentum_points, krylov_dim,
+                spin_combinations, spin_combination_names
+            );
+            local_processed_count++;
+        }
+    } else if (method == "taylor" || method == "pedantic") {
+        // Operator-level parallelization for taylor and pedantic methods
+        if (rank == 0) {
+            std::cout << "Using " << method << " evolution with operator-level parallelization (n_max=" 
+                      << krylov_dim_or_nmax << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+        }
+        
+        // Build time evolution operator (all ranks need this)
+        if (rank == 0) {
+            std::cout << "Creating time evolution operator with " << omp_get_max_threads() 
+                      << " OpenMP threads..." << std::endl;
+        }
+        
+        // Ensure we don't exceed thread limits during operator construction
+        omp_set_dynamic(0); // Disable dynamic thread adjustment
+        auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
+        
+        if (rank == 0) {
+            std::cout << "Time evolution operator created successfully." << std::endl;
+        }
+        
+        // Process each TPQ state file for local operators
+        for (int file_idx = 0; file_idx < num_files; file_idx++) {
+            int sample_index = sample_indices[file_idx];
+            double beta = beta_values[file_idx];
+            std::string beta_str = beta_strings[file_idx];
+            std::string filename = fs::path(tpq_files[file_idx]).filename().string();
+            
+            std::cout << "Rank " << rank << " processing " << filename << " with " 
+                      << local_operators.size() << " operators (sample " << sample_index 
+                      << ", beta = " << beta << ")" << std::endl;
+            
+            // All ranks load all states (needed for operator evolution)
+            ComplexVector tpq_state;
+            bool loaded_ok = false;
+            if (filename.find("eigenvector") != std::string::npos) {
+                loaded_ok = load_raw_data(tpq_state, tpq_files[file_idx], N64);
+            } else {
+                loaded_ok = load_tpq_state(tpq_state, tpq_files[file_idx]);
+            }
+            if (!loaded_ok || (int)tpq_state.size() != N) {
+                std::cerr << "Rank " << rank << " failed to load or validate state from " << filename << std::endl;
+                continue;
+            }
+            
+            std::string output_dir = output_base_dir + "/beta_" + beta_str;
+            std::string taylor_dir = output_dir + "/taylor";
+            if (rank == 0) {
+                ensureDirectoryExists(output_dir);
+                ensureDirectoryExists(taylor_dir);
+            }
+            MPI_Barrier(MPI_COMM_WORLD); // Ensure directories are created
+            
+            // Build local operators and compute their evolution
+            std::vector<Operator> observables_1;
+            std::vector<Operator> observables_2;
+            std::vector<std::string> observable_names;
+            
+            for (const auto& op_info : local_operators) {
+                const auto &Q = momentum_points[op_info.q_idx];
+                int op_type_1 = spin_combinations[op_info.combo_idx].first;
+                int op_type_2 = spin_combinations[op_info.combo_idx].second;
+                
+                try {
+                    if (method == "taylor") {
+                        SumOperator sum_op(num_sites, spin_length, op_type_1, Q, positions_file);
+                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, Q, positions_file);
+                        observables_1.push_back(std::move(sum_op));
+                        observables_2.push_back(std::move(sum_op_2));
+                    } else { // pedantic
+                        SublatticeOperator sum_op(op_info.sublattice_1, 4, num_sites, spin_length, op_type_1, Q, positions_file);
+                        SublatticeOperator sum_op_2(op_info.sublattice_2, 4, num_sites, spin_length, op_type_2, Q, positions_file);
+                        observables_1.push_back(std::move(sum_op));
+                        observables_2.push_back(std::move(sum_op_2));
+                    }
+                    observable_names.push_back(op_info.name);
+                } catch (const std::exception &e) {
+                    std::cerr << "Rank " << rank << " failed to build operator " << op_info.name 
+                              << ": " << e.what() << std::endl;
+                }
+            }
+            
+            if (!observables_1.empty() && !observables_2.empty()) {
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, observables_1, observables_2, observable_names,
+                    N, taylor_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            }
+        }
+        local_processed_count = num_files; // Each rank processes all files with their operators
+    } else {
+        if (rank == 0) {
+            std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor, pedantic, spin_correlation" << std::endl;
+        }
+    }
+    
+    // Synchronize all processes before final output
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    // Gather total processed count and operator statistics
     int total_processed_count;
     MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     
+    int local_op_count = local_operators.size();
+    int total_op_count;
+    MPI_Reduce(&local_op_count, &total_op_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
+    
     if (rank == 0) {
-        std::cout << "\nProcessed " << total_processed_count << " TPQ state files." << std::endl;
+        if (method == "taylor" || method == "pedantic") {
+            std::cout << "\nOperator-level parallelization completed:" << std::endl;
+            std::cout << "  Total operators distributed: " << total_op_count << std::endl;
+            std::cout << "  Total TPQ states processed: " << num_files << std::endl;
+            std::cout << "  Each operator evolved for all " << num_files << " states" << std::endl;
+        } else {
+            std::cout << "\nProcessed " << total_processed_count << " TPQ state files with file-level parallelization." << std::endl;
+        }
         std::cout << "Results saved in: " << output_base_dir << std::endl;
+    }
+    
+    // Clean up dynamically allocated memory
+    for (const char* name : spin_combination_names) {
+        delete[] name;
     }
     
     MPI_Finalize();
