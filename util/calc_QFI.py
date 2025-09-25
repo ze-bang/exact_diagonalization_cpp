@@ -314,7 +314,7 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
     print(f"    Applied Tukey taper to time data")
 
     # Apply broadening and compute FFT
-    gamma = 0.15
+    gamma = 0.1
     S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
     
     # Extract positive frequencies and compensate

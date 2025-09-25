@@ -421,13 +421,48 @@ def write_two_body_correlations(output_dir, Op1, Op2, N, file_name):
 
 def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=None):
     """
-    Plot the cluster showing sites and their nearest neighbor connections
-    Publication-quality plot for Physical Review Letters
+    Plot the cluster with tetrahedra surfaces and NN connections.
+    Tetrahedra are colored using the requested scheme:
+      - down (negative signed volume): (59/256, 137/256, 255/256)
+      - up   (positive signed volume): (42/256, 232/256, 137/256)
     """
     try:
         import matplotlib.pyplot as plt
-        
-        # Set publication-quality parameters
+
+        # ---------- helpers ----------
+        def find_tetrahedra_from_edges(vertices_dict, edge_list):
+            # Build adjacency
+            adj = {v: set() for v in vertices_dict}
+            for a, b in edge_list:
+                adj[a].add(b)
+                adj[b].add(a)
+            # Find all 4-cliques (K4)
+            tets = set()
+            verts = sorted(vertices_dict.keys())
+            for a in verts:
+                na = adj[a]
+                neigh = [b for b in na if b > a]
+                ln = len(neigh)
+                for i in range(ln):
+                    b = neigh[i]
+                    nb = adj[b]
+                    for j in range(i + 1, ln):
+                        c = neigh[j]
+                        if c not in nb:
+                            continue
+                        common = (na & nb & adj[c])
+                        for d in [x for x in common if x > c]:
+                            tets.add(tuple(sorted((a, b, c, d))))
+            return [tuple(t) for t in tets]
+
+        def signed_volume(a, b, c, d):
+            # Signed volume of tetrahedron (a,b,c,d)
+            v1 = b - a
+            v2 = c - a
+            v3 = d - a
+            return np.linalg.det(np.vstack([v1, v2, v3]))
+
+        # ---------- style ----------
         mpl.rcParams['font.family'] = 'serif'
         mpl.rcParams['font.serif'] = ['Computer Modern Roman', 'Times New Roman']
         mpl.rcParams['font.size'] = 10
@@ -441,57 +476,93 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
         mpl.rcParams['axes.linewidth'] = 1.0
         mpl.rcParams['xtick.major.width'] = 0.8
         mpl.rcParams['ytick.major.width'] = 0.8
-        
-        # Create figure with golden ratio
+
         fig = plt.figure(figsize=(7, 7/1.618))
         ax = fig.add_subplot(111, projection='3d')
-        
-        # Modern color palette (colorblind-friendly)
-        colors = ['#E64B35', '#4DBBD5', '#00A087', '#3C5488']
-        
-        # Calculate positions for cleaner plotting
-        positions = np.array([vertices[v] for v in vertices])
-        
-        # Plot vertices by sublattice
-        for sub_idx in range(4):
-            mask = [sublattice_indices.get(v, v % 4) == sub_idx for v in vertices]
-            sub_positions = positions[mask]
-            if len(sub_positions) > 0:
-                ax.scatter(sub_positions[:, 0], sub_positions[:, 1], sub_positions[:, 2], 
-                          s=80, c=colors[sub_idx], marker='o', alpha=0.9,
-                          edgecolors='black', linewidth=0.5,
-                          label=f'Sublattice {sub_idx}', depthshade=True)
-        
-        # Plot edges with gradient effect
+
+        # ---------- data ----------
+        positions_array = np.array([vertices[v] for v in sorted(vertices.keys())])
+
+        # ---------- plot tetrahedra ----------
+        # Colors from user scheme
+        c_down = (59/256, 137/256, 255/256)   # down
+        c_up   = (42/256, 232/256, 137/256)   # up
+        tris = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+
+        tetrahedra = find_tetrahedra_from_edges(vertices, edges)
+        down_added, up_added = False, False
+
+        for tet in tetrahedra:
+            coords = np.array([vertices[i] for i in tet])
+            vol = signed_volume(coords[0], coords[1], coords[2], coords[3])
+            is_up = vol > 0
+            color = c_up if is_up else c_down
+            # Plot surface
+            ax.plot_trisurf(coords[:, 0], coords[:, 1], coords[:, 2],
+                            triangles=tris, edgecolor=[[0.1, 0.1, 0.1]],
+                            linewidth=0.6, alpha=0.28, shade=True, color=color,
+                            antialiased=True,
+                            label=('Up tetra' if is_up and not up_added else
+                                   'Down tetra' if (not is_up) and not down_added else None))
+            if is_up and not up_added:
+                up_added = True
+            if (not is_up) and not down_added:
+                down_added = True
+
+        # ---------- plot edges ----------
         for v1, v2 in edges:
-            pos1 = np.array(vertices[v1])
-            pos2 = np.array(vertices[v2])
-            
-            ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], [pos1[2], pos2[2]], 
-                   'k-', alpha=0.2, linewidth=0.4, zorder=1)
-        
-        # Set labels with LaTeX formatting
-        ax.set_xlabel(r'$x$ (a.u.)', fontsize=12, labelpad=8)
-        ax.set_ylabel(r'$y$ (a.u.)', fontsize=12, labelpad=8)
-        ax.set_zlabel(r'$z$ (a.u.)', fontsize=12, labelpad=8)
-        
-        # Remove title for cleaner publication look
-        # Title information should be in figure caption
-        
-        # Set equal aspect ratio and limits
-        positions_array = np.array(list(vertices.values()))
-        max_range = np.max(positions_array)
-        min_range = np.min(positions_array)
-        margin = 0.1 * (max_range - min_range)
-        
+            p1 = np.array(vertices[v1])
+            p2 = np.array(vertices[v2])
+            ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                    color='k', alpha=0.12, linewidth=0.4, zorder=1)
+
+        # ---------- plot sites ----------
+        if sublattice_indices is None:
+            sublattice_indices = {v: (v % 4) for v in vertices}
+
+        colors_sites = ['#000000', '#000000', '#000000', '#000000']
+        verts_sorted = sorted(vertices.keys())
+        pos_sorted = np.array([vertices[v] for v in verts_sorted])
+        subs = np.array([sublattice_indices.get(v, v % 4) for v in verts_sorted])
+
+        for sub_idx in range(4):
+            mask = (subs == sub_idx)
+            if np.any(mask):
+                sub_pos = pos_sorted[mask]
+                ax.scatter(sub_pos[:, 0], sub_pos[:, 1], sub_pos[:, 2],
+                           s=30, c=colors_sites[sub_idx], marker='o', alpha=0.85,
+                           edgecolors='black', linewidth=0.4,
+                           label=f'Sublattice {sub_idx}', depthshade=True)
+
+        # Optional: label site indices (keep subtle)
+        for v_id, pos in vertices.items():
+            ax.text(pos[0], pos[1], pos[2], str(v_id),
+                    fontsize=5, ha='center', va='bottom',
+                    color='black', alpha=0.7)
+
+        # ---------- axes/limits ----------
+        all_pos = np.array(list(vertices.values()))
+        max_range = np.max(all_pos)
+        min_range = np.min(all_pos)
+        margin = 0.1 * (max_range - min_range + 1e-9)
+
         ax.set_xlim([min_range - margin, max_range + margin])
         ax.set_ylim([min_range - margin, max_range + margin])
         ax.set_zlim([min_range - margin, max_range + margin])
-        
-        # Set viewing angle for best visualization
-        ax.view_init(elev=20, azim=45)
-        
-        # Clean up the plot
+
+        ax.set_xlabel('x (a.u.)', fontsize=12, labelpad=8)
+        ax.set_ylabel('y (a.u.)', fontsize=12, labelpad=8)
+        ax.set_zlabel('z (a.u.)', fontsize=12, labelpad=8)
+
+        # ---------- viewpoint (POV) ----------
+        # Chosen for a clearer 3D perception
+        ax.view_init(elev=25, azim=135)
+        try:
+            ax.dist = 9  # step back a bit for depth perception
+        except Exception:
+            pass
+
+        # ---------- aesthetics ----------
         ax.xaxis.pane.fill = False
         ax.yaxis.pane.fill = False
         ax.zaxis.pane.fill = False
@@ -499,38 +570,30 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
         ax.yaxis.pane.set_edgecolor('black')
         ax.zaxis.pane.set_edgecolor('black')
         ax.grid(True, alpha=0.3, linewidth=0.5)
-        
-        # Add minimalist legend
-        legend = ax.legend(loc='upper left', frameon=True, 
-                          fancybox=False, shadow=False,
-                          framealpha=0.9, edgecolor='black',
-                          borderpad=0.5, columnspacing=1.0,
-                          handlelength=1.5, handletextpad=0.5)
-        legend.get_frame().set_linewidth(0.5)
-        
-        # Tight layout
+
+        # Legend
+        lg = ax.legend(loc='upper left', frameon=True,
+                       fancybox=False, shadow=False,
+                       framealpha=0.9, edgecolor='black',
+                       borderpad=0.5, columnspacing=1.0,
+                       handlelength=1.5, handletextpad=0.5)
+        lg.get_frame().set_linewidth(0.5)
+
         plt.tight_layout(pad=0.5)
-        
-        # Save in multiple formats
+
+        # Save
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
-        
-        # High-quality PNG
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", 
-                   dpi=300, bbox_inches='tight', pad_inches=0.02)
-        
-        # Vector format for publication
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.pdf", 
-                   bbox_inches='tight', pad_inches=0.02)
-        
-        # EPS format (some journals prefer this)
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.eps", 
-                   bbox_inches='tight', pad_inches=0.02)
-        
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", dpi=300, bbox_inches='tight', pad_inches=0.02)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.pdf", bbox_inches='tight', pad_inches=0.02)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.eps", bbox_inches='tight', pad_inches=0.02)
+
+        # Optionally show (comment out in headless runs)
+        # plt.show()
+
         plt.close()
-        
         return True
-        
+
     except ImportError:
         print("Warning: matplotlib not installed, skipping cluster plot")
         return False
