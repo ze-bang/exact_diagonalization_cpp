@@ -839,6 +839,123 @@ std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
 
 
 /**
+ * Incremental version that writes time correlation data as computation happens
+ */
+void calculate_spectral_function_from_tpq_U_t_incremental(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
+    const ComplexVector& tpq_state,
+    int N,
+    const int num_steps,
+    double dt,
+    std::vector<std::ofstream>& output_files
+) {
+    int num_operators = operators_1.size();
+    
+    // Pre-allocate all buffers needed for calculation
+    std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));        // O|ψ> for each operator
+    std::vector<ComplexVector> O_psi_next_vec(num_operators, ComplexVector(N));   // For time evolution of O|ψ>
+    ComplexVector state(N);        // |ψ(t)>
+    ComplexVector state_next(N);   // For time evolution of |ψ>
+    std::vector<ComplexVector> O_dag_state_vec(num_operators, ComplexVector(N));  // O†|ψ(t)> for each operator
+    
+    // Initialize state to tpq_state
+    std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
+    
+    // Calculate O|ψ> once for each operator (parallel over operators)
+    #pragma omp parallel for schedule(static)
+    for (int op = 0; op < num_operators; op++) {
+        operators_1[op](state.data(), O_psi_vec[op].data(), N);
+    }
+    
+    // Calculate initial O†|ψ> for each operator and write initial time point
+    #pragma omp parallel for schedule(static)
+    for (int op = 0; op < num_operators; op++) {
+        operators_2[op](state.data(), O_dag_state_vec[op].data(), N);
+        
+        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
+        Complex init_corr = Complex(0.0, 0.0);
+        for (int i = 0; i < N; i++) {
+            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
+        }
+        
+        // Write initial time point (t=0) to file - need to serialize this part
+        #pragma omp critical
+        {
+            if (output_files[op].is_open()) {
+                output_files[op] << 0.0 << " " 
+                          << init_corr.real() << " " 
+                          << init_corr.imag() << std::endl;
+                output_files[op].flush(); // Ensure data is written immediately
+            }
+        }
+    }
+    
+    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
+        
+    // Time evolution loop
+    for (int step = 1; step < num_steps; step++) {
+        double current_time = step * dt;
+        
+        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
+        U_t(state.data(), state_next.data(), N);
+
+        // Parallel over operators for this time slice
+        #pragma omp parallel for schedule(static)
+        for (int op = 0; op < num_operators; op++) {
+            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
+            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
+
+            // Calculate O†|ψ(t)>
+            operators_2[op](state_next.data(), O_dag_state_vec[op].data(), N);
+
+            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
+            Complex corr = Complex(0.0, 0.0);
+            for (int i = 0; i < N; i++) {
+                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
+            }
+            
+            // Write current time point to file immediately - need to serialize this part
+            #pragma omp critical
+            {
+                if (output_files[op].is_open()) {
+                    output_files[op] << current_time << " " 
+                              << corr.real() << " " 
+                              << corr.imag() << std::endl;
+                    
+                    // Flush every 10 steps to balance performance and data safety
+                    if (step % 10 == 0) {
+                        output_files[op].flush();
+                    }
+                }
+            }
+        }
+
+        // After parallel region: update O_psi buffers and state for next step
+        for (int op = 0; op < num_operators; op++) {
+            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
+        }
+        std::swap(state, state_next);
+
+        if (step % 100 == 0) {
+            std::cout << "  Completed time step " << step << " of " << num_steps 
+                      << " (t = " << current_time << ")" << std::endl;
+        }
+    }
+    
+    // Final flush for all files
+    for (auto& file : output_files) {
+        if (file.is_open()) {
+            file.flush();
+        }
+    }
+    
+    std::cout << "Real-time evolution complete - data written incrementally during computation." << std::endl;
+}
+
+
+/**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
  * 
  * @param tpq_state The TPQ state vector
@@ -1245,6 +1362,7 @@ void computeObservableDynamics(
 
 // Forward-time only evolution of observable correlations C_O(t)=<psi(t)|O^\u2020 O|psi(t)>, leveraging hermiticity.
 // Removed negative time evolution to halve computational cost.
+// Modified to write time correlation data incrementally during computation.
 void computeObservableDynamics_U_t(
     std::function<void(const Complex*, Complex*, int)> U_t,
     const ComplexVector& tpq_state,
@@ -1298,30 +1416,31 @@ void computeObservableDynamics_U_t(
         });
     }
 
-    // Forward-time correlations only
-    auto time_correlations = calculate_spectral_function_from_tpq_U_t(
-        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1));
-
-    // Process and save results for each observable (t >= 0)
+    // Open output files and write headers for each observable
+    std::vector<std::ofstream> time_corr_files(observables_1.size());
     for (size_t i = 0; i < observables_1.size(); i++) {
         std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
                              + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
         
-        std::vector<double> time_points(time_correlations[i].size());
-        for (size_t j = 0; j < time_correlations[i].size(); j++) {
-            time_points[j] = j * dt;
+        time_corr_files[i].open(time_corr_file);
+        if (time_corr_files[i].is_open()) {
+            time_corr_files[i] << "# t time_correlation_real time_correlation_imag" << std::endl;
+            time_corr_files[i] << std::setprecision(16);
+        } else {
+            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
         }
-        // Write time correlation (non-negative times) to file
-        std::ofstream time_corr_out(time_corr_file);
-        if (time_corr_out.is_open()) {
-            time_corr_out << "# t time_correlation" << std::endl;
-            for (size_t j = 0; j < time_correlations[i].size(); j++) {
-                time_corr_out << std::setprecision(16) 
-                      << time_points[j] << " " 
-                      << time_correlations[i][j].real() << " "
-                      << time_correlations[i][j].imag() << std::endl;
-            }
-            time_corr_out.close();
+    }
+
+    // Call modified spectral function that writes incrementally
+    calculate_spectral_function_from_tpq_U_t_incremental(
+        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1), dt, time_corr_files);
+
+    // Close all files
+    for (size_t i = 0; i < observables_1.size(); i++) {
+        if (time_corr_files[i].is_open()) {
+            time_corr_files[i].close();
+            std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                                 + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
             std::cout << "Time correlation saved to " << time_corr_file << std::endl;
         }
     }
