@@ -369,7 +369,7 @@ int main(int argc, char* argv[]) {
     if (argc < 6 || argc > 9) {
         if (rank == 0) {
             std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor | pedantic" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | pedantic | pedantic_modes" << std::endl;
             std::cerr << "  dt,t_end (optional, only for taylor/pedantic): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
@@ -775,6 +775,150 @@ int main(int argc, char* argv[]) {
             );
             local_processed_count++;
         }
+    } else if (method == "pedantic_modes") {
+        // New efficient method using eigen-mode decomposition
+        if (rank == 0) {
+            std::cout << "Using pedantic_modes evolution with eigen-mode decomposition (n_max=" 
+                      << krylov_dim_or_nmax << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+            std::cout << "This method decomposes the 10 sublattice operators into ~2-3 eigenmodes for efficiency." << std::endl;
+        }
+        
+        // Define pyrochlore local axes (this should ideally come from input file)
+        std::vector<std::vector<double>> local_axes = {
+            {1.0/sqrt(3.0), 1.0/sqrt(3.0), 1.0/sqrt(3.0)},    // Sublattice 0: [111]
+            {1.0/sqrt(3.0), -1.0/sqrt(3.0), -1.0/sqrt(3.0)},  // Sublattice 1: [-1-11]
+            {-1.0/sqrt(3.0), 1.0/sqrt(3.0), -1.0/sqrt(3.0)},  // Sublattice 2: [-11-1]
+            {-1.0/sqrt(3.0), -1.0/sqrt(3.0), 1.0/sqrt(3.0)}   // Sublattice 3: [1-1-1]
+        };
+        
+        // Build time evolution operator (all ranks need this)
+        if (rank == 0) {
+            std::cout << "Creating time evolution operator with " << omp_get_max_threads() 
+                      << " OpenMP threads..." << std::endl;
+        }
+        
+        omp_set_dynamic(0);
+        auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
+        
+        if (rank == 0) {
+            std::cout << "Time evolution operator created successfully." << std::endl;
+        }
+        
+        // Process each TPQ state with mode decomposition
+        for (int file_idx = 0; file_idx < num_files; file_idx++) {
+            if (file_idx % size != rank) continue; // Simple file-level distribution
+            
+            int sample_index = sample_indices[file_idx];
+            double beta = beta_values[file_idx];
+            std::string beta_str = beta_strings[file_idx];
+            std::string filename = fs::path(tpq_files[file_idx]).filename().string();
+            
+            std::cout << "\nRank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
+            
+            // Load state
+            ComplexVector tpq_state;
+            bool loaded_ok = false;
+            if (filename.find("eigenvector") != std::string::npos) {
+                loaded_ok = load_raw_data(tpq_state, tpq_files[file_idx], N64);
+            } else {
+                loaded_ok = load_tpq_state(tpq_state, tpq_files[file_idx]);
+            }
+            if (!loaded_ok || (int)tpq_state.size() != N) {
+                std::cerr << "Rank " << rank << " failed to load or validate state from " << filename << std::endl;
+                continue;
+            }
+            
+            // Ensure output directories exist
+            std::string output_dir = output_base_dir + "/beta_" + beta_str;
+            std::string modes_dir = output_dir + "/modes";
+            ensureDirectoryExists(output_dir);
+            ensureDirectoryExists(modes_dir);
+            
+            // Process each momentum point and spin combination
+            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+                const auto &Q = momentum_points[q_idx];
+                
+                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                    int op_type_1 = spin_combinations[combo_idx].first;
+                    int op_type_2 = spin_combinations[combo_idx].second;
+                    
+                    std::cout << "  Processing Q=(" << Q[0] << "," << Q[1] << "," << Q[2] << ") " 
+                              << "spin_combo=" << spin_combination_names[combo_idx] << std::endl;
+                    
+                    try {
+                        // Create mode operators using eigen-decomposition
+                        auto mode_operators = StructureFactorModes::createModeOperators(
+                            Q, local_axes, positions_file, num_sites, spin_length, 
+                            op_type_1, op_type_2, 1e-12
+                        );
+                        
+                        std::cout << "    Decomposed into " << mode_operators.size() << " eigenmodes" << std::endl;
+                        
+                        if (mode_operators.empty()) {
+                            std::cout << "    Warning: No significant eigenmodes found, skipping..." << std::endl;
+                            continue;
+                        }
+                        
+                        // Compute correlations for each mode
+                        std::vector<double> eigenvalues;
+                        std::vector<std::string> mode_names;
+                        std::vector<Operator> observables_1, observables_2;
+                        
+                        for (size_t k = 0; k < mode_operators.size(); k++) {
+                            double eigenvalue = mode_operators[k].first;
+                            auto& op_pair = mode_operators[k].second;
+                            
+                            eigenvalues.push_back(eigenvalue);
+                            
+                            std::string mode_name = std::string(spin_combination_names[combo_idx]) + 
+                                                   "_mode" + std::to_string(k) + 
+                                                   "_q_Qx" + std::to_string(Q[0]) + 
+                                                   "_Qy" + std::to_string(Q[1]) + 
+                                                   "_Qz" + std::to_string(Q[2]);
+                            mode_names.push_back(mode_name);
+                            
+                            // Move operators into vectors
+                            observables_1.emplace_back(std::move(op_pair.first));
+                            observables_2.emplace_back(std::move(op_pair.second));
+                        }
+                        
+                        // Build sparse matrices for all mode operators
+                        for (auto& op : observables_1) {
+                            op.buildSparseMatrix();
+                        }
+                        for (auto& op : observables_2) {
+                            op.buildSparseMatrix();
+                        }
+                        
+                        // Compute dynamics for all modes simultaneously
+                        computeObservableDynamics_U_t(
+                            U_t, tpq_state, observables_1, observables_2, mode_names,
+                            N, modes_dir, sample_index, beta, t_end_opt, dt_opt
+                        );
+                        
+                        // Write eigenvalue information for post-processing
+                        std::string eigenval_file = modes_dir + "/eigenvalues_" + 
+                                                   std::string(spin_combination_names[combo_idx]) + 
+                                                   "_q_Qx" + std::to_string(Q[0]) + 
+                                                   "_Qy" + std::to_string(Q[1]) + 
+                                                   "_Qz" + std::to_string(Q[2]) + 
+                                                   "_beta=" + std::to_string(beta) + ".dat";
+                        
+                        std::ofstream eigenval_out(eigenval_file);
+                        eigenval_out << "# mode_k eigenvalue_k\n";
+                        for (size_t k = 0; k < eigenvalues.size(); k++) {
+                            eigenval_out << k << " " << std::setprecision(16) << eigenvalues[k] << "\n";
+                        }
+                        eigenval_out.close();
+                        
+                    } catch (const std::exception &e) {
+                        std::cerr << "Rank " << rank << " failed to process Q=(" << Q[0] << "," << Q[1] << "," << Q[2] << ") "
+                                  << "combo=" << spin_combination_names[combo_idx] << ": " << e.what() << std::endl;
+                    }
+                }
+            }
+            local_processed_count++;
+        }
     } else if (method == "taylor" || method == "pedantic") {
         // Operator-level parallelization for taylor and pedantic methods
         if (rank == 0) {
@@ -924,7 +1068,7 @@ int main(int argc, char* argv[]) {
         local_processed_count = work_by_state.size(); // Number of states this rank processed
     } else {
         if (rank == 0) {
-            std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor, pedantic, spin_correlation" << std::endl;
+            std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor, pedantic, pedantic_modes, spin_correlation" << std::endl;
         }
     }
     
