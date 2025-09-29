@@ -51,24 +51,43 @@ def parse_filename_new(filename):
     """Extract species (including momentum), beta, and sample index from filenames.
 
     Supports numeric beta and the special strings 'inf' / 'infty' (case-insensitive).
+    Also handles global structure factor files from eigenmode decomposition.
 
     Returns: (species_with_momentum, beta(float or np.inf), sample_idx) or (None, None, None)
     """
     basename = os.path.basename(filename)
+    
+    # Handle standard time correlation files
     m = re.match(r'^time_corr_(?:rand|sample)(\d+)_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
-    if not m:
-        return None, None, None
-    sample_idx = int(m.group(1))
-    species_with_momentum = m.group(2)
-    beta_token = m.group(3)
-    if beta_token.lower() in ("inf", "infty"):
-        beta = np.inf
-    else:
-        try:
-            beta = float(beta_token)
-        except ValueError:
-            return None, None, None
-    return species_with_momentum, beta, sample_idx
+    if m:
+        sample_idx = int(m.group(1))
+        species_with_momentum = m.group(2)
+        beta_token = m.group(3)
+        if beta_token.lower() in ("inf", "infty"):
+            beta = np.inf
+        else:
+            try:
+                beta = float(beta_token)
+            except ValueError:
+                return None, None, None
+        return species_with_momentum, beta, sample_idx
+    
+    # Handle global structure factor files from eigenmode decomposition
+    m = re.match(r'^global_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
+    if m:
+        species_with_momentum = m.group(1)
+        beta_token = m.group(2)
+        if beta_token.lower() in ("inf", "infty"):
+            beta = np.inf
+        else:
+            try:
+                beta = float(beta_token)
+            except ValueError:
+                return None, None, None
+        # For global files, use sample_idx = 1 as default
+        return species_with_momentum, beta, 1
+    
+    return None, None, None
 
 def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height=None, omega_range=(0, 6)):
     """
@@ -162,15 +181,132 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
         bin_idx = _assign_beta_bin(beta_value, beta_bins, beta_tol)
         beta_bin_values[bin_idx].append(beta_value)
         
-        # Find all correlation files
-        taylor_dir = os.path.join(beta_dir, 'taylor')
-        files = glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat'))
+        # Check for eigenmode files first (pedantic_modes method)
+        modes_dir = os.path.join(beta_dir, 'modes')
+        if os.path.exists(modes_dir):
+            print(f"Found eigenmode directory: {modes_dir} - using pedantic_modes method")
+            _collect_eigenmode_files(modes_dir, beta_value, species_data, species_names, bin_idx)
+        else:
+            # Fallback to standard taylor files
+            taylor_dir = os.path.join(beta_dir, 'taylor')
+            files = glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat'))
+            
+            for file_path in files:
+                species_with_momentum, _, _ = parse_filename_new(file_path)
+                if species_with_momentum:
+                    species_names.add(species_with_momentum)
+                    species_data[species_with_momentum][bin_idx].append(file_path)
+
+
+def _collect_eigenmode_files(modes_dir, beta_value, species_data, species_names, bin_idx):
+    """Collect eigenmode files and combine them into global structure factors."""
+    
+    # Find all eigenvalue files to determine available species and Q points
+    eigenval_files = glob.glob(os.path.join(modes_dir, 'eigenvalues_*.dat'))
+    
+    for eigenval_file in eigenval_files:
+        # Parse eigenvalue filename: eigenvalues_SpSm_q_Qx0_Qy0_Qz1_beta=1.0.dat
+        basename = os.path.basename(eigenval_file)
+        match = re.match(r'eigenvalues_(.+?)_q_(.+?)_beta=.+\.dat$', basename)
+        if not match:
+            continue
+            
+        spin_combo = match.group(1)
+        q_part = match.group(2)
         
-        for file_path in files:
-            species_with_momentum, _, _ = parse_filename_new(file_path)
-            if species_with_momentum:
-                species_names.add(species_with_momentum)
-                species_data[species_with_momentum][bin_idx].append(file_path)
+        # Construct species name with momentum
+        species_with_momentum = f"{spin_combo}_q_{q_part}"
+        species_names.add(species_with_momentum)
+        
+        # Create combined global structure factor file
+        global_file = _combine_eigenmode_to_global(modes_dir, spin_combo, q_part, beta_value)
+        if global_file:
+            species_data[species_with_momentum][bin_idx].append(global_file)
+
+
+def _combine_eigenmode_to_global(modes_dir, spin_combo, q_part, beta_value):
+    """Combine eigenmode correlations into global structure factor and return the combined file path."""
+    
+    # Read eigenvalue file
+    eigenval_file = os.path.join(modes_dir, f'eigenvalues_{spin_combo}_q_{q_part}_beta={beta_value}.dat')
+    
+    try:
+        eigenvalues = []
+        with open(eigenval_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('#') or not line:
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    eigenvalues.append(float(parts[1]))  # eigenvalue is second column
+        
+        if not eigenvalues:
+            print(f"Warning: No eigenvalues found in {eigenval_file}")
+            return None
+            
+        print(f"Found {len(eigenvalues)} eigenmodes for {spin_combo}_q_{q_part} at beta={beta_value}")
+        
+        # Find corresponding mode correlation files
+        combined_times = None
+        combined_corr = None
+        valid_modes = 0
+        
+        for k, eigenval in enumerate(eigenvalues):
+            mode_pattern = f'time_corr_rand*_{spin_combo}_mode{k}_q_{q_part}_beta={beta_value}.dat'
+            mode_files = glob.glob(os.path.join(modes_dir, mode_pattern))
+            
+            if not mode_files:
+                print(f"Warning: No correlation file found for mode {k} with pattern {mode_pattern}")
+                continue
+                
+            # Use the first matching file (assuming single sample for now)
+            mode_file = mode_files[0]
+            print(f"  Processing mode {k} (λ={eigenval:.6e}) from {os.path.basename(mode_file)}")
+            
+            try:
+                data = np.loadtxt(mode_file, comments='#')
+                times = data[:, 0]
+                real_part = data[:, 1]
+                imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
+                correlations = real_part + 1j * imag_part
+                
+                if combined_times is None:
+                    # Initialize combined result
+                    combined_times = times
+                    combined_corr = eigenval * correlations
+                    valid_modes = 1
+                else:
+                    # Add weighted contribution
+                    if len(times) != len(combined_times):
+                        print(f"Warning: Mode {k} has different time grid size. Skipping.")
+                        continue
+                    combined_corr += eigenval * correlations
+                    valid_modes += 1
+                    
+            except Exception as e:
+                print(f"Error reading mode file {mode_file}: {e}")
+                continue
+        
+        if combined_corr is None or valid_modes == 0:
+            print(f"Warning: No valid mode correlations found for {spin_combo}_q_{q_part}")
+            return None
+        
+        print(f"  Successfully combined {valid_modes}/{len(eigenvalues)} eigenmodes")
+        
+        # Save combined global structure factor
+        global_filename = os.path.join(modes_dir, f'global_{spin_combo}_q_{q_part}_beta={beta_value}.dat')
+        with open(global_filename, 'w') as f:
+            f.write("# t global_structure_factor_real global_structure_factor_imag\n")
+            for t, corr in zip(combined_times, combined_corr):
+                f.write(f"{t:.16e} {corr.real:.16e} {corr.imag:.16e}\n")
+        
+        print(f"  Created global structure factor file: {os.path.basename(global_filename)}")
+        return global_filename
+        
+    except Exception as e:
+        print(f"Error processing eigenmode combination for {spin_combo}_q_{q_part}: {e}")
+        return None
 
 
 def _extract_beta_from_dirname(beta_dir):
@@ -221,6 +357,11 @@ def _process_species_data(species, beta_groups, beta_bin_values,
         beta = _get_bin_beta(beta_bin_values.get(beta_bin_idx, []))
         print(f"\n  Beta≈{beta:.6g} (bin {beta_bin_idx}): {len(file_list)} files")
         
+        # Check if using eigenmode files
+        has_global_files = any('global_' in f for f in file_list)
+        if has_global_files:
+            print(f"    Processing global structure factor from eigenmode decomposition")
+        
         # Load and average correlation data
         mean_correlation, reference_time = _load_and_average_data(file_list)
         if mean_correlation is None:
@@ -265,7 +406,12 @@ def _load_and_average_data(file_list):
     if not all_data:
         return None, None
     
-    # Average correlation functions
+    # Check if we have global structure factor files (already combined)
+    if len(all_data) == 1 and 'global_' in file_list[0]:
+        print(f"    Using pre-combined global structure factor from eigenmode decomposition")
+        return all_data[0][1], all_data[0][0]
+    
+    # Average correlation functions for multiple files
     reference_time = all_data[0][0]
     all_complex_values = np.vstack([data[1] for data in all_data])
     mean_correlation = np.mean(all_complex_values, axis=0)
