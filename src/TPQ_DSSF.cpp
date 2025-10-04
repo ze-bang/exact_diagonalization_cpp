@@ -9,6 +9,8 @@
 #include <limits>
 #include <cstring>
 #include <iomanip> // added for std::setprecision and std::fixed
+#include <algorithm> // for std::sort, std::max_element, std::min_element
+#include <numeric> // for std::accumulate
 #include "construct_ham.h"
 #include "TPQ.h"
 #include "observables.h"
@@ -331,6 +333,77 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     
+    // Get file sizes for workload estimation (only rank 0)
+    std::vector<size_t> file_sizes(num_files, 0);
+    if (rank == 0) {
+        for (int i = 0; i < num_files; i++) {
+            try {
+                file_sizes[i] = fs::file_size(tpq_files[i]);
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not get size of " << tpq_files[i] << ": " << e.what() << std::endl;
+                file_sizes[i] = 0;
+            }
+        }
+    }
+    MPI_Bcast(file_sizes.data(), num_files, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+    
+    // Create work assignments with balanced load distribution
+    std::vector<int> work_assignment(num_files);
+    if (rank == 0) {
+        // Sort files by size (descending) for better load balancing
+        std::vector<std::pair<size_t, int>> size_index_pairs;
+        for (int i = 0; i < num_files; i++) {
+            size_index_pairs.push_back({file_sizes[i], i});
+        }
+        std::sort(size_index_pairs.begin(), size_index_pairs.end(), 
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        
+        // Assign work using greedy algorithm (assign largest unassigned task to least loaded rank)
+        std::vector<size_t> rank_loads(size, 0);
+        for (const auto& pair : size_index_pairs) {
+            int file_idx = pair.second;
+            size_t file_size = pair.first;
+            
+            // Find rank with minimum load
+            int min_rank = 0;
+            size_t min_load = rank_loads[0];
+            for (int r = 1; r < size; r++) {
+                if (rank_loads[r] < min_load) {
+                    min_load = rank_loads[r];
+                    min_rank = r;
+                }
+            }
+            
+            work_assignment[file_idx] = min_rank;
+            rank_loads[min_rank] += file_size;
+        }
+        
+        // Print load distribution
+        std::cout << "Load distribution (bytes per rank):" << std::endl;
+        for (int r = 0; r < size; r++) {
+            std::cout << "  Rank " << r << ": " << rank_loads[r] << " bytes" << std::endl;
+        }
+    }
+    MPI_Bcast(work_assignment.data(), num_files, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    // Each rank determines which files it will process
+    std::vector<int> my_files;
+    for (int i = 0; i < num_files; i++) {
+        if (work_assignment[i] == rank) {
+            my_files.push_back(i);
+        }
+    }
+    
+    if (rank == 0) {
+        std::cout << "Work distribution (files per rank):" << std::endl;
+    }
+    for (int r = 0; r < size; r++) {
+        if (rank == r) {
+            std::cout << "  Rank " << r << " will process " << my_files.size() << " file(s)" << std::endl;
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+    
     // Resize vectors on non-root processes
     if (rank != 0) {
         tpq_files.resize(num_files);
@@ -339,30 +412,52 @@ int main(int argc, char* argv[]) {
         beta_strings.resize(num_files);
     }
     
-    // Broadcast file information to all processes
-    for (int i = 0; i < num_files; i++) {
-        int filename_size;
-        if (rank == 0) {
-            filename_size = tpq_files[i].size();
-        }
-        MPI_Bcast(&filename_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    // Optimized broadcast: use single buffer for all strings
+    if (rank == 0) {
+        // Pack all string data into a single buffer
+        std::vector<char> string_buffer;
+        std::vector<int> offsets;
+        std::vector<int> lengths;
         
-        if (rank != 0) {
-            tpq_files[i].resize(filename_size);
+        for (int i = 0; i < num_files; i++) {
+            offsets.push_back(string_buffer.size());
+            lengths.push_back(tpq_files[i].size());
+            string_buffer.insert(string_buffer.end(), tpq_files[i].begin(), tpq_files[i].end());
+            
+            offsets.push_back(string_buffer.size());
+            lengths.push_back(beta_strings[i].size());
+            string_buffer.insert(string_buffer.end(), beta_strings[i].begin(), beta_strings[i].end());
         }
-        MPI_Bcast(&tpq_files[i][0], filename_size, MPI_CHAR, 0, MPI_COMM_WORLD);
         
-        // Broadcast beta string
-        int beta_str_size;
-        if (rank == 0) {
-            beta_str_size = beta_strings[i].size();
-        }
-        MPI_Bcast(&beta_str_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        int buffer_size = string_buffer.size();
+        MPI_Bcast(&buffer_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(string_buffer.data(), buffer_size, MPI_CHAR, 0, MPI_COMM_WORLD);
+        MPI_Bcast(offsets.data(), offsets.size(), MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(lengths.data(), lengths.size(), MPI_INT, 0, MPI_COMM_WORLD);
+    } else {
+        int buffer_size;
+        MPI_Bcast(&buffer_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
         
-        if (rank != 0) {
-            beta_strings[i].resize(beta_str_size);
+        std::vector<char> string_buffer(buffer_size);
+        std::vector<int> offsets(num_files * 2);
+        std::vector<int> lengths(num_files * 2);
+        
+        MPI_Bcast(string_buffer.data(), buffer_size, MPI_CHAR, 0, MPI_COMM_WORLD);
+        MPI_Bcast(offsets.data(), offsets.size(), MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(lengths.data(), lengths.size(), MPI_INT, 0, MPI_COMM_WORLD);
+        
+        // Unpack strings
+        for (int i = 0; i < num_files; i++) {
+            int file_offset = offsets[i * 2];
+            int file_length = lengths[i * 2];
+            tpq_files[i].assign(string_buffer.begin() + file_offset, 
+                               string_buffer.begin() + file_offset + file_length);
+            
+            int beta_offset = offsets[i * 2 + 1];
+            int beta_length = lengths[i * 2 + 1];
+            beta_strings[i].assign(string_buffer.begin() + beta_offset, 
+                                  string_buffer.begin() + beta_offset + beta_length);
         }
-        MPI_Bcast(&beta_strings[i][0], beta_str_size, MPI_CHAR, 0, MPI_COMM_WORLD);
     }
     
     MPI_Bcast(sample_indices.data(), num_files, MPI_INT, 0, MPI_COMM_WORLD);
@@ -370,13 +465,18 @@ int main(int argc, char* argv[]) {
     
     // Process files assigned to this rank
     int local_processed_count = 0;
-    for (int i = rank; i < num_files; i += size) {
+    double start_time = MPI_Wtime();
+    
+    for (size_t idx = 0; idx < my_files.size(); idx++) {
+        int i = my_files[idx];
         int sample_index = sample_indices[i];
         double beta = beta_values[i];
         std::string beta_str = beta_strings[i];
         std::string filename = fs::path(tpq_files[i]).filename().string();
         
-        std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
+        double file_start_time = MPI_Wtime();
+        std::cout << "Rank " << rank << " processing file " << (idx + 1) << "/" << my_files.size() 
+                  << ": " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
         
         // Load state: TPQ binary or text eigenvector
         ComplexVector tpq_state;
@@ -597,16 +697,50 @@ int main(int argc, char* argv[]) {
         }
         
         local_processed_count++;
-        std::cout << "Rank " << rank << " completed structure factor calculation for sample " << sample_index << ", beta = " << beta << std::endl;
+        double file_end_time = MPI_Wtime();
+        double file_time = file_end_time - file_start_time;
+        
+        std::cout << "Rank " << rank << " completed file " << (idx + 1) << "/" << my_files.size()
+                  << " (sample " << sample_index << ", beta = " << beta << ") in " 
+                  << file_time << " seconds" << std::endl;
     }
+    
+    double end_time = MPI_Wtime();
+    double elapsed_time = end_time - start_time;
+    
+    // Gather timing information
+    std::vector<double> all_times(size);
+    MPI_Gather(&elapsed_time, 1, MPI_DOUBLE, all_times.data(), 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     
     // Gather total processed count
     int total_processed_count;
     MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     
     if (rank == 0) {
-        std::cout << "\nProcessed " << total_processed_count << " TPQ state files." << std::endl;
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "Processing complete!" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "Processed " << total_processed_count << " TPQ state files." << std::endl;
         std::cout << "Results saved in: " << output_base_dir << std::endl;
+        
+        // Print timing statistics
+        std::cout << "\nTiming statistics:" << std::endl;
+        double max_time = *std::max_element(all_times.begin(), all_times.end());
+        double min_time = *std::min_element(all_times.begin(), all_times.end());
+        double avg_time = std::accumulate(all_times.begin(), all_times.end(), 0.0) / size;
+        double load_imbalance = (max_time - min_time) / max_time * 100.0;
+        
+        std::cout << "  Max time: " << max_time << " seconds (Rank " 
+                  << std::distance(all_times.begin(), std::max_element(all_times.begin(), all_times.end())) << ")" << std::endl;
+        std::cout << "  Min time: " << min_time << " seconds (Rank " 
+                  << std::distance(all_times.begin(), std::min_element(all_times.begin(), all_times.end())) << ")" << std::endl;
+        std::cout << "  Avg time: " << avg_time << " seconds" << std::endl;
+        std::cout << "  Load imbalance: " << std::fixed << std::setprecision(2) << load_imbalance << "%" << std::endl;
+        
+        std::cout << "\nPer-rank timing:" << std::endl;
+        for (int r = 0; r < size; r++) {
+            std::cout << "  Rank " << r << ": " << all_times[r] << " seconds" << std::endl;
+        }
     }
     
     MPI_Finalize();
