@@ -1,1670 +1,688 @@
-import os
-import glob
-import numpy as np
-from collections import defaultdict
-import re
-import sys
+#include <iostream>
+#include <vector>
+#include <complex>
+#include <string>
+#include <fstream>
+#include <sstream>
+#include <filesystem>
+#include <regex>
+#include <limits>
+#include <cstring>
+#include <iomanip> // added for std::setprecision and std::fixed
+#include "construct_ham.h"
+#include "TPQ.h"
+#include "observables.h"
 
-import matplotlib.pyplot as plt
-import pandas as pd
-import seaborn as sns
-from scipy.interpolate import griddata
-from scipy.signal import find_peaks, peak_prominences
-from mpi4py import MPI
-from collections import defaultdict
-from scipy.interpolate import interp1d
+using Complex = std::complex<double>;
+using ComplexVector = std::vector<Complex>;
+namespace fs = std::filesystem;
+#include <mpi.h>
 
-# Function to apply broadening in time domain
-def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
-    """
-    Apply broadening to time correlation data before FFT
-    
-    Parameters:
-    t_values: Time array
-    data: Complex correlation data
-    broadening_type: 'gaussian' or 'lorentzian'
-    sigma: Width parameter for Gaussian broadening
-    gamma: Width parameter for Lorentzian broadening
-    
-    Returns:
-    broadened_data: Data with broadening applied
-    """
-    if broadening_type == 'gaussian' and sigma is not None:
-        # Apply Gaussian broadening: multiply by exp(-t²/(2σ²))
-        broadening_factor = np.exp(-t_values**2 / (2 * sigma**2))
-        broadened_data = data * broadening_factor
-        print(f"Applied Gaussian broadening in time domain with σ = {sigma:.4f}")
-        
-    elif broadening_type == 'lorentzian' and gamma is not None:
-        # Apply Lorentzian broadening: multiply by exp(-γ|t|)
-        broadening_factor = np.exp(-gamma * np.abs(t_values))
-        broadened_data = data * broadening_factor
-        print(f"Applied Lorentzian broadening in time domain with γ = {gamma:.4f}")
-        
-    else:
-        broadened_data = data
-        print("No time domain broadening applied")
-    
-    return broadened_data, broadening_factor if 'broadening_factor' in locals() else np.ones_like(data)
+void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+    // Compute and print <S_i . S_j> for all pairs (i,j)
+    std::vector<std::vector<std::vector<Complex>>> result(2, std::vector<std::vector<Complex>>(num_sites, std::vector<Complex>(num_sites)));
 
-def parse_filename_new(filename):
-    """Extract species (including momentum), beta, and sample index from filenames.
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            SingleSiteOperator S_plus_i(num_sites, spin_length, 0, i);
+            SingleSiteOperator S_plus_j(num_sites, spin_length, 0, j);
+            SingleSiteOperator S_z_i(num_sites, spin_length, 2, i);
+            SingleSiteOperator S_z_j(num_sites, spin_length, 2, j);
 
-    Supports numeric beta and the special strings 'inf' / 'infty' (case-insensitive).
-    Also handles global structure factor files from eigenmode decomposition.
+            ComplexVector temp_plus_i(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_z_i(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_plus_j(state.size(), Complex(0.0, 0.0));
+            ComplexVector temp_z_j(state.size(), Complex(0.0, 0.0));
 
-    Returns: (species_with_momentum, beta(float or np.inf), sample_idx) or (None, None, None)
-    """
-    basename = os.path.basename(filename)
-    
-    # Handle standard time correlation files
-    m = re.match(r'^time_corr_(?:rand|sample)(\d+)_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
-    if m:
-        sample_idx = int(m.group(1))
-        species_with_momentum = m.group(2)
-        beta_token = m.group(3)
-        if beta_token.lower() in ("inf", "infty"):
-            beta = np.inf
-        else:
-            try:
-                beta = float(beta_token)
-            except ValueError:
-                return None, None, None
-        return species_with_momentum, beta, sample_idx
-    
-    # Handle global structure factor files from eigenmode decomposition
-    m = re.match(r'^global_(.+?)_beta=([0-9.+-eE]+|inf|infty)\.dat$', basename, re.IGNORECASE)
-    if m:
-        species_with_momentum = m.group(1)
-        beta_token = m.group(2)
-        if beta_token.lower() in ("inf", "infty"):
-            beta = np.inf
-        else:
-            try:
-                beta = float(beta_token)
-            except ValueError:
-                return None, None, None
-        # For global files, use sample_idx = 1 as default
-        return species_with_momentum, beta, 1
-    
-    return None, None, None
+            S_plus_i.apply(state.data(), temp_plus_i.data(), state.size());
+            S_z_i.apply(state.data(), temp_z_i.data(), state.size());
+            S_plus_j.apply(state.data(), temp_plus_j.data(), state.size());
+            S_z_j.apply(state.data(), temp_z_j.data(), state.size());
 
-def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height=None, omega_range=(0, 6)):
-    """
-    Find peak positions in spectral function data.
-    
-    Parameters:
-    omega: Frequency array
-    spectral_function: Spectral function values
-    min_prominence: Minimum prominence for peak detection
-    min_height: Minimum height for peak detection (if None, uses 10% of max)
-    omega_range: Frequency range to search for peaks (min_freq, max_freq)
-    
-    Returns:
-    peak_positions: List of peak frequencies
-    peak_heights: List of peak heights
-    peak_prominences: List of peak prominences
-    """
-    # Filter data to specified frequency range
-    mask = (omega >= omega_range[0]) & (omega <= omega_range[1])
-    omega_filtered = omega[mask]
-    spec_filtered = spectral_function[mask]
-    
-    if len(spec_filtered) == 0:
-        return [], [], []
-    
-    # Set minimum height if not provided
-    if min_height is None:
-        min_height = 0.1 * np.max(spec_filtered)
-    
-    # Find peaks
-    peaks, properties = find_peaks(spec_filtered, height=min_height, prominence=min_prominence)
-    
-    if len(peaks) == 0:
-        return [], [], []
-    
-    # Get peak positions in original frequency units
-    peak_positions = omega_filtered[peaks]
-    peak_heights = spec_filtered[peaks]
-    
-    # Calculate prominences
-    prominences, _, _ = peak_prominences(spec_filtered, peaks)
-    
-    return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
+            Complex expectation_plus = 0.0;
+            for (size_t k = 0; k < state.size(); k++) {
+                expectation_plus += std::conj(temp_plus_i[k]) * temp_plus_j[k];
+            }
+            result[0][i][j] = expectation_plus;
+            Complex expectation_z = 0.0;
+            for (size_t k = 0; k < state.size(); k++) {
+                expectation_z += std::conj(temp_z_i[k]) * temp_z_j[k];
+            }
+            result[1][i][j] = expectation_z;
+        }
+    }
+    // Write results to file
+    std::ofstream outfile(dir + "/spin_correlation.txt");
+    outfile << std::fixed << std::setprecision(6);
+    outfile << "i j <S+_i S-_j> <Sz_i Sz_j>\n";
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            outfile << i << " " << j << " " << result[0][i][j] << " " << result[1][i][j] << "\n";
+        }
+    }
+    outfile.close();
 
-def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
-    """Parse QFI data from the new directory structure and compute spectral functions."""
+    // Print sublattice correlations
+    std::ofstream subfile(dir + "/sublattice_correlation.txt");
+    subfile << std::fixed << std::setprecision(6);
+    subfile << "sub_i sub_j <S+_i S-_j>_sum <Sz_i Sz_j>_sum count\n";
     
-    # Initialize data structures
-    species_data = defaultdict(lambda: defaultdict(list))
-    species_names = set()
-    beta_bins = []
-    beta_bin_values = defaultdict(list)
+    // Compute sublattice sums
+    std::vector<std::vector<Complex>> sublattice_sums_plus(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<Complex>> sublattice_sums_z(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<int>> sublattice_counts(4, std::vector<int>(4, 0));
     
-    # Step 1: Discover and organize data files
-    print(f"Scanning directory: {structure_factor_dir}")
-    _collect_data_files(structure_factor_dir, species_data, species_names, 
-                        beta_bins, beta_bin_values, beta_tol)
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            int sub_i = i % 4;
+            int sub_j = j % 4;
+            sublattice_sums_plus[sub_i][sub_j] += result[0][i][j];
+            sublattice_sums_z[sub_i][sub_j] += result[1][i][j];
+            sublattice_counts[sub_i][sub_j]++;
+        }
+    }
     
-    print(f"\nFound species (with momentum): {sorted(species_names)}")
-    
-    # Step 2: Process each species
-    all_species_qfi_data = defaultdict(list)
-    
-    for species, beta_groups in species_data.items():
-        print(f"\n{'='*60}")
-        print(f"Processing species: {species}")
-        print(f"{'='*60}")
-        
-        _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data)
-    
-    # # Step 3: Generate summary plots
-    _create_summary_plots(all_species_qfi_data, structure_factor_dir)
-    
-    print("\nProcessing complete!")
-    return all_species_qfi_data
+    // Write sublattice results
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        for (int sub_j = 0; sub_j < 4; sub_j++) {
+            subfile << sub_i << " " << sub_j << " " 
+                   << sublattice_sums_plus[sub_i][sub_j] << " "
+                   << sublattice_sums_z[sub_i][sub_j] << " "
+                   << sublattice_counts[sub_i][sub_j] << "\n";
+        }
+    }
+    subfile.close();
 
+    // Print total sums for verification
+    std::ofstream sumfile(dir + "/total_sums.txt");
+    sumfile << std::fixed << std::setprecision(6);
 
-def _collect_data_files(structure_factor_dir, species_data, species_names, 
-                        beta_bins, beta_bin_values, beta_tol):
-    """Collect and organize all data files by species and beta values."""
-    
-    beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
-    print(f"Found {len(beta_dirs)} beta directories")
-    
-    for beta_dir in beta_dirs:
-        beta_value = _extract_beta_from_dirname(beta_dir)
-        if beta_value is None:
-            continue
-            
-        bin_idx = _assign_beta_bin(beta_value, beta_bins, beta_tol)
-        beta_bin_values[bin_idx].append(beta_value)
-        
-        # Check for eigenmode files first (pedantic_modes method)
-        modes_dir = os.path.join(beta_dir, 'modes')
-        if os.path.exists(modes_dir):
-            print(f"Found eigenmode directory: {modes_dir} - using pedantic_modes method")
-            _collect_eigenmode_files(modes_dir, beta_value, species_data, species_names, bin_idx)
-        else:
-            # Fallback to standard taylor files
-            taylor_dir = os.path.join(beta_dir, 'taylor')
-            files = glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat'))
-            
-            for file_path in files:
-                species_with_momentum, _, _ = parse_filename_new(file_path)
-                if species_with_momentum:
-                    species_names.add(species_with_momentum)
-                    species_data[species_with_momentum][bin_idx].append(file_path)
-
-
-def _collect_eigenmode_files(modes_dir, beta_value, species_data, species_names, bin_idx):
-    """Collect eigenmode files and combine them into global structure factors."""
-    
-    # Find all eigenvalue files to determine available species and Q points
-    eigenval_files = glob.glob(os.path.join(modes_dir, 'eigenvalues_*.dat'))
-    
-    for eigenval_file in eigenval_files:
-        # Parse eigenvalue filename: eigenvalues_SpSm_q_Qx0_Qy0_Qz1_beta=1.0.dat
-        basename = os.path.basename(eigenval_file)
-        match = re.match(r'eigenvalues_(.+?)_q_(.+?)_beta=.+\.dat$', basename)
-        if not match:
-            continue
-            
-        spin_combo = match.group(1)
-        q_part = match.group(2)
-        
-        # Construct species name with momentum
-        species_with_momentum = f"{spin_combo}_q_{q_part}"
-        species_names.add(species_with_momentum)
-        
-        # Create combined global structure factor file
-        global_file = _combine_eigenmode_to_global(modes_dir, spin_combo, q_part, beta_value)
-        if global_file:
-            species_data[species_with_momentum][bin_idx].append(global_file)
-
-
-def _combine_eigenmode_to_global(modes_dir, spin_combo, q_part, beta_value):
-    """Combine eigenmode correlations into global structure factor and return the combined file path."""
-    
-    # Read eigenvalue file
-    eigenval_file = os.path.join(modes_dir, f'eigenvalues_{spin_combo}_q_{q_part}_beta={beta_value}.dat')
-    
-    try:
-        eigenvalues = []
-        with open(eigenval_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith('#') or not line:
-                    continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    eigenvalues.append(float(parts[1]))  # eigenvalue is second column
-        
-        if not eigenvalues:
-            print(f"Warning: No eigenvalues found in {eigenval_file}")
-            return None
-            
-        print(f"Found {len(eigenvalues)} eigenmodes for {spin_combo}_q_{q_part} at beta={beta_value}")
-        
-        # Find corresponding mode correlation files
-        combined_times = None
-        combined_corr = None
-        valid_modes = 0
-        
-        for k, eigenval in enumerate(eigenvalues):
-            mode_pattern = f'time_corr_rand*_{spin_combo}_mode{k}_q_{q_part}_beta={beta_value}.dat'
-            mode_files = glob.glob(os.path.join(modes_dir, mode_pattern))
-            
-            if not mode_files:
-                print(f"Warning: No correlation file found for mode {k} with pattern {mode_pattern}")
-                continue
-                
-            # Use the first matching file (assuming single sample for now)
-            mode_file = mode_files[0]
-            print(f"  Processing mode {k} (λ={eigenval:.6e}) from {os.path.basename(mode_file)}")
-            
-            try:
-                data = np.loadtxt(mode_file, comments='#')
-                times = data[:, 0]
-                real_part = data[:, 1]
-                imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
-                correlations = real_part + 1j * imag_part
-                
-                if combined_times is None:
-                    # Initialize combined result
-                    combined_times = times
-                    combined_corr = eigenval * correlations
-                    valid_modes = 1
-                else:
-                    # Add weighted contribution
-                    if len(times) != len(combined_times):
-                        print(f"Warning: Mode {k} has different time grid size. Skipping.")
-                        continue
-                    combined_corr += eigenval * correlations
-                    valid_modes += 1
-                    
-            except Exception as e:
-                print(f"Error reading mode file {mode_file}: {e}")
-                continue
-        
-        if combined_corr is None or valid_modes == 0:
-            print(f"Warning: No valid mode correlations found for {spin_combo}_q_{q_part}")
-            return None
-        
-        print(f"  Successfully combined {valid_modes}/{len(eigenvalues)} eigenmodes")
-        
-        # Save combined global structure factor
-        global_filename = os.path.join(modes_dir, f'global_{spin_combo}_q_{q_part}_beta={beta_value}.dat')
-        with open(global_filename, 'w') as f:
-            f.write("# t global_structure_factor_real global_structure_factor_imag\n")
-            for t, corr in zip(combined_times, combined_corr):
-                f.write(f"{t:.16e} {corr.real:.16e} {corr.imag:.16e}\n")
-        
-        print(f"  Created global structure factor file: {os.path.basename(global_filename)}")
-        return global_filename
-        
-    except Exception as e:
-        print(f"Error processing eigenmode combination for {spin_combo}_q_{q_part}: {e}")
-        return None
-
-
-def _extract_beta_from_dirname(beta_dir):
-    """Extract beta value from directory name."""
-    beta_match = re.search(r'beta_([\d\.]+|inf|infty)', 
-                            os.path.basename(beta_dir), re.IGNORECASE)
-    if not beta_match:
-        return None
-        
-    beta_token = beta_match.group(1)
-    if beta_token.lower() in ("inf", "infty"):
-        return np.inf
-    
-    try:
-        return float(beta_token)
-    except ValueError:
-        return None
-
-
-def _assign_beta_bin(beta_val, bins, tol):
-    """Assign beta value to tolerance-based bin."""
-    # Group infinities together
-    if np.isinf(beta_val):
-        for i, c in enumerate(bins):
-            if np.isinf(c):
-                return i
-        bins.append(beta_val)
-        return len(bins) - 1
-        
-    # Check existing bins
-    for i, c in enumerate(bins):
-        if np.isinf(c):
-            continue
-        if abs(beta_val - c) <= tol:
-            return i
-            
-    # Create new bin
-    bins.append(beta_val)
-    return len(bins) - 1
-
-
-def _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data):
-    """Process all data for a single species across different beta values."""
-    
-    for beta_bin_idx, file_list in beta_groups.items():
-        # Get representative beta for this bin
-        beta = _get_bin_beta(beta_bin_values.get(beta_bin_idx, []))
-        print(f"\n  Beta≈{beta:.6g} (bin {beta_bin_idx}): {len(file_list)} files")
-        
-        # Check if using eigenmode files
-        has_global_files = any('global_' in f for f in file_list)
-        if has_global_files:
-            print(f"    Processing global structure factor from eigenmode decomposition")
-        
-        # Load and average correlation data
-        mean_correlation, reference_time = _load_and_average_data(file_list)
-        if mean_correlation is None:
-            print(f"    No valid data for beta={beta}")
-            continue
-        
-        # Compute spectral function and QFI
-        results = _compute_spectral_and_qfi(mean_correlation, reference_time, beta)
-        
-        # Save results
-        _save_species_results(species, beta, results, structure_factor_dir)
-        
-        # Store QFI for summary plots
-        all_species_qfi_data[species].append((beta, results['qfi']))
-
-
-def _get_bin_beta(beta_vals):
-    """Get representative beta value for a bin."""
-    if len(beta_vals) == 0:
-        return np.nan
-    elif any(np.isinf(v) for v in beta_vals):
-        return np.inf
-    else:
-        return float(np.mean(beta_vals))
-
-
-def _load_and_average_data(file_list):
-    """Load and average correlation data from multiple files."""
-    all_data = []
-    
-    for file_path in file_list:
-        try:
-            data = np.loadtxt(file_path, comments='#')
-            time = data[:, 0]
-            real_part = data[:, 1]
-            imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
-            val = real_part + 1j * imag_part
-            all_data.append((time, val))
-        except Exception as e:
-            print(f"    Error reading {file_path}: {e}")
-    
-    if not all_data:
-        return None, None
-    
-    # Check if we have global structure factor files (already combined)
-    if len(all_data) == 1 and 'global_' in file_list[0]:
-        print(f"    Using pre-combined global structure factor from eigenmode decomposition")
-        return all_data[0][1], all_data[0][0]
-    
-    # Average correlation functions for multiple files
-    reference_time = all_data[0][0]
-    all_complex_values = np.vstack([data[1] for data in all_data])
-    mean_correlation = np.mean(all_complex_values, axis=0)
-    
-    return mean_correlation, reference_time
-
-
-def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
-    """Compute spectral function and QFI from correlation data."""
-    
-    # Prepare time data
-    t_full, C_full = _prepare_time_data(mean_correlation, reference_time)
-    
-    # Subtract mean from correlation data
-    C_full = C_full - np.mean(C_full)
-    print(f"    Subtracted mean from correlation data (mean = {np.mean(C_full):.6e})")
-
-    # Apply taper to reduce spectral leakage
-    def apply_taper(t_data, c_data, taper_type='hann'):
-        """Apply a windowing function to the time data."""
-        n = len(t_data)
-        
-        if taper_type == 'hann':
-            window = np.hanning(n)
-        elif taper_type == 'hamming':
-            window = np.hamming(n)
-        elif taper_type == 'blackman':
-            window = np.blackman(n)
-        elif taper_type == 'tukey':
-            # Tukey window with 10% taper on each side
-            window = np.ones(n)
-            taper_fraction = 0.1
-            taper_len = int(n * taper_fraction)
-            # Apply cosine taper to both ends
-            for i in range(taper_len):
-                window[i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
-                window[n-1-i] = 0.5 * (1 - np.cos(np.pi * i / taper_len))
-        else:
-            # No taper
-            window = np.ones(n)
-        
-        return c_data * window
-    
-    # Apply taper
-    # C_full = apply_taper(t_full, C_full, taper_type='tukey')
-    print(f"    Applied Tukey taper to time data")
-
-    # Apply broadening and compute FFT
-    gamma = 0.1
-    S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
-    
-    # Extract positive frequencies and compensate
-    omega_pos, s_omega_compensated = _extract_positive_frequencies(S_omega_real, omega)
-    
-    # Calculate QFI
-    qfi = _calculate_qfi(omega_pos, s_omega_compensated, beta)
-    
-    # Find peaks
-    peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
-        omega_pos, s_omega_compensated, min_prominence=0.1, omega_range=(0, 6))
-    
-    return {
-        'omega': omega,
-        'S_omega_real': S_omega_real,
-        'omega_pos': omega_pos,
-        's_omega_compensated': s_omega_compensated,
-        'qfi': qfi,
-        'peak_positions': peak_positions,
-        'peak_heights': peak_heights,
-        'peak_prominences': peak_prominences
+    Complex total_plus_sum = 0.0;
+    Complex total_z_sum = 0.0;
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            total_plus_sum += result[0][i][j];
+            total_z_sum += result[1][i][j];
+        }
     }
 
+    sumfile << "Total <S+_i S-_j> sum: " << total_plus_sum << "\n";
+    sumfile << "Total <Sz_i Sz_j> sum: " << total_z_sum << "\n";
+    sumfile.close();
 
-def _prepare_time_data(mean_correlation, reference_time):
-    """Prepare time-ordered correlation data for FFT."""
+    std::cout << "Total correlation sums:" << std::endl;
+    std::cout << "  <S+_i S-_j> sum: " << total_plus_sum << std::endl;
+    std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum << std::endl;
+
+    std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+
+    // Print sublattice correlations
+    std::ofstream subfile_sans_diag(dir + "/sublattice_correlation_sans_diag.txt");
+    subfile_sans_diag << std::fixed << std::setprecision(6);
+    subfile_sans_diag << "sub_i sub_j <S+_i S-_j>_sum <Sz_i Sz_j>_sum count\n";
+
+    // Compute sublattice sums
+    std::vector<std::vector<Complex>> sublattice_sums_plus_sans_diag(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<Complex>> sublattice_sums_z_sans_diag(4, std::vector<Complex>(4, 0.0));
+    std::vector<std::vector<int>> sublattice_counts_sans_diag(4, std::vector<int>(4, 0));
     
-    if reference_time[0] < 0 and reference_time[-1] > 0:
-        # Data already time-ordered
-        t_full = reference_time
-        C_full = mean_correlation
-        print(f"    Using pre-ordered time data: [{t_full.min():.2f}, {t_full.max():.2f}]")
-    else:
-        # Construct negative times using C(-t) = C(t)*
-        t_pos = reference_time
-        C_pos = mean_correlation
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            if (i == j) continue; // Skip diagonal elements
+            int sub_i = i % 4;
+            int sub_j = j % 4;
+            sublattice_sums_plus_sans_diag[sub_i][sub_j] += result[0][i][j];
+            sublattice_sums_z_sans_diag[sub_i][sub_j] += result[1][i][j];
+            sublattice_counts_sans_diag[sub_i][sub_j]++;
+        }
+    }
+    
+    // Write sublattice results
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        for (int sub_j = 0; sub_j < 4; sub_j++) {
+            subfile_sans_diag << sub_i << " " << sub_j << " " 
+                   << sublattice_sums_plus_sans_diag[sub_i][sub_j] << " "
+                   << sublattice_sums_z_sans_diag[sub_i][sub_j] << " "
+                   << sublattice_counts_sans_diag[sub_i][sub_j] << "\n";
+        }
+    }
+    subfile_sans_diag.close();
+
+    // Print total sums for verification
+    std::ofstream sumfile_sans_diag(dir + "/total_sums.txt");
+    sumfile_sans_diag << std::fixed << std::setprecision(6);
+
+    Complex total_plus_sum_sans_diag = 0.0;
+    Complex total_z_sum_sans_diag = 0.0;
+    for (int i = 0; i < num_sites; i++) {
+        for (int j = 0; j < num_sites; j++) {
+            if (i == j) continue; // Skip diagonal elements
+            total_plus_sum_sans_diag += result[0][i][j];
+            total_z_sum_sans_diag += result[1][i][j];
+        }
+    }
+
+    sumfile_sans_diag << "Total <S+_i S-_j> sum: " << total_plus_sum_sans_diag << "\n";
+    sumfile_sans_diag << "Total <Sz_i Sz_j> sum: " << total_z_sum_sans_diag << "\n";
+    sumfile_sans_diag.close();
+
+    std::cout << "Total correlation sums:" << std::endl;
+    std::cout << "  <S+_i S-_j> sum: " << total_plus_sum_sans_diag << std::endl;
+    std::cout << "  <Sz_i Sz_j> sum: " << total_z_sum_sans_diag << std::endl;
+
+    std::cout << "Spin correlation data saved to spin_correlation.txt" << std::endl;
+
+    // Print diagonal-only correlations
+    std::ofstream diagfile(dir + "/diagonal_correlation.txt");
+    diagfile << std::fixed << std::setprecision(6);
+    diagfile << "i <S+_i S-_i> <Sz_i Sz_i>\n";
+    
+    for (int i = 0; i < num_sites; i++) {
+        diagfile << i << " " << result[0][i][i] << " " << result[1][i][i] << "\n";
+    }
+    diagfile.close();
+    
+    // Print sublattice diagonal correlations
+    std::ofstream sub_diagfile(dir + "/sublattice_diagonal_correlation.txt");
+    sub_diagfile << std::fixed << std::setprecision(6);
+    sub_diagfile << "sub_i <S+_i S-_i>_sum <Sz_i Sz_i>_sum count\n";
+    
+    std::vector<Complex> sublattice_diag_plus(4, 0.0);
+    std::vector<Complex> sublattice_diag_z(4, 0.0);
+    std::vector<int> sublattice_diag_counts(4, 0);
+    
+    for (int i = 0; i < num_sites; i++) {
+        int sub_i = i % 4;
+        sublattice_diag_plus[sub_i] += result[0][i][i];
+        sublattice_diag_z[sub_i] += result[1][i][i];
+        sublattice_diag_counts[sub_i]++;
+    }
+    
+    for (int sub_i = 0; sub_i < 4; sub_i++) {
+        sub_diagfile << sub_i << " " 
+                     << sublattice_diag_plus[sub_i] << " "
+                     << sublattice_diag_z[sub_i] << " "
+                     << sublattice_diag_counts[sub_i] << "\n";
+    }
+    sub_diagfile.close();
+    
+    std::cout << "Diagonal correlation data saved to diagonal_correlation.txt" << std::endl;
+
+}
+
+
+void printSpinExpectation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+    // Compute and print <S_i . S_j> for all pairs (i,j)
+    std::vector<std::vector<Complex>> result(2, std::vector<Complex>(num_sites));
+
+    for (int i = 0; i < num_sites; i++) {
+        SingleSiteOperator S_plus_i(num_sites, spin_length, 0, i);
+        SingleSiteOperator S_z_i(num_sites, spin_length, 2, i);
+
+        ComplexVector temp_plus_i(state.size(), Complex(0.0, 0.0));
+        ComplexVector temp_z_i(state.size(), Complex(0.0, 0.0));
+
+        S_plus_i.apply(state.data(), temp_plus_i.data(), state.size());
+        S_z_i.apply(state.data(), temp_z_i.data(), state.size());
+
+        Complex expectation_plus = 0.0;
+        for (size_t k = 0; k < state.size(); k++) {
+            expectation_plus += std::conj(state[k]) * temp_plus_i[k];
+        }
+        result[0][i] = expectation_plus;
+        Complex expectation_z = 0.0;
+        for (size_t k = 0; k < state.size(); k++) {
+            expectation_z += std::conj(state[k]) * temp_z_i[k];
+        }
+        result[1][i] = expectation_z;
+    }
+    // Write results to file
+    std::ofstream outfile(dir + "/spin_expectation.txt");
+    outfile << std::fixed << std::setprecision(6);
+    outfile << "i <S+_i> <Sz_i>\n";
+    for (int i = 0; i < num_sites; i++) {
+        outfile << i << " " << result[0][i] << " " << result[1][i] << "\n";
+    }
+    outfile.close();
+
+    std::cout << "Spin expectation data saved to spin_expectation.txt" << std::endl;
+}
+
+
+int main(int argc, char* argv[]) {
+    // Initialize MPI
+    MPI_Init(&argc, &argv);
+    
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    
+    if (argc < 6 || argc > 9) {
+        if (rank == 0) {
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps]" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
+            std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+
+    std::string directory = argv[1];
+    int num_sites = std::stoi(argv[2]);
+    float spin_length = std::stof(argv[3]);
+    int krylov_dim_or_nmax = std::stoi(argv[4]);
+    std::string spin_combinations_str = argv[5];
+    std::string method = (argc >= 7) ? std::string(argv[6]) : std::string("krylov");
+    double dt_opt = 0.01;
+    double t_end_opt = 50.0;
+    int steps_opt = -1; // optional
+    if (argc >= 8) {
+        // Parse dt,t_end combined argument
+        std::string dt_tend = argv[7];
+        auto comma_pos = dt_tend.find(',');
+        if (comma_pos != std::string::npos) {
+            try {
+                dt_opt = std::stod(dt_tend.substr(0, comma_pos));
+                t_end_opt = std::stod(dt_tend.substr(comma_pos + 1));
+            } catch (...) {
+                if (rank == 0) {
+                    std::cerr << "Warning: failed to parse dt,t_end argument. Using defaults 0.01,50.0" << std::endl;
+                }
+            }
+        }
+    }
+    if (argc == 9) {
+        try { steps_opt = std::stoi(argv[8]); } catch (...) { steps_opt = -1; }
+    }
+
+    // Parse spin combinations
+    std::vector<std::pair<int, int>> spin_combinations;
+    std::stringstream ss(spin_combinations_str);
+    std::string pair_str;
+    
+    while (std::getline(ss, pair_str, ';')) {
+        std::stringstream pair_ss(pair_str);
+        std::string op1_str, op2_str;
         
-        t_neg = -t_pos[1:][::-1]
-        C_neg = np.conj(C_pos[1:][::-1])
-        
-        t_full = np.concatenate((t_neg, t_pos))
-        C_full = np.concatenate((C_neg, C_pos))
-        
-        print(f"    Constructed full time range: [{t_full.min():.2f}, {t_full.max():.2f}]")
-    
-    return t_full, C_full
-
-
-def _compute_spectral_function(t_full, C_full, gamma):
-    """Compute spectral function via FFT with broadening."""
-    
-    # Reorder for FFT
-    C_fft_input = np.fft.ifftshift(C_full)
-    t_fft_ordered = np.fft.ifftshift(t_full)
-    
-    # Apply broadening
-    C_broadened, _ = apply_time_broadening(
-        t_fft_ordered, C_fft_input, 'lorentzian', gamma=gamma)
-    
-    # FFT convention
-    C_broadened = np.conj(C_broadened)
-    
-    # Compute FFT
-    dt = t_full[1] - t_full[0] if len(t_full) > 1 else 1.0
-    C_w = np.fft.fft(C_broadened)
-    S_w = dt * np.fft.fftshift(C_w) / (2 * np.pi)
-    
-    # Frequency axis
-    omega = np.fft.fftshift(np.fft.fftfreq(len(C_broadened), d=dt)) * 2 * np.pi
-    
-    return S_w.real, omega
-
-
-def _extract_positive_frequencies(S_omega_real, omega):
-    """Extract positive frequencies and apply compensation."""
-    
-    # Calculate integral before truncation
-    integral_before = np.trapezoid(S_omega_real, omega)
-    
-    # Extract positive frequencies
-    positive_mask = omega > 0
-    omega_pos = omega[positive_mask]
-    s_omega_pos = S_omega_real[positive_mask]
-    
-    # Calculate compensation factor
-    integral_after = np.trapezoid(s_omega_pos, omega_pos)
-    compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
-    
-    s_omega_compensated = s_omega_pos * compensation_factor
-    
-    print(f"    Compensation factor: {compensation_factor:.6f}")
-    
-    return omega_pos, s_omega_compensated
-
-
-def _calculate_qfi(omega_pos, s_omega_pos, beta):
-    """Calculate quantum Fisher information."""
-    
-    if np.isinf(beta):
-        # β→∞ limit
-        integrand = s_omega_pos
-    else:
-        integrand = s_omega_pos * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
-    
-    return 4 * np.trapezoid(integrand, omega_pos)
-
-
-def _save_species_results(species, beta, results, structure_factor_dir):
-    """Save computed results for a species at given beta."""
-    
-    # Create output directory
-    outdir = os.path.join(structure_factor_dir, 'processed_data', species)
-    os.makedirs(outdir, exist_ok=True)
-    
-    beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
-    
-    # Save spectral data
-    data_out = np.column_stack((results['omega'], results['S_omega_real']))
-    data_filename = os.path.join(outdir, f'spectral_beta_{beta_label}.dat')
-    np.savetxt(data_filename, data_out, header='freq spectral_function')
-    
-    # Save peak information
-    if results['peak_positions']:
-        peak_data = np.column_stack((
-            results['peak_positions'], 
-            results['peak_heights'], 
-            results['peak_prominences']
-        ))
-        peak_filename = os.path.join(outdir, f'peaks_beta_{beta_label}.dat')
-        np.savetxt(peak_filename, peak_data, header='freq height prominence')
-    
-    # Create spectral function plot
-    _plot_spectral_function(species, beta, results, outdir)
-    
-    print(f"    QFI = {results['qfi']:.4f}, Peaks at: {results['peak_positions']}")
-
-
-def _plot_spectral_function(species, beta, results, outdir):
-    """Plot spectral function with peaks marked."""
-    
-    plt.figure(figsize=(10, 6))
-    
-    beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
-    
-    # Plot spectral function
-    plt.scatter(results['omega'], results['S_omega_real'], 
-                label=f'Beta≈{beta_label} QFI={results["qfi"]:.4f}')
-    
-    # Mark peaks
-    if results['peak_positions']:
-        plt.scatter(results['peak_positions'], results['peak_heights'], 
-                    color='red', s=80, marker='x', zorder=5,
-                    label=f'Peaks: {[f"{pos:.2f}" for pos in results["peak_positions"]]}')
-    
-    plt.xlabel('Frequency (rad/s)')
-    plt.ylabel('Spectral Function S(ω)')
-    plt.xlim(-3, 6)
-    plt.title(f'Spectral Function for {species} at Beta≈{beta_label}')
-    plt.grid(True)
-    plt.legend()
-    
-    plot_filename = os.path.join(outdir, f'spectral_function_{species}_beta_{beta_label}.png')
-    plt.savefig(plot_filename, dpi=300)
-    plt.close()
-
-
-def _create_summary_plots(all_species_qfi_data, structure_factor_dir):
-    """Create summary plots for QFI vs beta for all species."""
-    
-    plot_outdir = os.path.join(structure_factor_dir, 'plots')
-    os.makedirs(plot_outdir, exist_ok=True)
-    
-    for species, qfi_data in all_species_qfi_data.items():
-        if not qfi_data:
-            continue
-            
-        _plot_qfi_vs_beta(species, qfi_data, plot_outdir)
-        _plot_qfi_derivative(species, qfi_data, plot_outdir)
-
-
-def _plot_qfi_vs_beta(species, qfi_data, plot_outdir):
-    """Plot QFI vs beta for a species."""
-    
-    # Sort data
-    qfi_data.sort(key=lambda x: (np.inf if np.isinf(x[0]) else x[0]))
-    qfi_beta_array = np.array(qfi_data, dtype=float)
-    
-    # Save data
-    data_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.dat')
-    np.savetxt(data_filename, qfi_beta_array, header='beta qfi')
-    
-    # Create plot
-    plt.figure(figsize=(10, 6))
-    
-    finite_mask = np.isfinite(qfi_beta_array[:, 0])
-    if np.any(finite_mask):
-        plt.plot(qfi_beta_array[finite_mask, 0], 
-                qfi_beta_array[finite_mask, 1], 'o-', label='Finite β')
-    
-    # Handle β=∞ points
-    if np.any(~finite_mask):
-        _add_infinity_annotation(qfi_beta_array, finite_mask)
-    
-    plt.xlabel('Beta (β)')
-    plt.ylabel('QFI')
-    plt.title(f'QFI vs. Beta for {species}')
-    plt.xscale('log')
-    plt.grid(True)
-    plt.legend()
-    
-    plot_filename = os.path.join(plot_outdir, f'qfi_vs_beta_{species}.png')
-    plt.savefig(plot_filename, dpi=300)
-    plt.close()
-
-
-def _add_infinity_annotation(qfi_beta_array, finite_mask):
-    """Add β=∞ annotation to plot."""
-    
-    beta_inf_qfi = qfi_beta_array[~finite_mask, 1]
-    
-    # Position annotation
-    if np.any(finite_mask):
-        x_annot = np.max(qfi_beta_array[finite_mask, 0])
-    else:
-        x_annot = 1.0
-    
-    plt.scatter([x_annot], [beta_inf_qfi.mean()], 
-                marker='*', s=160, c='red', label='β→∞')
-    plt.text(x_annot, beta_inf_qfi.mean(), 
-            f' β→∞ QFI={beta_inf_qfi.mean():.4g}',
-            fontsize=9, ha='left', va='bottom')
-
-
-def _plot_qfi_derivative(species, qfi_data, plot_outdir):
-    """Plot derivative of QFI with respect to beta."""
-    
-    # Sort and convert to array
-    qfi_data.sort(key=lambda x: (np.inf if np.isinf(x[0]) else x[0]))
-    qfi_beta_array = np.array(qfi_data, dtype=float)
-    
-    # Extract finite betas only
-    finite_qfi = qfi_beta_array[np.isfinite(qfi_beta_array[:, 0])]
-    
-    if len(finite_qfi) <= 1:
-        return
-    
-    betas = finite_qfi[:, 0]
-    qfis = finite_qfi[:, 1]
-    
-    # Calculate derivative using central differences
-    mid_betas = (betas[:-1] + betas[1:]) / 2
-    delta_beta = np.diff(betas)
-    delta_qfi = np.diff(qfis)
-    qfi_derivative = delta_qfi / delta_beta
-    
-    # Save derivative data
-    derivative_data = np.column_stack((mid_betas, qfi_derivative))
-    data_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_beta_{species}.dat')
-    np.savetxt(data_filename, derivative_data, header='beta dQFI/dbeta')
-    
-    # Create plot
-    plt.figure(figsize=(10, 6))
-    plt.plot(mid_betas, qfi_derivative, 'o-')
-    plt.xlabel('Beta (β)')
-    plt.ylabel('dQFI/dβ')
-    plt.title(f'Derivative of QFI vs. Beta for {species}')
-    plt.xscale('log')
-    plt.grid(True)
-    
-    plot_filename = os.path.join(plot_outdir, f'qfi_derivative_vs_beta_{species}.png')
-    plt.savefig(plot_filename, dpi=300)
-    plt.close()
-
-def parse_QFI_across_Jpm(data_dir):
-    
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-    
-    # Find all subdirectories matching the pattern Jpm=*
-    subdirs = []
-    if rank == 0:
-        subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
-        subdirs.sort()  # Ensure consistent ordering
-    
-    # Broadcast subdirs to all processes
-    subdirs = comm.bcast(subdirs, root=0)
-    
-    # Distribute subdirectories among processes
-    local_subdirs = []
-    for i, subdir in enumerate(subdirs):
-        if i % size == rank:
-            local_subdirs.append(subdir)
-    
-    # Each process handles its assigned subdirectories
-    local_jpm_qfi_data = {}
-    
-    for subdir in local_subdirs:
-        # Extract Jpm value from the directory name
-        match = re.search(r'Jpm=([-]?[\d\.]+)', os.path.basename(subdir))
-        if not match:
-            continue
-        jpm_value = float(match.group(1))
-        
-        # Path to structure_factor_results directory
-        structure_factor_dir = os.path.join(subdir, 'structure_factor_results')
-        
-        if not os.path.exists(structure_factor_dir):
-            print(f"[Rank {rank}] Structure factor directory not found: {structure_factor_dir}")
-            continue
-        
-        print(f"[Rank {rank}] Processing directory: {subdir} for Jpm={jpm_value}")
-        # Run the QFI analysis for the current Jpm value
-        species_qfi_data = parse_QFI_data_new(structure_factor_dir)
-        local_jpm_qfi_data[jpm_value] = species_qfi_data
-    
-    # Gather all results at rank 0
-    all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
-    
-    if rank == 0:
-        # Merge all results
-        jpm_qfi_data = {}
-        for process_data in all_jpm_qfi_data:
-            jpm_qfi_data.update(process_data)
-        
-        # Reorganize data by species for heatmap plotting
-        all_qfi_data = defaultdict(list)
-        all_derivative_data = defaultdict(list)
-        
-        for jpm, all_species_data in jpm_qfi_data.items():
-            for species, qfi_beta_list in all_species_data.items():
-                for beta, qfi in qfi_beta_list:
-                    all_qfi_data[species].append((jpm, beta, qfi))
+        if (std::getline(pair_ss, op1_str, ',') && std::getline(pair_ss, op2_str)) {
+            try {
+                int op1 = std::stoi(op1_str);
+                int op2 = std::stoi(op2_str);
                 
-                # Calculate derivatives for this species and jpm
-                if len(qfi_beta_list) > 1:
-                    qfi_beta_list.sort()
-                    qfi_beta_array = np.array(qfi_beta_list)
-                    betas = qfi_beta_array[:, 0]
-                    qfis = qfi_beta_array[:, 1]
-                    
-                    # Use central differences for the derivative
-                    mid_betas = (betas[:-1] + betas[1:]) / 2
-                    delta_beta = np.diff(betas)
-                    delta_qfi = np.diff(qfis)
-                    qfi_derivative = delta_qfi / delta_beta
-                    
-                    for mid_beta, derivative in zip(mid_betas, qfi_derivative):
-                        all_derivative_data[species].append((jpm, mid_beta, derivative))
-
-        # Create output directory
-        plot_outdir = os.path.join(data_dir, 'plots')
-        os.makedirs(plot_outdir, exist_ok=True)
-        return jpm_qfi_data
-    else:
-        return None
-
-
-
-def parse_QFI_across_hi(data_dir):
-    """
-    Scan subdirectories named 'h=i=*' under data_dir, run QFI parsing per folder,
-    and build heatmaps across the parameter h=i.
-    """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-
-    # Discover parameter sweep folders on rank 0
-    if rank == 0:
-        sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
-    else:
-        sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
-
-    # Round-robin assignment
-    my_dirs = sweep_dirs[rank::size]
-
-    # Local compute
-    local_results = {}
-    param_regex = re.compile(r'h=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)')
-    for d in my_dirs:
-        m = param_regex.search(os.path.basename(d))
-        if not m:
-            continue
-        hi_val = float(m.group(1))
-        sf_path = os.path.join(d, 'structure_factor_results')
-        if not os.path.isdir(sf_path):
-            print(f"[Rank {rank}] Missing structure_factor_results at: {sf_path}")
-            continue
-        print(f"[Rank {rank}] Processing {d} (h=i={hi_val})")
-        local_results[hi_val] = parse_QFI_data_new(sf_path)
-
-    # Gather and merge on root
-    gathered = comm.gather(local_results, root=0)
-    if rank != 0:
-        return None
-
-    merged = {}
-    for part in gathered:
-        merged.update(part)
-
-    # Reformat per-species arrays and compute derivatives
-    by_species = defaultdict(list)
-    by_species_deriv = defaultdict(list)
-    for hi, species_map in merged.items():
-        for sp, beta_qfi in species_map.items():
-            for b, q in beta_qfi:
-                by_species[sp].append((hi, b, q))
-
-            if len(beta_qfi) > 1:
-                bq = np.array(sorted(beta_qfi, key=lambda x: x[0]), dtype=float)
-                bvals, qvals = bq[:, 0], bq[:, 1]
-                mid = 0.5 * (bvals[:-1] + bvals[1:])
-                dq = np.diff(qvals)
-                db = np.diff(bvals)
-                deriv = dq / db
-                for mb, dv in zip(mid, deriv):
-                    by_species_deriv[sp].append((hi, mb, dv))
-
-    # Plotting
-    out_dir = os.path.join(data_dir, 'plots_hi')
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Heatmaps for QFI
-    for sp, triples in by_species.items():
-        if not triples:
-            continue
-        arr = np.array(triples, dtype=float)
-        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
-
-        # Build grid in parameter (linear) and beta (log)
-        x_min, x_max = np.nanmin(X), np.nanmax(X)
-        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-        x_lin = np.linspace(x_min, x_max, 120)
-        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-        XX, YY = np.meshgrid(x_lin, y_log)
-        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
-
-        plt.figure(figsize=(11, 7))
-        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-        plt.colorbar(mesh, label='QFI')
-        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-        plt.yscale('log')
-        plt.xlabel('h=i')
-        plt.ylabel('Beta (β)')
-        plt.title(f'QFI heatmap (h=i sweep): {sp}')
-        plt.legend(loc='best')
-        fout = os.path.join(out_dir, f'qfi_heatmap_hi_{sp}.png')
-        plt.savefig(fout, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {fout}")
-
-    # Heatmaps for dQFI/dβ
-    for sp, triples in by_species_deriv.items():
-        if not triples:
-            continue
-        arr = np.array(triples, dtype=float)
-        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
-
-        x_min, x_max = np.nanmin(X), np.nanmax(X)
-        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-        x_lin = np.linspace(x_min, x_max, 120)
-        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-        XX, YY = np.meshgrid(x_lin, y_log)
-        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
-
-        plt.figure(figsize=(11, 7))
-        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-        plt.colorbar(mesh, label='dQFI/dβ')
-        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-        plt.yscale('log')
-        plt.xlabel('h=i')
-        plt.ylabel('Beta (β)')
-        plt.title(f'dQFI/dβ heatmap (h=i sweep): {sp}')
-        plt.legend(loc='best')
-        fout = os.path.join(out_dir, f'qfi_derivative_heatmap_hi_{sp}.png')
-        plt.savefig(fout, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {fout}")
-
-    print("h=i sweep processing complete!")
-    return merged
-
-
-def track_peak_evolution_across_h(data_dir, target_beta=None):
-    """
-    Track the evolution of spectral peak positions as a function of h parameter.
+                if (op1 >= 0 && op1 <= 2 && op2 >= 0 && op2 <= 2) {
+                    spin_combinations.push_back({op1, op2});
+                } else {
+                    if (rank == 0) {
+                        std::cerr << "Warning: Invalid spin operator " << op1 << "," << op2 
+                                  << ". Operators must be 0, 1, or 2." << std::endl;
+                    }
+                }
+            } catch (const std::exception& e) {
+                if (rank == 0) {
+                    std::cerr << "Warning: Failed to parse spin combination: " << pair_str << std::endl;
+                }
+            }
+        }
+    }
     
-    Parameters:
-    data_dir: Directory containing h=* subdirectories
-    target_beta: Specific beta value to focus on (if None, uses the largest available beta)
+    if (spin_combinations.empty()) {
+        if (rank == 0) {
+            std::cerr << "Error: No valid spin combinations provided. Using default SzSz." << std::endl;
+        }
+        spin_combinations = {{2, 2}};
+    }
+
+    auto spin_combination_name = [](int op) {
+        switch (op) {
+            case 2:
+                return "Sz";
+            case 0:
+                return "Sp";
+            case 1:
+                return "Sm";
+            default:
+                return "Unknown";
+        }
+    };
+
+    std::vector<const char*> spin_combination_names;
+    for (const auto& pair : spin_combinations) {
+        int first = pair.first;
+        first = first == 2 ? 2 : 1 - first; // Convert 0->1(Sp), 1->0(Sm)
+        std::string combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(pair.second));
+        char* name = new char[combined_name.size() + 1];
+        std::strcpy(name, combined_name.c_str());
+        spin_combination_names.push_back(name);
+    }
+
+    // Regex to match tpq_state_i_beta=*.dat files where i is the sample index
+    std::regex state_pattern("tpq_state_([0-9]+)_beta=([0-9.]+)\\.dat");
+
+    // Load Hamiltonian (all processes need this)
+    if (rank == 0) {
+        std::cout << "Loading Hamiltonian..." << std::endl;
+    }
     
-    Returns:
-    peak_evolution_data: Dictionary containing peak tracking results for each species
-    """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-
-    # Discover parameter sweep folders on rank 0
-    if rank == 0:
-        sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
-    else:
-        sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
-
-    # Round-robin assignment
-    my_dirs = sweep_dirs[rank::size]
-
-    # Local compute
-    local_peak_data = {}
-    param_regex = re.compile(r'h=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)')
+    Operator ham_op(num_sites, spin_length);
     
-    for d in my_dirs:
-        m = param_regex.search(os.path.basename(d))
-        if not m:
-            continue
-        hi_val = float(m.group(1))
+    std::string interall_file = directory + "/InterAll.dat";
+    std::string trans_file = directory + "/Trans.dat";
+    std::string positions_file = directory + "/positions.dat";
+    
+    // Check if files exist
+    if (!fs::exists(interall_file) || !fs::exists(trans_file)) {
+        if (rank == 0) {
+            std::cerr << "Error: Hamiltonian files not found in " << directory << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    
+    // Load Hamiltonian
+    ham_op.loadFromInterAllFile(interall_file);
+    ham_op.loadFromFile(trans_file);
+    
+    auto H = [&ham_op](const Complex* in, Complex* out, int size) {
+        ham_op.apply(in, out, size);
+    };
+    
+    // Use 64-bit to compute Hilbert space dimension and guard against int overflow
+    size_t N64 = 1ULL << num_sites;
+    if (N64 > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        if (rank == 0) {
+            std::cerr << "Error: 2^num_sites exceeds 32-bit int range (num_sites=" << num_sites
+                      << "). Refactor APIs to use size_t for N or reduce num_sites." << std::endl;
+        }
+        MPI_Finalize();
+        return 1;
+    }
+    int N = static_cast<int>(N64);
+    
+    // Define momentum points
+    const std::vector<std::vector<double>> momentum_points = {
+        {0.0, 0.0, 0.0},
+        {0, 0, 2*M_PI},
+        {0, 0, 4*M_PI}
+    };
+    
+    // Create output directory (only rank 0)
+    std::string output_base_dir = directory + "/structure_factor_results";
+    if (rank == 0) {
+        ensureDirectoryExists(output_base_dir);
+    }
+    
+    // Synchronize all processes
+    MPI_Barrier(MPI_COMM_WORLD);
+    
+    // Collect all tpq_state files from the output subdirectory (only rank 0)
+    std::vector<std::string> tpq_files;
+    std::vector<int> sample_indices;
+    std::vector<double> beta_values;
+    std::vector<std::string> beta_strings;
+    
+    if (rank == 0) {
+        std::string tpq_directory = directory + "/output";
+        for (const auto& entry : fs::directory_iterator(tpq_directory)) {
+            if (!entry.is_regular_file()) continue;
+            
+            std::string filename = entry.path().filename().string();
+            std::smatch match;
+            
+            if (std::regex_match(filename, match, state_pattern)) {
+                tpq_files.push_back(entry.path().string());
+                sample_indices.push_back(std::stoi(match[1]));
+                beta_strings.push_back(match[2]);
+                beta_values.push_back(std::stod(match[2]));
+            }
+        }
+
+        // Optionally include zero-temperature ground-state eigenvector
+        const std::string gs_file = tpq_directory + "/eigenvectors/eigenvector_0.dat";
+        if (fs::exists(gs_file)) {
+            tpq_files.push_back(gs_file);
+            sample_indices.push_back(0); // use 0 as a conventional index for ground state
+            beta_strings.push_back("inf");
+            beta_values.push_back(std::numeric_limits<double>::infinity());
+        }
         
-        # Look for processed spectral data
-        sf_path = os.path.join(d, 'structure_factor_results')
-        if not os.path.isdir(sf_path):
-            continue
-            
-        print(f"[Rank {rank}] Tracking peaks for h={hi_val}")
+        std::cout << "Found " << tpq_files.size() << " state file(s) to process (including ground state if present)" << std::endl;
+        std::cout << "Using " << size << " MPI processes" << std::endl;
+    }
+    
+    // Broadcast the number of files to all processes
+    int num_files = tpq_files.size();
+    MPI_Bcast(&num_files, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    
+    if (num_files == 0) {
+        if (rank == 0) {
+            std::cout << "No TPQ state files found." << std::endl;
+        }
+        MPI_Finalize();
+        return 0;
+    }
+    
+    // Resize vectors on non-root processes
+    if (rank != 0) {
+        tpq_files.resize(num_files);
+        sample_indices.resize(num_files);
+        beta_values.resize(num_files);
+        beta_strings.resize(num_files);
+    }
+    
+    // Broadcast file information to all processes
+    for (int i = 0; i < num_files; i++) {
+        int filename_size;
+        if (rank == 0) {
+            filename_size = tpq_files[i].size();
+        }
+        MPI_Bcast(&filename_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
         
-        # Find all species subdirectories in processed_data
-        processed_data_dir = os.path.join(sf_path, 'processed_data')
-        if not os.path.isdir(processed_data_dir):
-            continue
-            
-        species_dirs = [d for d in os.listdir(processed_data_dir) 
-                       if os.path.isdir(os.path.join(processed_data_dir, d))]
+        if (rank != 0) {
+            tpq_files[i].resize(filename_size);
+        }
+        MPI_Bcast(&tpq_files[i][0], filename_size, MPI_CHAR, 0, MPI_COMM_WORLD);
         
-        local_peak_data[hi_val] = {}
+        // Broadcast beta string
+        int beta_str_size;
+        if (rank == 0) {
+            beta_str_size = beta_strings[i].size();
+        }
+        MPI_Bcast(&beta_str_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
         
-        for species in species_dirs:
-            species_dir = os.path.join(processed_data_dir, species)
-            
-            # Find peak files
-            peak_files = glob.glob(os.path.join(species_dir, 'peaks_beta_*.dat'))
-            
-            species_peaks = []
-            for peak_file in peak_files:
-                # Extract beta from filename
-                beta_match = re.search(r'peaks_beta_([\d\.]+|inf)\.dat', os.path.basename(peak_file))
-                if not beta_match:
-                    continue
-                    
-                beta_str = beta_match.group(1)
-                if beta_str == 'inf':
-                    beta_val = np.inf
-                else:
-                    beta_val = float(beta_str)
-                
-                try:
-                    # Load peak data
-                    peak_data = np.loadtxt(peak_file)
-                    if peak_data.size == 0:
-                        continue
-                    if peak_data.ndim == 1:
-                        peak_data = peak_data.reshape(1, -1)
-                    
-                    # Store peaks for this beta
-                    for row in peak_data:
-                        freq, height, prominence = row
-                        species_peaks.append((beta_val, freq, height, prominence))
-                        
-                except Exception as e:
-                    print(f"[Rank {rank}] Error reading {peak_file}: {e}")
-            
-            if species_peaks:
-                local_peak_data[hi_val][species] = species_peaks
-
-    # Gather and merge on root
-    gathered = comm.gather(local_peak_data, root=0)
-    if rank != 0:
-        return None
-
-    merged_peak_data = {}
-    for part in gathered:
-        for hi, species_data in part.items():
-            if hi not in merged_peak_data:
-                merged_peak_data[hi] = {}
-            merged_peak_data[hi].update(species_data)
-
-    # Process and plot peak evolution
-    out_dir = os.path.join(data_dir, 'peak_evolution')
-    os.makedirs(out_dir, exist_ok=True)
-
-    # Organize data by species
-    species_peak_evolution = defaultdict(lambda: defaultdict(list))
+        if (rank != 0) {
+            beta_strings[i].resize(beta_str_size);
+        }
+        MPI_Bcast(&beta_strings[i][0], beta_str_size, MPI_CHAR, 0, MPI_COMM_WORLD);
+    }
     
-    for hi, species_data in merged_peak_data.items():
-        for species, peaks in species_data.items():
-            for beta_val, freq, height, prominence in peaks:
-                species_peak_evolution[species][beta_val].append((hi, freq, height, prominence))
-
-    # Plot peak evolution for each species and beta
-    for species, beta_data in species_peak_evolution.items():
-        for beta_val, peak_list in beta_data.items():
-            if len(peak_list) < 2:  # Need at least 2 points to track evolution
-                continue
-                
-            # Sort by h value
-            peak_list.sort(key=lambda x: x[0])
-            peak_array = np.array(peak_list, dtype=float)
-            
-            h_vals = peak_array[:, 0]
-            freqs = peak_array[:, 1]
-            heights = peak_array[:, 2]
-            prominences = peak_array[:, 3]
-            
-            # Plot frequency evolution
-            plt.figure(figsize=(12, 8))
-            
-            # Subplot 1: Peak frequency vs h
-            plt.subplot(2, 2, 1)
-            plt.scatter(h_vals, freqs, c=heights, cmap='viridis', s=50, alpha=0.7)
-            plt.colorbar(label='Peak Height')
-            plt.xlabel('h parameter')
-            plt.ylabel('Peak Frequency (rad/s)')
-            plt.title(f'Peak Frequency Evolution: {species}, β={beta_val:.3g}')
-            plt.grid(True, alpha=0.3)
-            
-            # Subplot 2: Peak height vs h
-            plt.subplot(2, 2, 2)
-            plt.plot(h_vals, heights, 'o-', alpha=0.7)
-            plt.xlabel('h parameter')
-            plt.ylabel('Peak Height')
-            plt.title(f'Peak Height Evolution: {species}, β={beta_val:.3g}')
-            plt.grid(True, alpha=0.3)
-            
-            # Subplot 3: Peak prominence vs h
-            plt.subplot(2, 2, 3)
-            plt.plot(h_vals, prominences, 's-', alpha=0.7, color='orange')
-            plt.xlabel('h parameter')
-            plt.ylabel('Peak Prominence')
-            plt.title(f'Peak Prominence Evolution: {species}, β={beta_val:.3g}')
-            plt.grid(True, alpha=0.3)
-            
-            # Subplot 4: 2D trajectory in frequency-h space
-            plt.subplot(2, 2, 4)
-            plt.plot(h_vals, freqs, 'o-', alpha=0.7)
-            plt.xlabel('h parameter')
-            plt.ylabel('Peak Frequency (rad/s)')
-            plt.title(f'Peak Trajectory: {species}, β={beta_val:.3g}')
-            plt.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            
-            beta_label = 'inf' if np.isinf(beta_val) else f'{beta_val:.3g}'
-            plot_filename = os.path.join(out_dir, f'peak_evolution_{species}_beta_{beta_label}.png')
-            plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
-            plt.close()
-            
-            # Save peak evolution data
-            data_filename = os.path.join(out_dir, f'peak_evolution_{species}_beta_{beta_label}.dat')
-            header = 'h_parameter peak_frequency peak_height peak_prominence'
-            np.savetxt(data_filename, peak_array, header=header)
-            
-            print(f"Saved peak evolution for {species}, β={beta_val:.3g}: {plot_filename}")
-
-    # Create summary plots showing all species evolution at a specific beta
-    if target_beta is not None:
-        plt.figure(figsize=(12, 8))
+    MPI_Bcast(sample_indices.data(), num_files, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(beta_values.data(), num_files, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    
+    // Process files assigned to this rank
+    int local_processed_count = 0;
+    for (int i = rank; i < num_files; i += size) {
+        int sample_index = sample_indices[i];
+        double beta = beta_values[i];
+        std::string beta_str = beta_strings[i];
+        std::string filename = fs::path(tpq_files[i]).filename().string();
         
-        for species, beta_data in species_peak_evolution.items():
-            # Find closest beta to target
-            available_betas = list(beta_data.keys())
-            if not available_betas:
-                continue
-                
-            closest_beta = min(available_betas, key=lambda x: abs(x - target_beta) if not np.isinf(x) else float('inf'))
-            
-            if abs(closest_beta - target_beta) > 0.1 * target_beta:  # Skip if too far from target
-                continue
-                
-            peak_list = beta_data[closest_beta]
-            if len(peak_list) < 2:
-                continue
-                
-            peak_list.sort(key=lambda x: x[0])
-            peak_array = np.array(peak_list, dtype=float)
-            
-            h_vals = peak_array[:, 0]
-            freqs = peak_array[:, 1]
-            
-            plt.plot(h_vals, freqs, 'o-', label=f'{species} (β={closest_beta:.3g})', alpha=0.7)
+        std::cout << "Rank " << rank << " processing " << filename << " (sample " << sample_index << ", beta = " << beta << ")" << std::endl;
         
-        plt.xlabel('h parameter')
-        plt.ylabel('Peak Frequency (rad/s)')
-        plt.title(f'Peak Frequency Evolution Comparison (β≈{target_beta:.3g})')
-        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
+        // Load state: TPQ binary or text eigenvector
+        ComplexVector tpq_state;
+        bool loaded_ok = false;
+        if (filename.find("eigenvector") != std::string::npos) {
+            // Text eigenvector format: first line dimension, then index real imag
+            loaded_ok = load_raw_data(tpq_state, tpq_files[i], N64);
+        } else {
+            loaded_ok = load_tpq_state(tpq_state, tpq_files[i]);
+        }
+        if (!loaded_ok) {
+            std::cerr << "Rank " << rank << " failed to load state from " << filename << std::endl;
+            continue;
+        }
+        if ((int)tpq_state.size() != N) {
+            std::cerr << "Rank " << rank << ": state dimension mismatch for " << filename
+                      << ". got " << tpq_state.size() << ", expected " << N << std::endl;
+            continue;
+        }
         
-        summary_filename = os.path.join(out_dir, f'peak_evolution_summary_beta_{target_beta:.3g}.png')
-        plt.savefig(summary_filename, dpi=300, bbox_inches='tight')
-        plt.close()
+        // Create output directory for this beta (each process creates its own)
+        std::string output_dir = output_base_dir + "/beta_" + beta_str;
+        ensureDirectoryExists(output_dir);
         
-        print(f"Saved summary plot: {summary_filename}")
+        if (method == "krylov") {
+            int krylov_dim = krylov_dim_or_nmax;
+            computeTPQSpinStructureFactorKrylov(
+                H,
+                tpq_state,
+                positions_file,
+                N,
+                num_sites,
+                spin_length,
+                output_dir,
+                sample_index,
+                beta,
+                momentum_points,
+                krylov_dim,
+                spin_combinations,
+                spin_combination_names
+            );
+        } else if (method == "taylor") {
+            if (rank == 0) {
+                std::cout << "Using Taylor (create_time_evolution_operator) evolution (n_max=" << krylov_dim_or_nmax
+                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+            }
+            // Build U(dt) and U(-dt)
+            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
 
-    print("Peak evolution tracking complete!")
-    return species_peak_evolution
+            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
+            std::vector<Operator> observables_1;
+            std::vector<Operator> observables_2;
+            std::vector<std::string> observable_names;
+            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+                const auto &Q = momentum_points[q_idx];
+                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                    int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
+                    int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
+                    std::stringstream name_ss;
+                    name_ss << spin_combination_names[combo_idx] << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
+                    try {
+                        SumOperator sum_op(num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
+                        SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
+                        observable_names.push_back(name_ss.str());
+                        observables_1.push_back(std::move(sum_op));
+                        observables_2.push_back(std::move(sum_op_2));
+                    } catch (const std::exception &e) {
+                        if (rank == 0) {
+                            std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
+                        }
+                    }
+                }
+            }
+            if (observables_1.empty() && observables_2.empty()) {
+                if (rank == 0) {
+                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
+                }
+            } else {
+                std::string taylor_dir = output_dir + "/taylor";
+                ensureDirectoryExists(taylor_dir);
+                computeObservableDynamics_U_t(
+                    U_t,
+                    tpq_state,
+                    observables_1,
+                    observables_2,
+                    observable_names,
+                    N,
+                    taylor_dir,
+                    sample_index,
+                    beta,
+                    t_end_opt,
+                    dt_opt
+                );
+            }
+        } else if (method == "pedantic"){
+            if (rank == 0) {
+                std::cout << "Using Taylor (create_time_evolution_operator) evolution for sublattice operator evolution (n_max=" << krylov_dim_or_nmax
+                          << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
+            }
+            // Build U(dt) and U(-dt)
+            auto U_t = create_time_evolution_operator(H, dt_opt, krylov_dim_or_nmax, true);
 
-
-def plot_heatmaps_from_processed_data(data_dir):
-    """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories.
-       Only plot rows where there is no NaN, and save all intermediate and plot data."""
-    
-    # Step 1: Load all QFI and derivative data
-    all_qfi_data, all_derivative_data = load_processed_data(data_dir)
-    
-    # Step 2: Create output directory
-    plot_outdir = os.path.join(data_dir, 'plots')
-    os.makedirs(plot_outdir, exist_ok=True)
-    
-    # Step 3: Save raw data points
-    save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
-    
-    # Step 4: Process and plot QFI heatmaps
-    for species, data_points in all_qfi_data.items():
-        if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir, 
-                data_type='qfi', ref_target=0.08
-            )
-    
-    # Step 5: Process and plot derivative heatmaps
-    for species, data_points in all_derivative_data.items():
-        if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir,
-                data_type='derivative', ref_target=0.09
-            )
-
-
-def load_processed_data(data_dir):
-    """Load QFI and derivative data from all Jpm subdirectories."""
-    all_qfi_data = defaultdict(list)
-    all_derivative_data = defaultdict(list)
-    
-    subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
-    
-    for subdir in subdirs:
-        jpm_value = extract_jpm_value(subdir)
-        if jpm_value is None:
-            continue
-            
-        plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
-        if not os.path.exists(plots_dir):
-            continue
-            
-        print(f"Reading processed data from: {plots_dir} for Jpm={jpm_value}")
+            // Build observables: momentum-dependent sum operators for the FIRST operator in each pair.
+            std::vector<Operator> observables_1;
+            std::vector<Operator> observables_2;
+            std::vector<std::string> observable_names;
+            for (size_t q_idx = 0; q_idx < momentum_points.size(); ++q_idx) {
+                const auto &Q = momentum_points[q_idx];
+                for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); ++combo_idx) {
+                    for(size_t sublattice = 0; sublattice < 4; ++sublattice){
+                        for(size_t sublattice2 = 0; sublattice2 < 4; ++sublattice2){
+                            int op_type_1 = spin_combinations[combo_idx].first; // 0 Sp,1 Sm,2 Sz
+                            int op_type_2 = spin_combinations[combo_idx].second; // 0 Sp,1 Sm,2 Sz
+                            std::stringstream name_ss;
+                            name_ss << spin_combination_names[combo_idx] << "_sub" << sublattice << "_sub" << sublattice2 << "_q" << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2];
+                            try {
+                                SublatticeOperator sum_op(sublattice, 4, num_sites, spin_length, op_type_1, momentum_points[q_idx], positions_file);
+                                SublatticeOperator sum_op_2(sublattice2, 4, num_sites, spin_length, op_type_2, momentum_points[q_idx], positions_file);
+                                observable_names.push_back(name_ss.str());
+                                observables_1.push_back(std::move(sum_op));
+                                observables_2.push_back(std::move(sum_op_2));
+                            } catch (const std::exception &e) {
+                                if (rank == 0) {
+                                    std::cerr << "Failed to build SumOperator for q_idx=" << q_idx << ": " << e.what() << std::endl;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (observables_1.empty() && observables_2.empty()) {
+                if (rank == 0) {
+                    std::cerr << "No observables constructed. Skipping Taylor evolution for this state." << std::endl;
+                }
+            } else {
+                std::string taylor_dir = output_dir + "/taylor";
+                ensureDirectoryExists(taylor_dir);
+                computeObservableDynamics_U_t(
+                    U_t,
+                    tpq_state,
+                    observables_1,
+                    observables_2,
+                    observable_names,
+                    N,
+                    taylor_dir,
+                    sample_index,
+                    beta,
+                    t_end_opt,
+                    dt_opt
+                );
+            }
+        }
+        else if (method == "spin_correlation") {
+            printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
+            printSpinExpectation(tpq_state, num_sites, spin_length, output_dir);
+        } else {
+            if (rank == 0) {
+                std::cerr << "Unknown method '" << method << "'. Supported: krylov, taylor" << std::endl;
+            }
+        }
         
-        # Load QFI files
-        load_data_files(
-            plots_dir, 'qfi_vs_beta_*.dat', 
-            jpm_value, all_qfi_data
-        )
-        
-        # Load derivative files
-        load_data_files(
-            plots_dir, 'qfi_derivative_vs_beta_*.dat',
-            jpm_value, all_derivative_data
-        )
+        local_processed_count++;
+        std::cout << "Rank " << rank << " completed structure factor calculation for sample " << sample_index << ", beta = " << beta << std::endl;
+    }
     
-    return all_qfi_data, all_derivative_data
-
-
-def extract_jpm_value(subdir):
-    """Extract Jpm value from directory name."""
-    match = re.search(r'Jpm=([-]?[\d\.]+)', os.path.basename(subdir))
-    return float(match.group(1)) if match else None
-
-
-def load_data_files(plots_dir, pattern, jpm_value, data_dict):
-    """Load data files matching pattern and add to data dictionary."""
-    files = glob.glob(os.path.join(plots_dir, pattern))
+    // Gather total processed count
+    int total_processed_count;
+    MPI_Reduce(&local_processed_count, &total_processed_count, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     
-    for file_path in files:
-        species = extract_species_from_filename(file_path, pattern)
-        if not species:
-            continue
-            
-        try:
-            data = np.loadtxt(file_path)
-            if data.size == 0:
-                continue
-            if data.ndim == 1:
-                data = data.reshape(1, -1)
-            
-            for row in data:
-                beta, value = row[0], row[1]
-                data_dict[species].append((jpm_value, beta, value))
-        except Exception as e:
-            print(f"Error reading {file_path}: {e}")
-
-
-def extract_species_from_filename(file_path, pattern):
-    """Extract species name from filename."""
-    base_pattern = pattern.replace('*', '(.+?)')
-    match = re.search(base_pattern, os.path.basename(file_path))
-    return match.group(1) if match else None
-
-
-def save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir):
-    """Save raw assembled points for QFI and derivatives."""
-    for species, data_points in all_qfi_data.items():
-        if data_points:
-            arr = np.array(data_points, dtype=float)
-            np.savetxt(
-                os.path.join(plot_outdir, f'qfi_points_{species}.dat'), 
-                arr, header='Jpm beta qfi'
-            )
+    if (rank == 0) {
+        std::cout << "\nProcessed " << total_processed_count << " TPQ state files." << std::endl;
+        std::cout << "Results saved in: " << output_base_dir << std::endl;
+    }
     
-    for species, data_points in all_derivative_data.items():
-        if data_points:
-            arr = np.array(data_points, dtype=float)
-            np.savetxt(
-                os.path.join(plot_outdir, f'qfi_derivative_points_{species}.dat'),
-                arr, header='Jpm beta dQFI_dbeta'
-            )
-
-
-def process_species_heatmap(species, data_points, plot_outdir, data_type, ref_target):
-    """Process and create heatmaps for a single species."""
-    
-    # Convert data to array
-    arr = np.array(data_points, dtype=float)
-    jpm_vals, beta_vals, values = arr[:, 0], arr[:, 1], arr[:, 2]
-    
-    # Get beta grid
-    target_beta = get_beta_grid(jpm_vals, beta_vals, ref_target)
-    if target_beta.size < 2:
-        return
-    
-    # Split into positive and negative Jpm
-    jpm_neg, jpm_pos = split_jpm_values(jpm_vals)
-    
-    # Interpolate data onto regular grid
-    Z_neg, Z_pos = interpolate_to_grid(
-        jpm_vals, beta_vals, values, 
-        jpm_neg, jpm_pos, target_beta
-    )
-    
-    # Save grids
-    save_grids(species, target_beta, jpm_neg, jpm_pos, 
-               Z_neg, Z_pos, plot_outdir, data_type)
-    
-    # Filter rows with no NaN
-    filtered_data = filter_nan_rows(target_beta, Z_neg, Z_pos, True)
-    
-    # Save filtered grids
-    save_filtered_grids(species, filtered_data, jpm_neg, jpm_pos, 
-                       plot_outdir, data_type)
-    
-    # Create plots
-    create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, 
-                        plot_outdir, data_type)
-    
-    # Create line plots at fixed beta
-    create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, 
-                           jpm_neg, jpm_pos, filtered_data, 
-                           plot_outdir, data_type)
-
-
-def get_beta_grid(jpm_vals, beta_vals, ref_target):
-    """Create beta grid based on reference Jpm value."""
-    unique_jpm = np.unique(jpm_vals)
-    if unique_jpm.size == 0:
-        return np.array([])
-    
-    # Find Jpm closest to reference target
-    ref_jpm = unique_jpm[np.argmin(np.abs(unique_jpm - ref_target))]
-    ref_mask = np.isclose(jpm_vals, ref_jpm, rtol=1e-8, atol=1e-12)
-    
-    beta_ref = beta_vals[ref_mask]
-    beta_ref = beta_ref[beta_ref > 0]
-    target_beta = np.unique(beta_ref)
-    target_beta.sort()
-    
-    # Fallback to all positive betas if reference grid insufficient
-    if target_beta.size < 2:
-        target_beta = np.unique(beta_vals[beta_vals > 0])
-        target_beta.sort()
-    
-    return target_beta
-
-
-def split_jpm_values(jpm_vals):
-    """Split Jpm values into negative and positive arrays."""
-    jpm_neg = np.unique(jpm_vals[jpm_vals < 0])
-    jpm_neg.sort()
-    jpm_pos = np.unique(jpm_vals[jpm_vals > 0])
-    jpm_pos.sort()
-    return jpm_neg, jpm_pos
-
-
-def interpolate_to_grid(jpm_vals, beta_vals, values, jpm_neg, jpm_pos, target_beta):
-    """Interpolate data onto regular beta grid for each Jpm value."""
-    
-    def interp_at_jpm(j):
-        mask = np.isclose(jpm_vals, j, rtol=1e-8, atol=1e-12)
-        b = beta_vals[mask]
-        v = values[mask]
-        
-        if b.size == 0:
-            return np.full_like(target_beta, np.nan, dtype=float)
-        
-        # Sort and average duplicates
-        order = np.argsort(b)
-        b, v = b[order], v[order]
-        
-        bu, inv = np.unique(b, return_inverse=True)
-        v_mean = np.zeros_like(bu, dtype=float)
-        counts = np.zeros_like(bu, dtype=int)
-        np.add.at(v_mean, inv, v)
-        np.add.at(counts, inv, 1)
-        v_mean = v_mean / np.maximum(counts, 1)
-        
-        if bu.size < 2:
-            return np.full_like(target_beta, np.nan, dtype=float)
-        
-        f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=np.nan)
-        return f(target_beta)
-    
-    Z_neg = np.column_stack([interp_at_jpm(j) for j in jpm_neg]) if jpm_neg.size > 0 else None
-    Z_pos = np.column_stack([interp_at_jpm(j) for j in jpm_pos]) if jpm_pos.size > 0 else None
-    
-    return Z_neg, Z_pos
-
-
-def filter_nan_rows(target_beta, Z_neg, Z_pos, naive = False):
-    """Filter out rows containing NaN values."""
-    result = {}
-
-    if naive:
-        result['Z_neg_f'] = Z_neg
-        result['Z_pos_f'] = Z_pos
-        result['beta_neg_f'] = target_beta
-        result['beta_pos_f'] = target_beta
-        return result
-    else:
-        if Z_neg is not None and Z_neg.size > 0:
-            mask_neg = np.all(np.isfinite(Z_neg), axis=1)
-            if np.any(mask_neg):
-                result['Z_neg_f'] = Z_neg[mask_neg, :]
-                result['beta_neg_f'] = target_beta[mask_neg]
-                result['mask_neg'] = mask_neg
-        
-        if Z_pos is not None and Z_pos.size > 0:
-            mask_pos = np.all(np.isfinite(Z_pos), axis=1)
-            if np.any(mask_pos):
-                result['Z_pos_f'] = Z_pos[mask_pos, :]
-                result['beta_pos_f'] = target_beta[mask_pos]
-                result['mask_pos'] = mask_pos
-        return result
-
-
-def save_grids(species, target_beta, jpm_neg, jpm_pos, Z_neg, Z_pos, plot_outdir, data_type):
-    """Save unfiltered grid data."""
-    prefix = 'qfi' if data_type == 'qfi' else 'qfi_derivative'
-    
-    if Z_neg is not None:
-        save_grid_data(plot_outdir, f'{prefix}_grid_neg_{species}', 
-                      target_beta, jpm_neg, Z_neg)
-    
-    if Z_pos is not None:
-        save_grid_data(plot_outdir, f'{prefix}_grid_pos_{species}',
-                      target_beta, jpm_pos, Z_pos)
-
-
-def save_filtered_grids(species, filtered_data, jpm_neg, jpm_pos, plot_outdir, data_type):
-    """Save filtered grid data."""
-    prefix = 'qfi' if data_type == 'qfi' else 'qfi_derivative'
-    
-    if 'Z_neg_f' in filtered_data:
-        save_grid_data(plot_outdir, f'{prefix}_grid_neg_filtered_{species}',
-                      filtered_data['beta_neg_f'], jpm_neg, filtered_data['Z_neg_f'])
-    
-    if 'Z_pos_f' in filtered_data:
-        save_grid_data(plot_outdir, f'{prefix}_grid_pos_filtered_{species}',
-                      filtered_data['beta_pos_f'], jpm_pos, filtered_data['Z_pos_f'])
-
-
-def save_grid_data(plot_outdir, base_name, beta, jpm, Z):
-    """Save grid data in both npz and text formats."""
-    np.savez(os.path.join(plot_outdir, f'{base_name}.npz'),
-             beta=beta, jpm=jpm, Z=Z)
-    
-    # Save as text
-    header_cols = ['beta'] + [f'Jpm={v:g}' for v in jpm]
-    header = ' '.join(header_cols)
-    out = np.column_stack((beta, Z))
-    np.savetxt(os.path.join(plot_outdir, f'{base_name}.dat'), 
-               out, header=header)
-
-
-def create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, plot_outdir, data_type):
-    """Create heatmap plots for the species."""
-    
-    # Get color scale limits
-    vmin, vmax = get_color_limits(filtered_data)
-    if vmin is None:
-        return
-    
-    # Labels
-    value_label = 'QFI' if data_type == 'qfi' else 'dQFI/dβ'
-    prefix = 'qfi' if data_type == 'qfi' else 'qfi_derivative'
-    
-    # Plot negative Jpm heatmap
-    if 'Z_neg_f' in filtered_data:
-        plot_single_heatmap(
-            jpm_neg, filtered_data['beta_neg_f'], filtered_data['Z_neg_f'],
-            vmin, vmax, value_label, 
-            f'{value_label} Heatmap (Jpm<0) for {species}',
-            os.path.join(plot_outdir, f'{prefix}_heatmap_neg_{species}.png')
-        )
-    
-    # Plot positive Jpm heatmap
-    if 'Z_pos_f' in filtered_data:
-        plot_single_heatmap(
-            jpm_pos, filtered_data['beta_pos_f'], filtered_data['Z_pos_f'],
-            vmin, vmax, value_label,
-            f'{value_label} Heatmap (Jpm>0) for {species}',
-            os.path.join(plot_outdir, f'{prefix}_heatmap_pos_{species}.png')
-        )
-    
-    # Plot side-by-side view
-    if 'Z_neg_f' in filtered_data and 'Z_pos_f' in filtered_data:
-        plot_side_by_side_heatmap(
-            species, filtered_data, jpm_neg, jpm_pos,
-            vmin, vmax, value_label, plot_outdir, prefix
-        )
-
-
-def get_color_limits(filtered_data):
-    """Get unified color scale limits."""
-    z_list = []
-    if 'Z_neg_f' in filtered_data:
-        z_list.append(filtered_data['Z_neg_f'])
-    if 'Z_pos_f' in filtered_data:
-        z_list.append(filtered_data['Z_pos_f'])
-    
-    if not z_list:
-        return None, None
-    
-    vmin = np.nanmin([np.nanmin(z) for z in z_list])
-    vmax = np.nanmax([np.nanmax(z) for z in z_list])
-    return vmin, vmax
-
-
-def plot_single_heatmap(jpm, beta, Z, vmin, vmax, value_label, title, filename):
-    """Create a single heatmap plot."""
-    J, B = np.meshgrid(jpm, beta)
-    
-    plt.figure(figsize=(12, 8))
-    plt.pcolormesh(J, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    plt.yscale('log')
-    plt.gca().invert_yaxis()  # large beta at bottom
-    plt.xlabel('Jpm')
-    plt.ylabel('Beta (β)')
-    plt.title(title)
-    plt.colorbar(label=value_label)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def plot_side_by_side_heatmap(species, filtered_data, jpm_neg, jpm_pos, 
-                              vmin, vmax, value_label, plot_outdir, prefix):
-    """Create side-by-side heatmap plot."""
-    
-    beta_neg_f = filtered_data['beta_neg_f']
-    beta_pos_f = filtered_data['beta_pos_f']
-    Z_neg_f = filtered_data['Z_neg_f']
-    Z_pos_f = filtered_data['Z_pos_f']
-    
-    # Create meshgrids
-    JN, BN = np.meshgrid(jpm_neg, beta_neg_f)
-    JP, BP = np.meshgrid(jpm_pos, beta_pos_f)
-    
-    # Calculate y-axis limits
-    y_min = float(min(beta_neg_f.min(), beta_pos_f.min()))
-    y_max = float(max(beta_neg_f.max(), beta_pos_f.max()))
-    
-    # Calculate width ratio
-    wr = calculate_width_ratio(jpm_neg, jpm_pos)
-    
-    # Create figure
-    fig, (axL, axR) = plt.subplots(
-        1, 2, figsize=(14, 8), sharey=True,
-        gridspec_kw={'wspace': 0.0, 'hspace': 0.0, 'width_ratios': [wr, 1.0]}
-    )
-    
-    # Plot heatmaps
-    axL.pcolormesh(JN, BN, Z_neg_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    axR.pcolormesh(JP, BP, Z_pos_f, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    
-    # Format axes
-    for ax in (axL, axR):
-        ax.set_yscale('log')
-        ax.set_ylim(y_max, y_min)  # large beta at bottom
-        ax.set_xlabel('Jpm')
-    
-    axL.set_ylabel('Beta (β)')
-    axR.tick_params(labelleft=False)
-    
-    # Add colorbar
-    fig.subplots_adjust(wspace=0.0)
-    cbar = fig.colorbar(axL.collections[0], ax=[axL, axR], location='right', pad=0.02)
-    cbar.set_label(value_label)
-    
-    fig.suptitle(f'{value_label} Heatmap (Jpm<0 | Jpm>0) for {species}')
-    fig.savefig(os.path.join(plot_outdir, f'{prefix}_heatmap_side_by_side_{species}.png'),
-                dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def calculate_width_ratio(jpm_neg, jpm_pos):
-    """Calculate width ratio for side-by-side plots."""
-    neg_span = float(np.ptp(jpm_neg)) if jpm_neg.size > 0 else 0.0
-    pos_span = float(np.ptp(jpm_pos)) if jpm_pos.size > 0 else 0.0
-    
-    if pos_span > 0:
-        wr = neg_span / pos_span
-    else:
-        wr = 1.5
-    
-    return float(np.clip(wr, 1.2, 3.0))
-
-
-def create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, jpm_neg, jpm_pos, 
-                           filtered_data, plot_outdir, data_type):
-    """Create line plots at fixed beta values."""
-    
-    # Find largest valid beta indices
-    idx_neg = find_largest_valid_beta_index(Z_neg, filtered_data.get('mask_neg'))
-    idx_pos = find_largest_valid_beta_index(Z_pos, filtered_data.get('mask_pos'))
-    
-    if idx_neg is None and idx_pos is None:
-        return
-    
-    # Setup plot
-    plt.figure(figsize=(10, 6))
-    color = 'C0' if data_type == 'qfi' else 'C1'
-    value_label = 'QFI' if data_type == 'qfi' else 'dQFI/dβ'
-    prefix = 'qfi' if data_type == 'qfi' else 'qfi_derivative'
-    
-    # Plot negative Jpm segment
-    if idx_neg is not None:
-        plot_fixed_beta_segment(
-            jpm_neg, Z_neg[idx_neg, :], target_beta[idx_neg],
-            color, 'neg', plot_outdir, species, prefix
-        )
-    
-    # Plot positive Jpm segment
-    if idx_pos is not None:
-        plot_fixed_beta_segment(
-            jpm_pos, Z_pos[idx_pos, :], target_beta[idx_pos],
-            color, 'pos', plot_outdir, species, prefix
-        )
-    
-    plt.xlabel('Jpm')
-    plt.ylabel(value_label)
-    plt.title(f'{value_label} vs Jpm at largest β rows (no NaN) for {species}')
-    plt.grid(True, alpha=0.3)
-    plt.legend(fontsize=9)
-    
-    fname = os.path.join(plot_outdir, f'{prefix}_vs_jpm_fixed_beta_{species}.png')
-    plt.savefig(fname, dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def find_largest_valid_beta_index(Z, mask):
-    """Find the largest beta index with no NaN values."""
-    if Z is None or Z.size == 0 or mask is None or not np.any(mask):
-        return None
-    
-    valid_idxs = np.where(mask)[0]
-    return valid_idxs[-1] if valid_idxs.size > 0 else None
-
-
-def plot_fixed_beta_segment(jpm, values, beta, color, segment, plot_outdir, species, prefix):
-    """Plot a segment of fixed beta data."""
-    plt.plot(jpm, values, '-', lw=1.8, color=color, label=f'β={beta:.3g} ({segment})')
-    
-    # Save data
-    filename = os.path.join(plot_outdir, f'{prefix}_vs_jpm_fixed_beta_{segment}_{species}.dat')
-    header = 'Jpm beta ' + ('QFI' if 'qfi' in prefix and 'derivative' not in prefix else 'dQFI_dbeta')
-    np.savetxt(filename, np.column_stack((jpm, np.full_like(jpm, beta), values)), header=header)
-
-
-if __name__ == "__main__":
-    # Path to the directory containing the data files
-    data_dir = sys.argv[1] if len(sys.argv) > 1 else 'data'
-    across_QFI = sys.argv[2] if len(sys.argv) > 2 else 'False'
-    across_QFI = across_QFI.lower() == 'true'
-    if across_QFI:
-        parse_QFI_across_Jpm(data_dir)
-        parse_QFI_across_hi(data_dir)
-        plot_heatmaps_from_processed_data(data_dir)
-    else:
-        parse_QFI_data_new(data_dir)
-    print("All processing complete.")
+    MPI_Finalize();
+    return 0;
+}

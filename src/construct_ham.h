@@ -2416,91 +2416,97 @@ public:
 
 
 /**
- * LinearCombinationOperator class represents a weighted sum of single-site operators
- * O = Σᵢ cᵢ Sᵢ^α, where cᵢ are arbitrary complex coefficients
- * Used for constructing eigen-mode operators for efficient structure factor computation
+ * SumOperator class represents a sum of single-site operators with position-dependent phases
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
  */
-class LinearCombinationOperator : public Operator {
+class TransverseOperator : public Operator {
 public:
     /**
-     * Constructor for linear combination operator
-     * @param site_coeffs Complex coefficients for each site (size must equal num_site)
-     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * Constructor for sum operator with momentum-dependent phases
      * @param num_site Total number of sites/qubits
      * @param spin_l Spin quantum number
+     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * @param Q_vector Momentum vector [Qx, Qy, Qz]
+     * @param positions_file Path to file containing site positions
      */
-    LinearCombinationOperator(const std::vector<Complex>& site_coeffs,
-                              int op, int num_site, float spin_l)
-        : Operator(num_site, spin_l)
-    {
-        if (site_coeffs.size() != size_t(num_site)) {
-            throw std::runtime_error("Coefficient size mismatch: expected " + 
-                                   std::to_string(num_site) + ", got " + 
-                                   std::to_string(site_coeffs.size()));
-        }
+    TransverseOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::vector<double>& v, const std::string& positions_file) 
+        : Operator(num_site, spin_l) {
         
         if (op < 0 || op > 2) {
             throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
         }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        // Read positions from file
+        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        // Calculate phase factors for each site
+        std::vector<Complex> phase_factors(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
 
-        // Add transforms for each site with non-zero coefficient
+        for (int i = 0; i < num_site; ++i) {
+            if (positions[i].size() < 3) {
+                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
+            }
+            int sublattice = i % 4;
+            double factor = z_mu[sublattice][0]*v[0] + z_mu[sublattice][1]*v[1] + z_mu[sublattice][2]*v[2];
+            double phase = Q_vector[0] * positions[i][0] + 
+                          Q_vector[1] * positions[i][1] + 
+                          Q_vector[2] * positions[i][2];
+            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site)*factor, std::sin(phase)/std::sqrt(num_site)*factor);
+        }
+
+        // Add transforms for each site with appropriate phase factor
         for (int site = 0; site < num_site; ++site) {
-            Complex c = site_coeffs[site];
-            if (std::abs(c) < 1e-15) continue; // skip effectively zero coefficients
+            Complex phase_factor = phase_factors[site];
             
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 if (op == 2) {
                     // Sz operator
                     int bit = (basis >> site) & 1;
-                    return {basis, c * double(spin_l) * pow(-1, bit)};
+                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
                 } else {
                     // S+ or S- operator
                     if (((basis >> site) & 1) != op) {
                         int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, c * double(spin_l * 2)};
+                        return {flipped_basis, phase_factor * double(spin_l * 2)};
                     }
                 }
                 return {basis, Complex(0.0, 0.0)};
             });
         }
     }
-};
 
-
-/**
- * Utility class for caching site positions and phase factors
- * Avoids repeated file I/O and trigonometric calculations
- */
-class PositionCache {
-private:
-    static std::map<std::pair<std::string, int>, std::vector<std::vector<double>>> position_cache;
-    static std::map<std::tuple<double, double, double, int, std::string>, std::vector<Complex>> phase_cache;
-    
-public:
     /**
-     * Get cached positions or load from file
+     * Read site positions from file
+     * Expected format: Each line contains x y z coordinates for one site
+     * @param filename Path to positions file
+     * @param expected_sites Expected number of sites
+     * @return Vector of position vectors
      */
-    static const std::vector<std::vector<double>>& getPositions(const std::string& filename, int num_sites) {
-        auto key = std::make_pair(filename, num_sites);
-        auto it = position_cache.find(key);
-        
-        if (it != position_cache.end()) {
-            return it->second;
-        }
-        
-        // Load positions from file (reuse SumOperator's logic)
-        std::vector<std::vector<double>> positions(num_sites);
+    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, int expected_sites) {
         std::ifstream file(filename);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open positions file: " + filename);
         }
         
+        std::vector<std::vector<double>> positions(expected_sites);
         std::string line;
-        // Skip header lines
+        
+        // Skip the header lines (comments starting with #)
         while (std::getline(file, line) && line[0] == '#') {
             // Skip header lines
         }
         
+        // Process the first non-header line (if we stopped at one)
         bool process_current_line = !line.empty() && line[0] != '#';
         
         do {
@@ -2510,7 +2516,7 @@ public:
                 double x, y, z;
                 
                 if (iss >> site_id >> matrix_index >> sublattice_index >> x >> y >> z) {
-                    if (site_id >= 0 && site_id < num_sites) {
+                    if (site_id >= 0 && site_id < expected_sites) {
                         positions[site_id] = {x, y, z};
                     }
                 }
@@ -2519,371 +2525,16 @@ public:
         } while (std::getline(file, line));
         
         // Verify all positions were loaded
-        for (int i = 0; i < num_sites; ++i) {
+        for (int i = 0; i < expected_sites; ++i) {
             if (positions[i].empty()) {
                 throw std::runtime_error("Missing position data for site " + std::to_string(i));
             }
         }
         
-        // Cache and return
-        position_cache[key] = positions;
-        return position_cache[key];
+        return positions;
     }
-    
-    /**
-     * Get cached phase factors or compute them
-     */
-    static const std::vector<Complex>& getPhaseFactors(const std::vector<double>& Q_vector, 
-                                                       int num_sites, 
-                                                       const std::string& positions_file) {
-        auto key = std::make_tuple(Q_vector[0], Q_vector[1], Q_vector[2], num_sites, positions_file);
-        auto it = phase_cache.find(key);
-        
-        if (it != phase_cache.end()) {
-            return it->second;
-        }
-        
-        // Compute phase factors
-        const auto& positions = getPositions(positions_file, num_sites);
-        std::vector<Complex> phase_factors(num_sites);
-        
-        for (int i = 0; i < num_sites; ++i) {
-            double phase = Q_vector[0] * positions[i][0] + 
-                          Q_vector[1] * positions[i][1] + 
-                          Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_sites), 
-                                     std::sin(phase)/std::sqrt(num_sites));
-        }
-        
-        // Cache and return
-        phase_cache[key] = phase_factors;
-        return phase_cache[key];
-    }
-    
-    /**
-     * Clear caches (useful for memory management)
-     */
-    static void clearCaches() {
-        position_cache.clear();
-        phase_cache.clear();
-    }
+
 };
 
-// Static member definitions
-std::map<std::pair<std::string, int>, std::vector<std::vector<double>>> PositionCache::position_cache;
-std::map<std::tuple<double, double, double, int, std::string>, std::vector<Complex>> PositionCache::phase_cache;
-
-
-/**
- * Structure factor mode decomposition utilities
- * Implements transverse projection and eigen-decomposition for efficient computation
- */
-namespace StructureFactorModes {
-    
-    /**
-     * Compute transverse form factor matrix F_{μν} = z_μ^⊥ · z_ν^⊥
-     * where z_μ^⊥ = z_μ - (z_μ·Q̂)Q̂ is the transverse component
-     */
-    std::vector<std::vector<double>> computeTransverseFormFactor(
-        const std::vector<double>& Q_vector,
-        const std::vector<std::vector<double>>& local_axes
-    ) {
-        int num_sublattices = local_axes.size();
-        
-        // Handle Q = 0 case (no transverse projection)
-        bool is_Q_zero = (std::abs(Q_vector[0]) < 1e-12 && 
-                         std::abs(Q_vector[1]) < 1e-12 && 
-                         std::abs(Q_vector[2]) < 1e-12);
-        
-        std::vector<std::vector<double>> F(num_sublattices, std::vector<double>(num_sublattices, 0.0));
-        
-        if (is_Q_zero) {
-            // F_{μν} = z_μ · z_ν (no transverse projection)
-            for (int mu = 0; mu < num_sublattices; mu++) {
-                for (int nu = 0; nu < num_sublattices; nu++) {
-                    double dot_product = 0.0;
-                    for (int d = 0; d < 3; d++) {
-                        dot_product += local_axes[mu][d] * local_axes[nu][d];
-                    }
-                    F[mu][nu] = dot_product;
-                }
-            }
-        } else {
-            // Compute Q unit vector
-            double Q_mag = std::sqrt(Q_vector[0]*Q_vector[0] + 
-                                   Q_vector[1]*Q_vector[1] + 
-                                   Q_vector[2]*Q_vector[2]);
-            std::vector<double> Q_hat = {Q_vector[0]/Q_mag, Q_vector[1]/Q_mag, Q_vector[2]/Q_mag};
-            
-            // Compute transverse components z_μ^⊥ = z_μ - (z_μ·Q̂)Q̂
-            std::vector<std::vector<double>> z_perp(num_sublattices, std::vector<double>(3));
-            for (int mu = 0; mu < num_sublattices; mu++) {
-                double z_dot_Q = 0.0;
-                for (int d = 0; d < 3; d++) {
-                    z_dot_Q += local_axes[mu][d] * Q_hat[d];
-                }
-                for (int d = 0; d < 3; d++) {
-                    z_perp[mu][d] = local_axes[mu][d] - z_dot_Q * Q_hat[d];
-                }
-            }
-            
-            // Compute form factor matrix F_{μν} = z_μ^⊥ · z_ν^⊥
-            for (int mu = 0; mu < num_sublattices; mu++) {
-                for (int nu = 0; nu < num_sublattices; nu++) {
-                    double dot_product = 0.0;
-                    for (int d = 0; d < 3; d++) {
-                        dot_product += z_perp[mu][d] * z_perp[nu][d];
-                    }
-                    F[mu][nu] = dot_product;
-                }
-            }
-        }
-        
-        return F;
-    }
-    
-    /**
-     * Simple 4x4 symmetric matrix eigendecomposition using Jacobi method
-     * Returns eigenvalues and eigenvectors (columns of U)
-     */
-    std::pair<std::vector<double>, std::vector<std::vector<double>>> eigenDecompose4x4(
-        const std::vector<std::vector<double>>& matrix
-    ) {
-        int n = matrix.size();
-        if (n != 4) {
-            throw std::runtime_error("eigenDecompose4x4 only supports 4x4 matrices");
-        }
-        
-        // Copy matrix (will be modified)
-        std::vector<std::vector<double>> A = matrix;
-        
-        // Initialize eigenvector matrix as identity
-        std::vector<std::vector<double>> U(n, std::vector<double>(n, 0.0));
-        for (int i = 0; i < n; i++) {
-            U[i][i] = 1.0;
-        }
-        
-        const double tolerance = 1e-12;
-        const int max_iterations = 100;
-        
-        for (int iter = 0; iter < max_iterations; iter++) {
-            // Find largest off-diagonal element
-            double max_off_diag = 0.0;
-            int p = 0, q = 1;
-            for (int i = 0; i < n; i++) {
-                for (int j = i + 1; j < n; j++) {
-                    if (std::abs(A[i][j]) > max_off_diag) {
-                        max_off_diag = std::abs(A[i][j]);
-                        p = i;
-                        q = j;
-                    }
-                }
-            }
-            
-            if (max_off_diag < tolerance) {
-                break; // Converged
-            }
-            
-            // Compute rotation angle
-            double theta;
-            if (std::abs(A[p][p] - A[q][q]) < tolerance) {
-                theta = M_PI / 4.0;
-            } else {
-                theta = 0.5 * std::atan(2.0 * A[p][q] / (A[p][p] - A[q][q]));
-            }
-            
-            double c = std::cos(theta);
-            double s = std::sin(theta);
-            
-            // Apply Givens rotation to A
-            std::vector<std::vector<double>> A_new = A;
-            A_new[p][p] = c*c*A[p][p] + s*s*A[q][q] - 2*c*s*A[p][q];
-            A_new[q][q] = s*s*A[p][p] + c*c*A[q][q] + 2*c*s*A[p][q];
-            A_new[p][q] = A_new[q][p] = 0.0;
-            
-            for (int i = 0; i < n; i++) {
-                if (i != p && i != q) {
-                    A_new[i][p] = A_new[p][i] = c*A[i][p] - s*A[i][q];
-                    A_new[i][q] = A_new[q][i] = s*A[i][p] + c*A[i][q];
-                }
-            }
-            
-            // Apply rotation to eigenvectors
-            for (int i = 0; i < n; i++) {
-                double Up = U[i][p];
-                double Uq = U[i][q];
-                U[i][p] = c*Up - s*Uq;
-                U[i][q] = s*Up + c*Uq;
-            }
-            
-            A = A_new;
-        }
-        
-        // Extract eigenvalues (diagonal elements)
-        std::vector<double> eigenvalues(n);
-        for (int i = 0; i < n; i++) {
-            eigenvalues[i] = A[i][i];
-        }
-        
-        return {eigenvalues, U};
-    }
-    
-    /**
-     * Create mode operators for efficient structure factor computation
-     * Returns pairs of (eigenvalue, {operator1, operator2}) for non-zero modes
-     */
-    std::vector<std::pair<double, std::pair<Operator, Operator>>> createModeOperators(
-        const std::vector<double>& Q_vector,
-        const std::vector<std::vector<double>>& local_axes,
-        const std::string& positions_file,
-        int num_sites,
-        float spin_length,
-        int op_type_1,
-        int op_type_2,
-        double eigenvalue_threshold = 1e-12
-    ) {
-        // Compute form factor matrix and its eigendecomposition
-        auto F = computeTransverseFormFactor(Q_vector, local_axes);
-        auto [eigenvalues, eigenvectors] = eigenDecompose4x4(F);
-        
-        // Get cached phase factors
-        const auto& phase_factors = PositionCache::getPhaseFactors(Q_vector, num_sites, positions_file);
-        
-        std::vector<std::pair<double, std::pair<Operator, Operator>>> mode_operators;
-        
-        // Create operators for each significant eigenmode
-        for (int k = 0; k < 4; k++) {
-            if (std::abs(eigenvalues[k]) < eigenvalue_threshold) {
-                continue; // Skip near-zero eigenvalues
-            }
-            
-            // Compute site coefficients for this mode
-            std::vector<Complex> site_coeffs_1(num_sites, Complex(0.0, 0.0));
-            std::vector<Complex> site_coeffs_2(num_sites, Complex(0.0, 0.0));
-            
-            for (int site = 0; site < num_sites; ++site) {
-                int sublattice = site % 4; // Assume 4-sublattice structure
-                Complex mode_coeff = Complex(eigenvectors[sublattice][k], 0.0);
-                site_coeffs_1[site] = phase_factors[site] * mode_coeff;
-                site_coeffs_2[site] = phase_factors[site] * mode_coeff;
-            }
-            
-            // Create the pair of operators for this mode
-            LinearCombinationOperator op1(site_coeffs_1, op_type_1, num_sites, spin_length);
-            LinearCombinationOperator op2(site_coeffs_2, op_type_2, num_sites, spin_length);
-            
-            mode_operators.emplace_back(eigenvalues[k], std::make_pair(std::move(op1), std::move(op2)));
-        }
-        
-        return mode_operators;
-    }
-    
-    /**
-     * Post-processing utility to combine mode correlations into global structure factor
-     * Reads mode correlation files and eigenvalue files, then computes the final contracted result
-     */
-    void combineModesToGlobalStructureFactor(
-        const std::string& modes_dir,
-        const std::string& spin_combo_name,
-        const std::vector<double>& Q_vector,
-        double beta,
-        int sample_index,
-        const std::string& output_file
-    ) {
-        // Read eigenvalue file
-        std::string eigenval_file = modes_dir + "/eigenvalues_" + spin_combo_name + 
-                                   "_q_Qx" + std::to_string(Q_vector[0]) + 
-                                   "_Qy" + std::to_string(Q_vector[1]) + 
-                                   "_Qz" + std::to_string(Q_vector[2]) + 
-                                   "_beta=" + std::to_string(beta) + ".dat";
-        
-        std::vector<double> eigenvalues;
-        std::ifstream eigenval_in(eigenval_file);
-        if (!eigenval_in.is_open()) {
-            throw std::runtime_error("Could not open eigenvalue file: " + eigenval_file);
-        }
-        
-        std::string line;
-        while (std::getline(eigenval_in, line)) {
-            if (line[0] == '#') continue;
-            std::istringstream iss(line);
-            int mode_k;
-            double eigenvalue;
-            if (iss >> mode_k >> eigenvalue) {
-                eigenvalues.push_back(eigenvalue);
-            }
-        }
-        eigenval_in.close();
-        
-        if (eigenvalues.empty()) {
-            throw std::runtime_error("No eigenvalues found in file: " + eigenval_file);
-        }
-        
-        std::cout << "Found " << eigenvalues.size() << " eigenmodes for combination." << std::endl;
-        
-        // Read time correlation files for each mode and combine
-        std::vector<std::pair<double, Complex>> combined_correlation;
-        
-        for (size_t k = 0; k < eigenvalues.size(); k++) {
-            std::string mode_name = spin_combo_name + "_mode" + std::to_string(k) + 
-                                   "_q_Qx" + std::to_string(Q_vector[0]) + 
-                                   "_Qy" + std::to_string(Q_vector[1]) + 
-                                   "_Qz" + std::to_string(Q_vector[2]);
-            
-            std::string time_corr_file = modes_dir + "/time_corr_rand" + std::to_string(sample_index) + 
-                                        "_" + mode_name + "_beta=" + std::to_string(beta) + ".dat";
-            
-            std::ifstream mode_in(time_corr_file);
-            if (!mode_in.is_open()) {
-                std::cerr << "Warning: Could not open mode file: " << time_corr_file << std::endl;
-                continue;
-            }
-            
-            std::vector<std::pair<double, Complex>> mode_correlation;
-            while (std::getline(mode_in, line)) {
-                if (line[0] == '#') continue;
-                std::istringstream iss(line);
-                double t, real_part, imag_part;
-                if (iss >> t >> real_part >> imag_part) {
-                    mode_correlation.emplace_back(t, Complex(real_part, imag_part));
-                }
-            }
-            mode_in.close();
-            
-            // Add weighted contribution from this mode
-            if (k == 0) {
-                // Initialize combined correlation
-                combined_correlation.reserve(mode_correlation.size());
-                for (const auto& [t, corr] : mode_correlation) {
-                    combined_correlation.emplace_back(t, eigenvalues[k] * corr);
-                }
-            } else {
-                // Add to existing correlation
-                if (mode_correlation.size() != combined_correlation.size()) {
-                    std::cerr << "Warning: Mode " << k << " has different time grid size. Skipping." << std::endl;
-                    continue;
-                }
-                for (size_t i = 0; i < mode_correlation.size(); i++) {
-                    combined_correlation[i].second += eigenvalues[k] * mode_correlation[i].second;
-                }
-            }
-        }
-        
-        // Write combined result
-        std::ofstream output(output_file);
-        if (!output.is_open()) {
-            throw std::runtime_error("Could not open output file: " + output_file);
-        }
-        
-        output << "# t global_structure_factor_real global_structure_factor_imag" << std::endl;
-        output << std::setprecision(16);
-        for (const auto& [t, corr] : combined_correlation) {
-            output << t << " " << corr.real() << " " << corr.imag() << std::endl;
-        }
-        output.close();
-        
-        std::cout << "Combined global structure factor written to: " << output_file << std::endl;
-    }
-}
 
 #endif // CONSTRUCT_HAM_H
