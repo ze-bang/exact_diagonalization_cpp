@@ -14,6 +14,302 @@ from mpi4py import MPI
 from collections import defaultdict
 from scipy.interpolate import interp1d
 
+# ============================================================================
+# Channel Combination Functions (integrated from combine_channels.py)
+# ============================================================================
+
+def parse_channel_filename(filename):
+    """
+    Extract information from time correlation filenames for channel combination.
+    
+    Expected format: time_corr_rand<N>_<SpinCombo>_q_Qx<x>_Qy<y>_Qz<z>[_SF|_NSF]_beta=<beta>.dat
+    
+    Returns:
+        dict with keys: sample_idx, spin_combo, Qx, Qy, Qz, channel (SF/NSF/None), beta
+    """
+    basename = os.path.basename(filename)
+    
+    # Pattern to match the filename structure
+    pattern = r'time_corr_(?:rand|sample)(\d+)_(\w+)_q_Qx([-\d.]+)_Qy([-\d.]+)_Qz([-\d.]+)(?:_(SF|NSF))?_beta=([\d.]+|inf)\.dat'
+    
+    match = re.match(pattern, basename)
+    if not match:
+        return None
+    
+    sample_idx = int(match.group(1))
+    spin_combo = match.group(2)
+    Qx = float(match.group(3))
+    Qy = float(match.group(4))
+    Qz = float(match.group(5))
+    channel = match.group(6)  # SF, NSF, or None
+    beta_str = match.group(7)
+    beta = float('inf') if beta_str == 'inf' else float(beta_str)
+    
+    return {
+        'sample_idx': sample_idx,
+        'spin_combo': spin_combo,
+        'Qx': Qx,
+        'Qy': Qy,
+        'Qz': Qz,
+        'channel': channel,
+        'beta': beta,
+        'basename': basename
+    }
+
+
+def load_channel_correlation_data(filepath):
+    """Load time correlation data from file for channel combination."""
+    try:
+        data = np.loadtxt(filepath, comments='#')
+        if data.ndim == 1:
+            data = data.reshape(-1, 1)
+        
+        time = data[:, 0]
+        
+        if data.shape[1] >= 3:
+            real_part = data[:, 1]
+            imag_part = data[:, 2]
+        elif data.shape[1] == 2:
+            real_part = data[:, 1]
+            imag_part = np.zeros_like(real_part)
+        else:
+            return None, None
+        
+        corr = real_part + 1j * imag_part
+        return time, corr
+    except Exception as e:
+        print(f"Error loading {filepath}: {e}")
+        return None, None
+
+
+def save_channel_correlation_data(filepath, time, corr):
+    """Save time correlation data to file after channel combination."""
+    real_part = np.real(corr)
+    imag_part = np.imag(corr)
+    
+    data = np.column_stack((time, real_part, imag_part))
+    header = "t correlation_real correlation_imag"
+    
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    np.savetxt(filepath, data, header=header, fmt='%.8e')
+
+
+def combine_taylor_channels(beta_dir, beta_value):
+    """
+    Combine taylor mode channels: (SpSm + SmSp)/2
+    """
+    taylor_dir = os.path.join(beta_dir, 'taylor')
+    if not os.path.isdir(taylor_dir):
+        return
+    
+    print(f"  Combining taylor mode channels for beta={beta_value}")
+    
+    # Find all correlation files
+    files = glob.glob(os.path.join(taylor_dir, 'time_corr_*.dat'))
+    
+    # Organize files by momentum and sample
+    file_info = defaultdict(lambda: defaultdict(dict))
+    
+    for filepath in files:
+        info = parse_channel_filename(filepath)
+        if info is None or info['channel'] is not None:
+            continue  # Skip if parsing failed or if it has SF/NSF suffix
+        
+        Q_key = (info['Qx'], info['Qy'], info['Qz'])
+        sample = info['sample_idx']
+        spin_combo = info['spin_combo']
+        
+        file_info[Q_key][sample][spin_combo] = filepath
+    
+    # Process each momentum point
+    output_dir = os.path.join(beta_dir, 'taylor_combined')
+    
+    combined_count = 0
+    for Q_key, sample_data in file_info.items():
+        Qx, Qy, Qz = Q_key
+        
+        for sample, spin_files in sample_data.items():
+            # Check if we have both SpSm and SmSp
+            if 'SpSm' not in spin_files or 'SmSp' not in spin_files:
+                continue
+            
+            # Load data
+            time_spsm, corr_spsm = load_channel_correlation_data(spin_files['SpSm'])
+            time_smsp, corr_smsp = load_channel_correlation_data(spin_files['SmSp'])
+            
+            if time_spsm is None or time_smsp is None:
+                continue
+            
+            # Check if time arrays match
+            if not np.allclose(time_spsm, time_smsp):
+                print(f"    Warning: Time arrays don't match for sample {sample}, Q={Q_key}")
+                continue
+            
+            # Compute average
+            corr_avg = (corr_spsm + corr_smsp) / 2.0
+            
+            # Save result
+            output_filename = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_beta={beta_value}.dat'
+            output_path = os.path.join(output_dir, output_filename)
+            
+            save_channel_correlation_data(output_path, time_spsm, corr_avg)
+            combined_count += 1
+    
+    if combined_count > 0:
+        print(f"    Combined {combined_count} taylor channel files")
+
+
+def combine_global_channels(beta_dir, beta_value):
+    """
+    Combine global mode channels:
+    1. (SpSm_SF + SmSp_SF)/2
+    2. (SpSm_NSF + SmSp_NSF)/2
+    3. (SpSm_SF + SmSp_SF)/2 + (SpSm_NSF + SmSp_NSF)/2
+    """
+    global_dir = os.path.join(beta_dir, 'global')
+    if not os.path.isdir(global_dir):
+        return
+    
+    print(f"  Combining global mode channels for beta={beta_value}")
+    
+    # Find all correlation files
+    files = glob.glob(os.path.join(global_dir, 'time_corr_*.dat'))
+    
+    # Organize files by momentum, channel, and sample
+    file_info = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+    
+    for filepath in files:
+        info = parse_channel_filename(filepath)
+        if info is None or info['channel'] is None:
+            continue  # Skip if parsing failed or if it doesn't have SF/NSF
+        
+        Q_key = (info['Qx'], info['Qy'], info['Qz'])
+        channel = info['channel']
+        sample = info['sample_idx']
+        spin_combo = info['spin_combo']
+        
+        file_info[Q_key][channel][sample][spin_combo] = filepath
+    
+    # Process each momentum point
+    output_dir = os.path.join(beta_dir, 'global_combined')
+    
+    combined_count = 0
+    for Q_key, channel_data in file_info.items():
+        Qx, Qy, Qz = Q_key
+        
+        # Check if we have both SF and NSF channels
+        if 'SF' not in channel_data or 'NSF' not in channel_data:
+            continue
+        
+        # Process each sample
+        sf_samples = set(channel_data['SF'].keys())
+        nsf_samples = set(channel_data['NSF'].keys())
+        common_samples = sf_samples & nsf_samples
+        
+        for sample in common_samples:
+            sf_files = channel_data['SF'][sample]
+            nsf_files = channel_data['NSF'][sample]
+            
+            # Check if we have SpSm and SmSp for both channels
+            if 'SpSm' not in sf_files or 'SmSp' not in sf_files:
+                continue
+            
+            if 'SpSm' not in nsf_files or 'SmSp' not in nsf_files:
+                continue
+            
+            # Load SF channel data
+            time_sf_spsm, corr_sf_spsm = load_channel_correlation_data(sf_files['SpSm'])
+            time_sf_smsp, corr_sf_smsp = load_channel_correlation_data(sf_files['SmSp'])
+            
+            # Load NSF channel data
+            time_nsf_spsm, corr_nsf_spsm = load_channel_correlation_data(nsf_files['SpSm'])
+            time_nsf_smsp, corr_nsf_smsp = load_channel_correlation_data(nsf_files['SmSp'])
+            
+            if any(x is None for x in [time_sf_spsm, time_sf_smsp, time_nsf_spsm, time_nsf_smsp]):
+                continue
+            
+            # Check time arrays match
+            if not (np.allclose(time_sf_spsm, time_sf_smsp) and 
+                    np.allclose(time_sf_spsm, time_nsf_spsm) and
+                    np.allclose(time_sf_spsm, time_nsf_smsp)):
+                print(f"    Warning: Time arrays don't match for sample {sample}, Q={Q_key}")
+                continue
+            
+            time = time_sf_spsm
+            
+            # Compute averages for each channel
+            corr_sf_avg = (corr_sf_spsm + corr_sf_smsp) / 2.0
+            corr_nsf_avg = (corr_nsf_spsm + corr_nsf_smsp) / 2.0
+            
+            # Save SF channel average
+            output_sf = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_SF_beta={beta_value}.dat'
+            save_channel_correlation_data(os.path.join(output_dir, output_sf), time, corr_sf_avg)
+            
+            # Save NSF channel average
+            output_nsf = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_NSF_beta={beta_value}.dat'
+            save_channel_correlation_data(os.path.join(output_dir, output_nsf), time, corr_nsf_avg)
+            
+            # Compute total (SF + NSF)
+            corr_total = corr_sf_avg + corr_nsf_avg
+            
+            # Save total
+            output_total = f'time_corr_rand{sample}_SpSm+SmSp_q_Qx{Qx}_Qy{Qy}_Qz{Qz}_SF+NSF_beta={beta_value}.dat'
+            save_channel_correlation_data(os.path.join(output_dir, output_total), time, corr_total)
+            
+            combined_count += 1
+    
+    if combined_count > 0:
+        print(f"    Combined {combined_count} global channel files")
+
+
+def combine_channels_for_structure_factor(structure_factor_dir):
+    """
+    Combine channels for all beta directories in structure_factor_results.
+    This creates taylor_combined/ and global_combined/ directories.
+    """
+    # Find all beta directories
+    beta_dirs = glob.glob(os.path.join(structure_factor_dir, 'beta_*'))
+    
+    if not beta_dirs:
+        return
+    
+    print(f"\n{'='*60}")
+    print(f"Combining channels in: {structure_factor_dir}")
+    print(f"{'='*60}")
+    
+    for beta_dir in sorted(beta_dirs):
+        # Extract beta value
+        beta_match = re.search(r'beta_([\d\.]+|inf)', os.path.basename(beta_dir))
+        if not beta_match:
+            continue
+        
+        beta_str = beta_match.group(1)
+        
+        # Check if combined directories already exist and have files
+        taylor_combined = os.path.join(beta_dir, 'taylor_combined')
+        global_combined = os.path.join(beta_dir, 'global_combined')
+        
+        taylor_exists = os.path.isdir(taylor_combined) and len(glob.glob(os.path.join(taylor_combined, '*.dat'))) > 0
+        global_exists = os.path.isdir(global_combined) and len(glob.glob(os.path.join(global_combined, '*.dat'))) > 0
+        
+        if taylor_exists and global_exists:
+            print(f"  Skipping beta={beta_str} (combined channels already exist)")
+            continue
+        
+        # Combine taylor mode
+        if not taylor_exists:
+            combine_taylor_channels(beta_dir, beta_str)
+        
+        # Combine global mode
+        if not global_exists:
+            combine_global_channels(beta_dir, beta_str)
+    
+    print(f"{'='*60}\n")
+
+# ============================================================================
+# End of Channel Combination Functions
+# ============================================================================
+
 # Function to apply broadening in time domain
 def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
     """
@@ -113,14 +409,19 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height
     
     return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
 
-def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, mode='taylor'):
+def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, mode='taylor', auto_combine=True):
     """Parse QFI data from the new directory structure and compute spectral functions.
     
     Args:
         structure_factor_dir: Path to structure_factor_results directory
         beta_tol: Tolerance for beta binning
         mode: 'taylor', 'global', 'taylor_combined', or 'global_combined'
+        auto_combine: Whether to automatically combine channels (set False when called from parameter sweeps)
     """
+    
+    # Automatically combine channels if processing combined modes
+    if auto_combine and mode in ['taylor_combined', 'global_combined']:
+        combine_channels_for_structure_factor(structure_factor_dir)
     
     # Initialize data structures
     species_data = defaultdict(lambda: defaultdict(list))
@@ -589,17 +890,27 @@ def parse_QFI_across_Jpm(data_dir, mode='all'):
     # Broadcast subdirs to all processes
     subdirs = comm.bcast(subdirs, root=0)
     
-    # Distribute subdirectories among processes
-    local_subdirs = []
-    for i, subdir in enumerate(subdirs):
-        if i % size == rank:
-            local_subdirs.append(subdir)
-    
     # Determine which modes to process
     if mode == 'all':
         modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
     else:
         modes_to_process = [mode]
+    
+    # Combine channels first (only rank 0 does this to avoid conflicts)
+    if rank == 0:
+        for subdir in subdirs:
+            structure_factor_dir = os.path.join(subdir, 'structure_factor_results')
+            if os.path.exists(structure_factor_dir):
+                combine_channels_for_structure_factor(structure_factor_dir)
+    
+    # Wait for rank 0 to finish combining channels
+    comm.Barrier()
+    
+    # Distribute subdirectories among processes
+    local_subdirs = []
+    for i, subdir in enumerate(subdirs):
+        if i % size == rank:
+            local_subdirs.append(subdir)
     
     # Each process handles its assigned subdirectories
     local_jpm_qfi_data = {m: {} for m in modes_to_process}
@@ -624,7 +935,8 @@ def parse_QFI_across_Jpm(data_dir, mode='all'):
         for m in modes_to_process:
             print(f"[Rank {rank}]   Mode: {m}")
             try:
-                species_qfi_data = parse_QFI_data_new(structure_factor_dir, mode=m)
+                # auto_combine=False because we already combined channels at the beginning
+                species_qfi_data = parse_QFI_data_new(structure_factor_dir, mode=m, auto_combine=False)
                 local_jpm_qfi_data[m][jpm_value] = species_qfi_data
             except Exception as e:
                 print(f"[Rank {rank}] Error processing mode {m}: {e}")
@@ -710,6 +1022,16 @@ def parse_QFI_across_hi(data_dir, mode='all'):
         modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
     else:
         modes_to_process = [mode]
+    
+    # Combine channels first (only rank 0 does this to avoid conflicts)
+    if rank == 0:
+        for d in sweep_dirs:
+            sf_path = os.path.join(d, 'structure_factor_results')
+            if os.path.isdir(sf_path):
+                combine_channels_for_structure_factor(sf_path)
+    
+    # Wait for rank 0 to finish combining channels
+    comm.Barrier()
 
     # Local compute
     local_results = {m: {} for m in modes_to_process}
@@ -729,7 +1051,8 @@ def parse_QFI_across_hi(data_dir, mode='all'):
         for mode_name in modes_to_process:
             print(f"[Rank {rank}]   Mode: {mode_name}")
             try:
-                local_results[mode_name][hi_val] = parse_QFI_data_new(sf_path, mode=mode_name)
+                # auto_combine=False because we already combined channels at the beginning
+                local_results[mode_name][hi_val] = parse_QFI_data_new(sf_path, mode=mode_name, auto_combine=False)
             except Exception as e:
                 print(f"[Rank {rank}] Error processing mode {mode_name}: {e}")
 
