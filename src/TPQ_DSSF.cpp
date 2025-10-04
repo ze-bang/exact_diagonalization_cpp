@@ -272,7 +272,7 @@ int main(int argc, char* argv[]) {
     const std::vector<std::vector<double>> momentum_points = {
         {0.0, 0.0, 0.0},
         {0, 0, 2*M_PI},
-        {0, 0, 4*M_PI}
+        {4*M_PI, 4*M_PI, 0}
     };
     
     // Create output directory (only rank 0)
@@ -484,55 +484,21 @@ int main(int argc, char* argv[]) {
             std::vector<Operator> observables_2;
             std::vector<std::string> observable_names;
             
-            // Construct two transverse basis vectors (e1, e2) perpendicular to each momentum point
-            // For k = 0, choose arbitrary orthonormal pair (ex, ey)
+            // Hard-code transverse basis vectors for the fixed momentum points
             std::vector<std::array<double,3>> transverse_basis_1(momentum_points.size());
             std::vector<std::array<double,3>> transverse_basis_2(momentum_points.size());
 
-            auto normalize = [](double v[3]) {
-                double n = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-                if (n > 1e-12) { v[0] /= n; v[1] /= n; v[2] /= n; }
-            };
+            // For Gamma point (0,0,0): use [1,1,0]/sqrt(2) and [1,-1,0]/sqrt(2)
+            transverse_basis_1[0] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
+            transverse_basis_2[0] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
 
-            for (size_t qi = 0; qi < momentum_points.size(); ++qi) {
-                double k[3] = { momentum_points[qi][0], momentum_points[qi][1], momentum_points[qi][2] };
-                double k_norm = std::sqrt(k[0]*k[0] + k[1]*k[1] + k[2]*k[2]);
-                double e1[3], e2[3];
+            // For X point (0,0,2π): use [1,1,0]/sqrt(2) and [1,-1,0]/sqrt(2)
+            transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
+            transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
 
-                if (k_norm < 1e-12) {
-                    // For k=0, choose standard basis vectors
-                    e1[0]=1.0; e1[1]=0.0; e1[2]=0.0;
-                    e2[0]=0.0; e2[1]=1.0; e2[2]=0.0;
-                } else {
-                    // Normalize k first
-                    double k_hat[3] = {k[0]/k_norm, k[1]/k_norm, k[2]/k_norm};
-                    
-                    // Choose a reference vector not parallel to k_hat
-                    double ref[3];
-                    if (std::fabs(k_hat[2]) < 0.9) {
-                        // k is not too close to z-axis, use z as reference
-                        ref[0] = 0.0; ref[1] = 0.0; ref[2] = 1.0;
-                    } else {
-                        // k is close to z-axis, use x as reference
-                        ref[0] = 1.0; ref[1] = 0.0; ref[2] = 0.0;
-                    }
-                    
-                    // e1 = k_hat x ref (normalized)
-                    e1[0] = k_hat[1]*ref[2] - k_hat[2]*ref[1];
-                    e1[1] = k_hat[2]*ref[0] - k_hat[0]*ref[2];
-                    e1[2] = k_hat[0]*ref[1] - k_hat[1]*ref[0];
-                    normalize(e1);
-                    
-                    // e2 = k_hat x e1 (normalized)
-                    e2[0] = k_hat[1]*e1[2] - k_hat[2]*e1[1];
-                    e2[1] = k_hat[2]*e1[0] - k_hat[0]*e1[2];
-                    e2[2] = k_hat[0]*e1[1] - k_hat[1]*e1[0];
-                    normalize(e2);
-                }
-
-                transverse_basis_1[qi] = { e1[0], e1[1], e1[2] };
-                transverse_basis_2[qi] = { e2[0], e2[1], e2[2] };
-            }
+            // For Gamma'' point (4π,4π,0): use [1,-1,0]/sqrt(2) and [0,0,1]
+            transverse_basis_1[2] = {0.0, 0.0, 1.0};
+            transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
 
             if (rank == 0) {
                 std::cout << "Transverse bases (e1, e2) for momentum points:\n";
@@ -564,7 +530,7 @@ int main(int argc, char* argv[]) {
                         std::stringstream name_ss;
                         name_ss << base_name << "_q"
                                 << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                                << "_e1";
+                                << "_SF";
                         try {
                             TransverseOperator op1(num_sites, spin_length, op_type_1, momentum_points[q_idx], e1_vec, positions_file);
                             TransverseOperator op2(num_sites, spin_length, op_type_2, momentum_points[q_idx], e1_vec, positions_file);
@@ -583,7 +549,7 @@ int main(int argc, char* argv[]) {
                         std::stringstream name_ss;
                         name_ss << base_name << "_q"
                                 << "_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
-                                << "_e2";
+                                << "_NSF";
                         try {
                             TransverseOperator op1(num_sites, spin_length, op_type_1, momentum_points[q_idx], e2_vec, positions_file);
                             TransverseOperator op2(num_sites, spin_length, op_type_2, momentum_points[q_idx], e2_vec, positions_file);
