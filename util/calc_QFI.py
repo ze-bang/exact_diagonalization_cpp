@@ -567,7 +567,14 @@ def _plot_qfi_derivative(species, qfi_data, plot_outdir):
     plt.savefig(plot_filename, dpi=300)
     plt.close()
 
-def parse_QFI_across_Jpm(data_dir):
+def parse_QFI_across_Jpm(data_dir, mode='all'):
+    """
+    Parse QFI across multiple Jpm values.
+    
+    Args:
+        data_dir: Base directory containing Jpm=* subdirectories
+        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
+    """
     
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -588,8 +595,14 @@ def parse_QFI_across_Jpm(data_dir):
         if i % size == rank:
             local_subdirs.append(subdir)
     
+    # Determine which modes to process
+    if mode == 'all':
+        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
+    else:
+        modes_to_process = [mode]
+    
     # Each process handles its assigned subdirectories
-    local_jpm_qfi_data = {}
+    local_jpm_qfi_data = {m: {} for m in modes_to_process}
     
     for subdir in local_subdirs:
         # Extract Jpm value from the directory name
@@ -606,57 +619,77 @@ def parse_QFI_across_Jpm(data_dir):
             continue
         
         print(f"[Rank {rank}] Processing directory: {subdir} for Jpm={jpm_value}")
-        # Run the QFI analysis for the current Jpm value
-        species_qfi_data = parse_QFI_data_new(structure_factor_dir)
-        local_jpm_qfi_data[jpm_value] = species_qfi_data
+        
+        # Run the QFI analysis for each mode
+        for m in modes_to_process:
+            print(f"[Rank {rank}]   Mode: {m}")
+            try:
+                species_qfi_data = parse_QFI_data_new(structure_factor_dir, mode=m)
+                local_jpm_qfi_data[m][jpm_value] = species_qfi_data
+            except Exception as e:
+                print(f"[Rank {rank}] Error processing mode {m}: {e}")
     
     # Gather all results at rank 0
     all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
     
     if rank == 0:
-        # Merge all results
-        jpm_qfi_data = {}
+        # Merge all results for each mode
+        jpm_qfi_data_by_mode = {m: {} for m in modes_to_process}
+        
         for process_data in all_jpm_qfi_data:
-            jpm_qfi_data.update(process_data)
+            for m in modes_to_process:
+                jpm_qfi_data_by_mode[m].update(process_data[m])
         
-        # Reorganize data by species for heatmap plotting
-        all_qfi_data = defaultdict(list)
-        all_derivative_data = defaultdict(list)
-        
-        for jpm, all_species_data in jpm_qfi_data.items():
-            for species, qfi_beta_list in all_species_data.items():
-                for beta, qfi in qfi_beta_list:
-                    all_qfi_data[species].append((jpm, beta, qfi))
-                
-                # Calculate derivatives for this species and jpm
-                if len(qfi_beta_list) > 1:
-                    qfi_beta_list.sort()
-                    qfi_beta_array = np.array(qfi_beta_list)
-                    betas = qfi_beta_array[:, 0]
-                    qfis = qfi_beta_array[:, 1]
+        # Reorganize data by species for heatmap plotting - for each mode
+        for m in modes_to_process:
+            print(f"\n{'='*60}")
+            print(f"Organizing data for mode: {m}")
+            print(f"{'='*60}")
+            
+            all_qfi_data = defaultdict(list)
+            all_derivative_data = defaultdict(list)
+            
+            for jpm, all_species_data in jpm_qfi_data_by_mode[m].items():
+                for species, qfi_beta_list in all_species_data.items():
+                    for beta, qfi in qfi_beta_list:
+                        all_qfi_data[species].append((jpm, beta, qfi))
                     
-                    # Use central differences for the derivative
-                    mid_betas = (betas[:-1] + betas[1:]) / 2
-                    delta_beta = np.diff(betas)
-                    delta_qfi = np.diff(qfis)
-                    qfi_derivative = delta_qfi / delta_beta
-                    
-                    for mid_beta, derivative in zip(mid_betas, qfi_derivative):
-                        all_derivative_data[species].append((jpm, mid_beta, derivative))
+                    # Calculate derivatives for this species and jpm
+                    if len(qfi_beta_list) > 1:
+                        qfi_beta_list.sort()
+                        qfi_beta_array = np.array(qfi_beta_list)
+                        betas = qfi_beta_array[:, 0]
+                        qfis = qfi_beta_array[:, 1]
+                        
+                        # Use central differences for the derivative
+                        mid_betas = (betas[:-1] + betas[1:]) / 2
+                        delta_beta = np.diff(betas)
+                        delta_qfi = np.diff(qfis)
+                        qfi_derivative = delta_qfi / delta_beta
+                        
+                        for mid_beta, derivative in zip(mid_betas, qfi_derivative):
+                            all_derivative_data[species].append((jpm, mid_beta, derivative))
 
-        # Create output directory
-        plot_outdir = os.path.join(data_dir, 'plots')
-        os.makedirs(plot_outdir, exist_ok=True)
-        return jpm_qfi_data
+            # Create output directory for this mode
+            plot_outdir = os.path.join(data_dir, f'plots_{m}')
+            os.makedirs(plot_outdir, exist_ok=True)
+            
+            print(f"Heatmap plots will be saved to: {plot_outdir}")
+        
+        return jpm_qfi_data_by_mode
     else:
         return None
 
 
 
-def parse_QFI_across_hi(data_dir):
+def parse_QFI_across_hi(data_dir, mode='all'):
     """
     Scan subdirectories named 'h=i=*' under data_dir, run QFI parsing per folder,
     and build heatmaps across the parameter h=i.
+    
+    Args:
+        data_dir: Base directory containing h=* subdirectories
+        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
     """
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -672,111 +705,138 @@ def parse_QFI_across_hi(data_dir):
     # Round-robin assignment
     my_dirs = sweep_dirs[rank::size]
 
+    # Determine which modes to process
+    if mode == 'all':
+        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
+    else:
+        modes_to_process = [mode]
+
     # Local compute
-    local_results = {}
+    local_results = {m: {} for m in modes_to_process}
     param_regex = re.compile(r'h=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)')
     for d in my_dirs:
-        m = param_regex.search(os.path.basename(d))
-        if not m:
+        m_match = param_regex.search(os.path.basename(d))
+        if not m_match:
             continue
-        hi_val = float(m.group(1))
+        hi_val = float(m_match.group(1))
         sf_path = os.path.join(d, 'structure_factor_results')
         if not os.path.isdir(sf_path):
             print(f"[Rank {rank}] Missing structure_factor_results at: {sf_path}")
             continue
         print(f"[Rank {rank}] Processing {d} (h=i={hi_val})")
-        local_results[hi_val] = parse_QFI_data_new(sf_path)
+        
+        # Process each mode
+        for mode_name in modes_to_process:
+            print(f"[Rank {rank}]   Mode: {mode_name}")
+            try:
+                local_results[mode_name][hi_val] = parse_QFI_data_new(sf_path, mode=mode_name)
+            except Exception as e:
+                print(f"[Rank {rank}] Error processing mode {mode_name}: {e}")
 
     # Gather and merge on root
     gathered = comm.gather(local_results, root=0)
     if rank != 0:
         return None
 
-    merged = {}
+    merged_by_mode = {m: {} for m in modes_to_process}
     for part in gathered:
-        merged.update(part)
+        for mode_name in modes_to_process:
+            merged_by_mode[mode_name].update(part[mode_name])
 
-    # Reformat per-species arrays and compute derivatives
-    by_species = defaultdict(list)
-    by_species_deriv = defaultdict(list)
-    for hi, species_map in merged.items():
-        for sp, beta_qfi in species_map.items():
-            for b, q in beta_qfi:
-                by_species[sp].append((hi, b, q))
+    merged_by_mode = {m: {} for m in modes_to_process}
+    for part in gathered:
+        for mode_name in modes_to_process:
+            merged_by_mode[mode_name].update(part[mode_name])
 
-            if len(beta_qfi) > 1:
-                bq = np.array(sorted(beta_qfi, key=lambda x: x[0]), dtype=float)
-                bvals, qvals = bq[:, 0], bq[:, 1]
-                mid = 0.5 * (bvals[:-1] + bvals[1:])
-                dq = np.diff(qvals)
-                db = np.diff(bvals)
-                deriv = dq / db
-                for mb, dv in zip(mid, deriv):
-                    by_species_deriv[sp].append((hi, mb, dv))
+    # Process each mode
+    for mode_name in modes_to_process:
+        print(f"\n{'='*60}")
+        print(f"Processing heatmaps for mode: {mode_name}")
+        print(f"{'='*60}")
+        
+        merged = merged_by_mode[mode_name]
+        
+        # Reformat per-species arrays and compute derivatives
+        by_species = defaultdict(list)
+        by_species_deriv = defaultdict(list)
+        for hi, species_map in merged.items():
+            for sp, beta_qfi in species_map.items():
+                for b, q in beta_qfi:
+                    by_species[sp].append((hi, b, q))
 
-    # Plotting
-    out_dir = os.path.join(data_dir, 'plots_hi')
-    os.makedirs(out_dir, exist_ok=True)
+                if len(beta_qfi) > 1:
+                    bq = np.array(sorted(beta_qfi, key=lambda x: x[0]), dtype=float)
+                    bvals, qvals = bq[:, 0], bq[:, 1]
+                    mid = 0.5 * (bvals[:-1] + bvals[1:])
+                    dq = np.diff(qvals)
+                    db = np.diff(bvals)
+                    deriv = dq / db
+                    for mb, dv in zip(mid, deriv):
+                        by_species_deriv[sp].append((hi, mb, dv))
 
-    # Heatmaps for QFI
-    for sp, triples in by_species.items():
-        if not triples:
-            continue
-        arr = np.array(triples, dtype=float)
-        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
+        # Plotting
+        out_dir = os.path.join(data_dir, f'plots_hi_{mode_name}')
+        os.makedirs(out_dir, exist_ok=True)
 
-        # Build grid in parameter (linear) and beta (log)
-        x_min, x_max = np.nanmin(X), np.nanmax(X)
-        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-        x_lin = np.linspace(x_min, x_max, 120)
-        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-        XX, YY = np.meshgrid(x_lin, y_log)
-        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
+        # Heatmaps for QFI
+        for sp, triples in by_species.items():
+            if not triples:
+                continue
+            arr = np.array(triples, dtype=float)
+            X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
 
-        plt.figure(figsize=(11, 7))
-        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-        plt.colorbar(mesh, label='QFI')
-        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-        plt.yscale('log')
-        plt.xlabel('h=i')
-        plt.ylabel('Beta (β)')
-        plt.title(f'QFI heatmap (h=i sweep): {sp}')
-        plt.legend(loc='best')
-        fout = os.path.join(out_dir, f'qfi_heatmap_hi_{sp}.png')
-        plt.savefig(fout, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {fout}")
+            # Build grid in parameter (linear) and beta (log)
+            x_min, x_max = np.nanmin(X), np.nanmax(X)
+            y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
+            x_lin = np.linspace(x_min, x_max, 120)
+            y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
+            XX, YY = np.meshgrid(x_lin, y_log)
+            ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
 
-    # Heatmaps for dQFI/dβ
-    for sp, triples in by_species_deriv.items():
-        if not triples:
-            continue
-        arr = np.array(triples, dtype=float)
-        X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
+            plt.figure(figsize=(11, 7))
+            mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
+            plt.colorbar(mesh, label='QFI')
+            plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
+            plt.yscale('log')
+            plt.xlabel('h=i')
+            plt.ylabel('Beta (β)')
+            plt.title(f'QFI heatmap (h=i sweep, {mode_name}): {sp}')
+            plt.legend(loc='best')
+            fout = os.path.join(out_dir, f'qfi_heatmap_hi_{sp}.png')
+            plt.savefig(fout, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {fout}")
 
-        x_min, x_max = np.nanmin(X), np.nanmax(X)
-        y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
-        x_lin = np.linspace(x_min, x_max, 120)
-        y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
-        XX, YY = np.meshgrid(x_lin, y_log)
-        ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
+        # Heatmaps for dQFI/dβ
+        for sp, triples in by_species_deriv.items():
+            if not triples:
+                continue
+            arr = np.array(triples, dtype=float)
+            X, Y, Z = arr[:, 0], arr[:, 1], arr[:, 2]
 
-        plt.figure(figsize=(11, 7))
-        mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
-        plt.colorbar(mesh, label='dQFI/dβ')
-        plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
-        plt.yscale('log')
-        plt.xlabel('h=i')
-        plt.ylabel('Beta (β)')
-        plt.title(f'dQFI/dβ heatmap (h=i sweep): {sp}')
-        plt.legend(loc='best')
-        fout = os.path.join(out_dir, f'qfi_derivative_heatmap_hi_{sp}.png')
-        plt.savefig(fout, dpi=300, bbox_inches='tight')
-        plt.close()
-        print(f"Saved: {fout}")
+            x_min, x_max = np.nanmin(X), np.nanmax(X)
+            y_min, y_max = np.nanmin(Y[Y > 0]), np.nanmax(Y)
+            x_lin = np.linspace(x_min, x_max, 120)
+            y_log = np.logspace(np.log10(y_min), np.log10(y_max), 120)
+            XX, YY = np.meshgrid(x_lin, y_log)
+            ZZ = griddata((X, Y), Z, (XX, YY), method='cubic')
+
+            plt.figure(figsize=(11, 7))
+            mesh = plt.pcolormesh(XX, YY, ZZ, shading='auto', cmap='viridis')
+            plt.colorbar(mesh, label='dQFI/dβ')
+            plt.scatter(X, Y, s=14, c='k', alpha=0.6, label='samples')
+            plt.yscale('log')
+            plt.xlabel('h=i')
+            plt.ylabel('Beta (β)')
+            plt.title(f'dQFI/dβ heatmap (h=i sweep, {mode_name}): {sp}')
+            plt.legend(loc='best')
+            fout = os.path.join(out_dir, f'qfi_derivative_heatmap_hi_{sp}.png')
+            plt.savefig(fout, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Saved: {fout}")
 
     print("h=i sweep processing complete!")
-    return merged
+    return merged_by_mode
 
 
 def track_peak_evolution_across_h(data_dir, target_beta=None):
@@ -1002,39 +1062,64 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
     return species_peak_evolution
 
 
-def plot_heatmaps_from_processed_data(data_dir):
+def plot_heatmaps_from_processed_data(data_dir, mode='all'):
     """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories.
-       Only plot rows where there is no NaN, and save all intermediate and plot data."""
+       Only plot rows where there is no NaN, and save all intermediate and plot data.
+       
+    Args:
+        data_dir: Base directory containing Jpm=* subdirectories
+        mode: 'taylor', 'global', 'taylor_combined', 'global_combined', or 'all'
+    """
     
-    # Step 1: Load all QFI and derivative data
-    all_qfi_data, all_derivative_data = load_processed_data(data_dir)
+    # Determine which modes to process
+    if mode == 'all':
+        modes_to_process = ['taylor', 'taylor_combined', 'global', 'global_combined']
+    else:
+        modes_to_process = [mode]
     
-    # Step 2: Create output directory
-    plot_outdir = os.path.join(data_dir, 'plots')
-    os.makedirs(plot_outdir, exist_ok=True)
-    
-    # Step 3: Save raw data points
-    save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
-    
-    # Step 4: Process and plot QFI heatmaps
-    for species, data_points in all_qfi_data.items():
-        if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir, 
-                data_type='qfi', ref_target=0.08
-            )
-    
-    # Step 5: Process and plot derivative heatmaps
-    for species, data_points in all_derivative_data.items():
-        if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir,
-                data_type='derivative', ref_target=0.09
-            )
+    for mode_name in modes_to_process:
+        print(f"\n{'='*80}")
+        print(f"Plotting heatmaps for mode: {mode_name}")
+        print(f"{'='*80}\n")
+        
+        # Step 1: Load all QFI and derivative data for this mode
+        all_qfi_data, all_derivative_data = load_processed_data(data_dir, mode_name)
+        
+        if not all_qfi_data and not all_derivative_data:
+            print(f"No processed data found for mode: {mode_name}")
+            continue
+        
+        # Step 2: Create output directory for this mode
+        plot_outdir = os.path.join(data_dir, f'plots_{mode_name}')
+        os.makedirs(plot_outdir, exist_ok=True)
+        
+        # Step 3: Save raw data points
+        save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
+        
+        # Step 4: Process and plot QFI heatmaps
+        for species, data_points in all_qfi_data.items():
+            if data_points:
+                process_species_heatmap(
+                    species, data_points, plot_outdir, 
+                    data_type='qfi', ref_target=0.08
+                )
+        
+        # Step 5: Process and plot derivative heatmaps
+        for species, data_points in all_derivative_data.items():
+            if data_points:
+                process_species_heatmap(
+                    species, data_points, plot_outdir,
+                    data_type='derivative', ref_target=0.09
+                )
 
 
-def load_processed_data(data_dir):
-    """Load QFI and derivative data from all Jpm subdirectories."""
+def load_processed_data(data_dir, mode='taylor'):
+    """Load QFI and derivative data from all Jpm subdirectories for a specific mode.
+    
+    Args:
+        data_dir: Base directory containing Jpm=* subdirectories
+        mode: 'taylor', 'global', 'taylor_combined', or 'global_combined'
+    """
     all_qfi_data = defaultdict(list)
     all_derivative_data = defaultdict(list)
     
@@ -1044,10 +1129,14 @@ def load_processed_data(data_dir):
         jpm_value = extract_jpm_value(subdir)
         if jpm_value is None:
             continue
-            
-        plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
+        
+        # Look for mode-specific plots directory
+        plots_dir = os.path.join(subdir, 'structure_factor_results', f'plots_{mode}')
         if not os.path.exists(plots_dir):
-            continue
+            # Fall back to old 'plots' directory for backward compatibility
+            plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
+            if not os.path.exists(plots_dir):
+                continue
             
         print(f"Reading processed data from: {plots_dir} for Jpm={jpm_value}")
         
@@ -1498,9 +1587,9 @@ if __name__ == "__main__":
     across_QFI = across_QFI.lower() == 'true'
     
     if across_QFI:
-        parse_QFI_across_Jpm(data_dir)
-        parse_QFI_across_hi(data_dir)
-        plot_heatmaps_from_processed_data(data_dir)
+        parse_QFI_across_Jpm(data_dir, mode=mode)
+        parse_QFI_across_hi(data_dir, mode=mode)
+        plot_heatmaps_from_processed_data(data_dir, mode=mode)
     else:
         if mode == 'all':
             # Process all available modes
