@@ -21,6 +21,12 @@ except ImportError:
     HAS_MPI = False
     print("Warning: mpi4py not available. Running in serial mode.")
 
+# NumPy compatibility: use trapezoid (new) or trapz (old)
+if hasattr(np, 'trapezoid'):
+    np_trapz = np.trapezoid
+else:
+    np_trapz = np.trapz
+
 # Function to apply broadening in time domain
 def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
     """
@@ -516,7 +522,7 @@ def _extract_positive_frequencies(S_omega_real, omega):
     """Extract positive frequencies and apply compensation."""
     
     # Calculate integral before truncation
-    integral_before = np.trapezoid(S_omega_real, omega)
+    integral_before = np_trapz(S_omega_real, omega)
     
     # Extract positive frequencies
     positive_mask = omega > 0
@@ -524,7 +530,7 @@ def _extract_positive_frequencies(S_omega_real, omega):
     s_omega_pos = S_omega_real[positive_mask]
     
     # Calculate compensation factor
-    integral_after = np.trapezoid(s_omega_pos, omega_pos)
+    integral_after = np_trapz(s_omega_pos, omega_pos)
     compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
     
     s_omega_compensated = s_omega_pos * compensation_factor
@@ -543,7 +549,7 @@ def _calculate_qfi(omega_pos, s_omega_pos, beta):
     else:
         integrand = s_omega_pos * np.tanh(beta * omega_pos / 2.0) * (1 - np.exp(-beta * omega_pos))
     
-    return 4 * np.trapezoid(integrand, omega_pos)
+    return 4 * np_trapz(integrand, omega_pos)
 
 
 def _save_species_results(species, beta, results, structure_factor_dir):
