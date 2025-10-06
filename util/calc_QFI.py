@@ -183,11 +183,21 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
         bin_idx = _assign_beta_bin(beta_value, beta_bins, beta_tol)
         beta_bin_values[bin_idx].append(beta_value)
         
-        # Find all correlation files
+        # Find all correlation files in taylor directory
         taylor_dir = os.path.join(beta_dir, 'taylor')
         files = glob.glob(os.path.join(taylor_dir, 'time_corr_rand*.dat'))
         
         for file_path in files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+        
+        # Also find correlation files in global directory
+        global_dir = os.path.join(beta_dir, 'global')
+        global_files = glob.glob(os.path.join(global_dir, 'time_corr_rand*.dat'))
+        
+        for file_path in global_files:
             species_with_momentum, _, _ = parse_filename_new(file_path)
             if species_with_momentum:
                 species_names.add(species_with_momentum)
