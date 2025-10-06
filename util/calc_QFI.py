@@ -19,7 +19,6 @@ try:
     HAS_MPI = True
 except ImportError:
     HAS_MPI = False
-    sys.exit(1)
 
 # NumPy compatibility: use trapezoid (new) or trapz (old)
 if hasattr(np, 'trapezoid'):
@@ -162,8 +161,8 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, average_after_fft=Tr
                             structure_factor_dir, all_species_qfi_data,
                             average_after_fft=average_after_fft)
     
-    # # Step 3: Generate summary plots
-    # _create_summary_plots(all_species_qfi_data, structure_factor_dir)
+    # Step 3: Generate summary plots
+    _create_summary_plots(all_species_qfi_data, structure_factor_dir)
     
     print("\nProcessing complete!")
     return all_species_qfi_data
@@ -318,9 +317,10 @@ def _load_and_average_data(file_list, average_after_fft=True):
     If average_after_fft=False: (mean_correlation, reference_time)
     If average_after_fft=True: (mean_spectral_function, omega, all_time_arrays)
     """
+    print(f"    [DEBUG] Loading {len(file_list)} files...")
     all_data = []
     
-    for file_path in file_list:
+    for idx, file_path in enumerate(file_list):
         try:
             data = np.loadtxt(file_path, comments='#')
             time = data[:, 0]
@@ -328,11 +328,16 @@ def _load_and_average_data(file_list, average_after_fft=True):
             imag_part = data[:, 2] if data.shape[1] > 2 else np.zeros_like(real_part)
             val = real_part + 1j * imag_part
             all_data.append((time, val))
+            if idx == 0:
+                print(f"    [DEBUG] First file: {os.path.basename(file_path)}, time shape: {time.shape}, data shape: {data.shape}")
         except Exception as e:
-            print(f"    Error reading {file_path}: {e}")
+            print(f"    [ERROR] reading {file_path}: {e}")
     
     if not all_data:
+        print(f"    [DEBUG] No valid data loaded!")
         return None, None, None if average_after_fft else None, None
+    
+    print(f"    [DEBUG] Successfully loaded {len(all_data)} files")
     
     if not average_after_fft:
         # Original behavior: average in time domain
@@ -340,6 +345,7 @@ def _load_and_average_data(file_list, average_after_fft=True):
         reference_time = all_data[0][0]
         all_complex_values = np.vstack([data[1] for data in all_data])
         mean_correlation = np.mean(all_complex_values, axis=0)
+        print(f"    [DEBUG] Averaged in time domain, result shape: {mean_correlation.shape}")
         return mean_correlation, reference_time
     
     else:
@@ -351,11 +357,14 @@ def _load_and_average_data(file_list, average_after_fft=True):
         time_arrays_match = all(np.array_equal(all_data[0][0], d[0]) for d in all_data)
         if not time_arrays_match:
             print(f"    WARNING: Time arrays differ between samples - will interpolate to common grid!")
+            # Debug: show time array lengths
+            time_lengths = [len(d[0]) for d in all_data]
+            print(f"    [DEBUG] Time array lengths: {time_lengths}")
         
         all_spectra = []
         all_omegas = []
         
-        for time, correlation in all_data:
+        for idx, (time, correlation) in enumerate(all_data):
             # Prepare full time range
             t_full, C_full = _prepare_time_data(correlation, time)
             
@@ -368,10 +377,14 @@ def _load_and_average_data(file_list, average_after_fft=True):
             
             all_spectra.append(S_omega_real)
             all_omegas.append(omega)
+            
+            if idx == 0:
+                print(f"    [DEBUG] Sample {idx}: omega shape = {omega.shape}, spectrum shape = {S_omega_real.shape}")
         
         # Create common frequency grid
         # Use the grid from the longest time series (finest frequency resolution)
         omega_ref = max(all_omegas, key=len)
+        print(f"    [DEBUG] Reference omega grid length: {len(omega_ref)}")
         
         # Interpolate all spectra onto common grid if needed
         interpolated_spectra = []
@@ -399,6 +412,7 @@ def _load_and_average_data(file_list, average_after_fft=True):
         # Average spectra
         mean_spectrum = np.mean(interpolated_spectra, axis=0)
         print(f"    Averaged {len(interpolated_spectra)} spectra in frequency domain")
+        print(f"    [DEBUG] Mean spectrum shape: {mean_spectrum.shape}, min: {mean_spectrum.min():.6e}, max: {mean_spectrum.max():.6e}")
         
         return mean_spectrum, omega_ref, [d[0] for d in all_data]
 
@@ -1251,18 +1265,22 @@ def plot_heatmaps_from_processed_data(data_dir):
 
 def load_processed_data(data_dir):
     """Load QFI and derivative data from all Jpm subdirectories."""
+    print(f"[DEBUG] load_processed_data: scanning directory {data_dir}")
     all_qfi_data = defaultdict(list)
     all_derivative_data = defaultdict(list)
     
     subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
+    print(f"[DEBUG] Found {len(subdirs)} Jpm subdirectories")
     
     for subdir in subdirs:
         jpm_value = extract_jpm_value(subdir)
         if jpm_value is None:
+            print(f"[DEBUG] Could not extract Jpm value from {subdir}")
             continue
             
         plots_dir = os.path.join(subdir, 'structure_factor_results', 'plots')
         if not os.path.exists(plots_dir):
+            print(f"[DEBUG] Plots directory does not exist: {plots_dir}")
             continue
             
         print(f"Reading processed data from: {plots_dir} for Jpm={jpm_value}")
@@ -1279,6 +1297,7 @@ def load_processed_data(data_dir):
             jpm_value, all_derivative_data
         )
     
+    print(f"[DEBUG] Loaded data for {len(all_qfi_data)} species (QFI), {len(all_derivative_data)} species (derivative)")
     return all_qfi_data, all_derivative_data
 
 
@@ -1291,15 +1310,18 @@ def extract_jpm_value(subdir):
 def load_data_files(plots_dir, pattern, jpm_value, data_dict):
     """Load data files matching pattern and add to data dictionary."""
     files = glob.glob(os.path.join(plots_dir, pattern))
+    print(f"[DEBUG] load_data_files: pattern={pattern}, found {len(files)} files")
     
     for file_path in files:
         species = extract_species_from_filename(file_path, pattern)
         if not species:
+            print(f"[DEBUG] Could not extract species from {os.path.basename(file_path)}")
             continue
             
         try:
             data = np.loadtxt(file_path)
             if data.size == 0:
+                print(f"[DEBUG] Empty file: {file_path}")
                 continue
             if data.ndim == 1:
                 data = data.reshape(1, -1)
@@ -1307,8 +1329,10 @@ def load_data_files(plots_dir, pattern, jpm_value, data_dict):
             for row in data:
                 beta, value = row[0], row[1]
                 data_dict[species].append((jpm_value, beta, value))
+            
+            print(f"[DEBUG] Loaded {len(data)} rows from {os.path.basename(file_path)} for species {species}")
         except Exception as e:
-            print(f"Error reading {file_path}: {e}")
+            print(f"[ERROR] reading {file_path}: {e}")
 
 
 def extract_species_from_filename(file_path, pattern):
@@ -1448,12 +1472,15 @@ def split_jpm_values(jpm_vals):
 def interpolate_to_grid(jpm_vals, beta_vals, values, jpm_neg, jpm_pos, target_beta):
     """Interpolate data onto regular beta grid for each Jpm value."""
     
+    print(f"[DEBUG] interpolate_to_grid: target_beta size={len(target_beta)}, jpm_neg size={len(jpm_neg)}, jpm_pos size={len(jpm_pos)}")
+    
     def interp_at_jpm(j):
         mask = np.isclose(jpm_vals, j, rtol=1e-8, atol=1e-12)
         b = beta_vals[mask]
         v = values[mask]
         
         if b.size == 0:
+            print(f"[DEBUG] Jpm={j:.3f}: No data points found")
             return np.full_like(target_beta, np.nan, dtype=float)
         
         # Sort and average duplicates
@@ -1468,13 +1495,23 @@ def interpolate_to_grid(jpm_vals, beta_vals, values, jpm_neg, jpm_pos, target_be
         v_mean = v_mean / np.maximum(counts, 1)
         
         if bu.size < 2:
+            print(f"[DEBUG] Jpm={j:.3f}: Insufficient unique beta values ({bu.size}), returning NaN")
             return np.full_like(target_beta, np.nan, dtype=float)
         
         f = interp1d(bu, v_mean, kind='linear', bounds_error=False, fill_value=np.nan)
-        return f(target_beta)
+        result = f(target_beta)
+        nan_count = np.isnan(result).sum()
+        if nan_count > 0:
+            print(f"[DEBUG] Jpm={j:.3f}: Interpolation produced {nan_count} NaN values out of {len(result)}")
+        return result
     
     Z_neg = np.column_stack([interp_at_jpm(j) for j in jpm_neg]) if jpm_neg.size > 0 else None
     Z_pos = np.column_stack([interp_at_jpm(j) for j in jpm_pos]) if jpm_pos.size > 0 else None
+    
+    if Z_neg is not None:
+        print(f"[DEBUG] Z_neg created: shape={Z_neg.shape}, NaN count={np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"[DEBUG] Z_pos created: shape={Z_pos.shape}, NaN count={np.isnan(Z_pos).sum()}")
     
     return Z_neg, Z_pos
 
@@ -1606,18 +1643,29 @@ def get_color_limits(filtered_data):
 
 def plot_single_heatmap(jpm, beta, Z, vmin, vmax, value_label, title, filename):
     """Create a single heatmap plot."""
+    print(f"[DEBUG] plot_single_heatmap: jpm shape={jpm.shape}, beta shape={beta.shape}, Z shape={Z.shape}")
+    print(f"[DEBUG] vmin={vmin:.6f}, vmax={vmax:.6f}")
+    
     J, B = np.meshgrid(jpm, beta)
+    print(f"[DEBUG] Meshgrid J shape={J.shape}, B shape={B.shape}")
     
     plt.figure(figsize=(12, 8))
-    plt.pcolormesh(J, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
-    plt.yscale('log')
-    plt.gca().invert_yaxis()  # large beta at bottom
-    plt.xlabel('Jpm')
-    plt.ylabel('Beta (β)')
-    plt.title(title)
-    plt.colorbar(label=value_label)
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
-    plt.close()
+    try:
+        plt.pcolormesh(J, B, Z, shading='auto', cmap='viridis', vmin=vmin, vmax=vmax)
+        plt.yscale('log')
+        plt.gca().invert_yaxis()  # large beta at bottom
+        plt.xlabel('Jpm')
+        plt.ylabel('Beta (β)')
+        plt.title(title)
+        plt.colorbar(label=value_label)
+        plt.savefig(filename, dpi=300, bbox_inches='tight')
+        print(f"[DEBUG] Successfully saved heatmap to {filename}")
+    except Exception as e:
+        print(f"[ERROR] Failed to create heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        plt.close()
 
 
 def plot_side_by_side_heatmap(species, filtered_data, jpm_neg, jpm_pos, 
@@ -1750,8 +1798,8 @@ if __name__ == "__main__":
     across_QFI = sys.argv[2] if len(sys.argv) > 2 else 'False'
     across_QFI = across_QFI.lower() == 'true'
     if across_QFI:
-        parse_QFI_across_Jpm(data_dir)
-        parse_QFI_across_hi(data_dir)
+        # parse_QFI_across_Jpm(data_dir)
+        # parse_QFI_across_hi(data_dir)
         plot_heatmaps_from_processed_data(data_dir)
     else:
         parse_QFI_data_new(data_dir)
