@@ -10,9 +10,16 @@ import pandas as pd
 import seaborn as sns
 from scipy.interpolate import griddata
 from scipy.signal import find_peaks, peak_prominences
-from mpi4py import MPI
 from collections import defaultdict
 from scipy.interpolate import interp1d
+
+# Try to import mpi4py, but make it optional
+try:
+    from mpi4py import MPI
+    HAS_MPI = True
+except ImportError:
+    HAS_MPI = False
+    print("Warning: mpi4py not available. Running in serial mode.")
 
 # Function to apply broadening in time domain
 def apply_time_broadening(t_values, data, broadening_type='gaussian', sigma=None, gamma=None):
@@ -681,9 +688,15 @@ def _plot_qfi_derivative(species, qfi_data, plot_outdir):
 
 def parse_QFI_across_Jpm(data_dir):
     
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
     
     # Find all subdirectories matching the pattern Jpm=*
     subdirs = []
@@ -691,8 +704,9 @@ def parse_QFI_across_Jpm(data_dir):
         subdirs = glob.glob(os.path.join(data_dir, 'Jpm=*'))
         subdirs.sort()  # Ensure consistent ordering
     
-    # Broadcast subdirs to all processes
-    subdirs = comm.bcast(subdirs, root=0)
+    # Broadcast subdirs to all processes (only if MPI is available)
+    if HAS_MPI:
+        subdirs = comm.bcast(subdirs, root=0)
     
     # Distribute subdirectories among processes
     local_subdirs = []
@@ -722,8 +736,11 @@ def parse_QFI_across_Jpm(data_dir):
         species_qfi_data = parse_QFI_data_new(structure_factor_dir)
         local_jpm_qfi_data[jpm_value] = species_qfi_data
     
-    # Gather all results at rank 0
-    all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
+    # Gather all results at rank 0 (only if MPI is available)
+    if HAS_MPI:
+        all_jpm_qfi_data = comm.gather(local_jpm_qfi_data, root=0)
+    else:
+        all_jpm_qfi_data = [local_jpm_qfi_data]
     
     if rank == 0:
         # Merge all results
@@ -770,16 +787,25 @@ def parse_QFI_across_hi(data_dir):
     Scan subdirectories named 'h=i=*' under data_dir, run QFI parsing per folder,
     and build heatmaps across the parameter h=i.
     """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
 
     # Discover parameter sweep folders on rank 0
     if rank == 0:
         sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
     else:
         sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
+    
+    # Broadcast only if MPI is available
+    if HAS_MPI:
+        sweep_dirs = comm.bcast(sweep_dirs, root=0)
 
     # Round-robin assignment
     my_dirs = sweep_dirs[rank::size]
@@ -799,8 +825,12 @@ def parse_QFI_across_hi(data_dir):
         print(f"[Rank {rank}] Processing {d} (h=i={hi_val})")
         local_results[hi_val] = parse_QFI_data_new(sf_path)
 
-    # Gather and merge on root
-    gathered = comm.gather(local_results, root=0)
+    # Gather and merge on root (only if MPI is available)
+    if HAS_MPI:
+        gathered = comm.gather(local_results, root=0)
+    else:
+        gathered = [local_results]
+    
     if rank != 0:
         return None
 
@@ -902,16 +932,25 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
     Returns:
     peak_evolution_data: Dictionary containing peak tracking results for each species
     """
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
+    if HAS_MPI:
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        size = comm.Get_size()
+    else:
+        # Serial mode
+        rank = 0
+        size = 1
+        comm = None
 
     # Discover parameter sweep folders on rank 0
     if rank == 0:
         sweep_dirs = sorted(glob.glob(os.path.join(data_dir, 'h=*')))
     else:
         sweep_dirs = None
-    sweep_dirs = comm.bcast(sweep_dirs, root=0)
+    
+    # Broadcast only if MPI is available
+    if HAS_MPI:
+        sweep_dirs = comm.bcast(sweep_dirs, root=0)
 
     # Round-robin assignment
     my_dirs = sweep_dirs[rank::size]
@@ -981,8 +1020,12 @@ def track_peak_evolution_across_h(data_dir, target_beta=None):
             if species_peaks:
                 local_peak_data[hi_val][species] = species_peaks
 
-    # Gather and merge on root
-    gathered = comm.gather(local_peak_data, root=0)
+    # Gather and merge on root (only if MPI is available)
+    if HAS_MPI:
+        gathered = comm.gather(local_peak_data, root=0)
+    else:
+        gathered = [local_peak_data]
+    
     if rank != 0:
         return None
 
