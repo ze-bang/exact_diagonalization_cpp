@@ -344,10 +344,10 @@ def _load_and_average_data(file_list, average_after_fft=True):
         # Check if time arrays are consistent
         time_arrays_match = all(np.array_equal(all_data[0][0], d[0]) for d in all_data)
         if not time_arrays_match:
-            print(f"    WARNING: Time arrays differ between samples - averaging after FFT is recommended!")
+            print(f"    WARNING: Time arrays differ between samples - will interpolate to common grid!")
         
         all_spectra = []
-        omega_ref = None
+        all_omegas = []
         
         for time, correlation in all_data:
             # Prepare full time range
@@ -361,12 +361,38 @@ def _load_and_average_data(file_list, average_after_fft=True):
             S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
             
             all_spectra.append(S_omega_real)
-            if omega_ref is None:
-                omega_ref = omega
+            all_omegas.append(omega)
+        
+        # Create common frequency grid
+        # Use the grid from the longest time series (finest frequency resolution)
+        omega_ref = max(all_omegas, key=len)
+        
+        # Interpolate all spectra onto common grid if needed
+        interpolated_spectra = []
+        for i, (S_omega, omega) in enumerate(zip(all_spectra, all_omegas)):
+            if len(omega) != len(omega_ref):
+                # Need to interpolate due to different lengths
+                print(f"      Sample {i}: interpolating from {len(omega)} to {len(omega_ref)} points")
+                from scipy.interpolate import interp1d
+                f_interp = interp1d(omega, S_omega, kind='linear', 
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp(omega_ref)
+                interpolated_spectra.append(S_interpolated)
+            elif not np.allclose(omega, omega_ref, rtol=1e-9, atol=1e-12):
+                # Lengths match but values differ - still need interpolation
+                print(f"      Sample {i}: interpolating due to frequency grid mismatch")
+                from scipy.interpolate import interp1d
+                f_interp = interp1d(omega, S_omega, kind='linear',
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp(omega_ref)
+                interpolated_spectra.append(S_interpolated)
+            else:
+                # Grids match perfectly
+                interpolated_spectra.append(S_omega)
         
         # Average spectra
-        mean_spectrum = np.mean(all_spectra, axis=0)
-        print(f"    Averaged {len(all_spectra)} spectra in frequency domain")
+        mean_spectrum = np.mean(interpolated_spectra, axis=0)
+        print(f"    Averaged {len(interpolated_spectra)} spectra in frequency domain")
         
         return mean_spectrum, omega_ref, [d[0] for d in all_data]
 
