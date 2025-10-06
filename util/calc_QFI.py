@@ -113,8 +113,15 @@ def find_spectral_peaks(omega, spectral_function, min_prominence=0.1, min_height
     
     return peak_positions.tolist(), peak_heights.tolist(), prominences.tolist()
 
-def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
-    """Parse QFI data from the new directory structure and compute spectral functions."""
+def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2, average_after_fft=True):
+    """Parse QFI data from the new directory structure and compute spectral functions.
+    
+    Parameters:
+    structure_factor_dir: Directory containing beta_* subdirectories
+    beta_tol: Tolerance for grouping beta values
+    average_after_fft: If True, average spectra after FFT (recommended).
+                       If False, average in time domain (assumes identical time arrays).
+    """
     
     # Initialize data structures
     species_data = defaultdict(lambda: defaultdict(list))
@@ -128,6 +135,7 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
                         beta_bins, beta_bin_values, beta_tol)
     
     print(f"\nFound species (with momentum): {sorted(species_names)}")
+    print(f"Averaging strategy: {'After FFT' if average_after_fft else 'Before FFT (time domain)'}")
     
     # Step 2: Process each species
     all_species_qfi_data = defaultdict(list)
@@ -138,7 +146,8 @@ def parse_QFI_data_new(structure_factor_dir, beta_tol=1e-2):
         print(f"{'='*60}")
         
         _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data)
+                            structure_factor_dir, all_species_qfi_data,
+                            average_after_fft=average_after_fft)
     
     # # Step 3: Generate summary plots
     # _create_summary_plots(all_species_qfi_data, structure_factor_dir)
@@ -213,22 +222,59 @@ def _assign_beta_bin(beta_val, bins, tol):
 
 
 def _process_species_data(species, beta_groups, beta_bin_values, 
-                            structure_factor_dir, all_species_qfi_data):
-    """Process all data for a single species across different beta values."""
+                            structure_factor_dir, all_species_qfi_data, 
+                            average_after_fft=True):
+    """Process all data for a single species across different beta values.
+    
+    Parameters:
+    average_after_fft: If True, average spectra after FFT (recommended when time arrays differ).
+                       If False, average in time domain (original behavior).
+    """
     
     for beta_bin_idx, file_list in beta_groups.items():
         # Get representative beta for this bin
         beta = _get_bin_beta(beta_bin_values.get(beta_bin_idx, []))
         print(f"\n  Beta≈{beta:.6g} (bin {beta_bin_idx}): {len(file_list)} files")
         
-        # Load and average correlation data
-        mean_correlation, reference_time = _load_and_average_data(file_list)
-        if mean_correlation is None:
-            print(f"    No valid data for beta={beta}")
-            continue
-        
-        # Compute spectral function and QFI
-        results = _compute_spectral_and_qfi(mean_correlation, reference_time, beta)
+        if average_after_fft:
+            # New approach: average after FFT
+            result = _load_and_average_data(file_list, average_after_fft=True)
+            if result[0] is None:
+                print(f"    No valid data for beta={beta}")
+                continue
+            
+            mean_spectrum, omega, time_arrays = result
+            
+            # Extract positive frequencies and compensate
+            omega_pos, s_omega_compensated = _extract_positive_frequencies(mean_spectrum, omega)
+            
+            # Calculate QFI
+            qfi = _calculate_qfi(omega_pos, s_omega_compensated, beta)
+            
+            # Find peaks
+            peak_positions, peak_heights, peak_prominences = find_spectral_peaks(
+                omega_pos, s_omega_compensated, min_prominence=0.1, omega_range=(0, 6))
+            
+            results = {
+                'omega': omega,
+                'S_omega_real': mean_spectrum,
+                'omega_pos': omega_pos,
+                's_omega_compensated': s_omega_compensated,
+                'qfi': qfi,
+                'peak_positions': peak_positions,
+                'peak_heights': peak_heights,
+                'peak_prominences': peak_prominences
+            }
+            
+        else:
+            # Original approach: average in time domain
+            mean_correlation, reference_time = _load_and_average_data(file_list, average_after_fft=False)
+            if mean_correlation is None:
+                print(f"    No valid data for beta={beta}")
+                continue
+            
+            # Compute spectral function and QFI
+            results = _compute_spectral_and_qfi(mean_correlation, reference_time, beta)
         
         # Save results
         _save_species_results(species, beta, results, structure_factor_dir)
@@ -247,8 +293,18 @@ def _get_bin_beta(beta_vals):
         return float(np.mean(beta_vals))
 
 
-def _load_and_average_data(file_list):
-    """Load and average correlation data from multiple files."""
+def _load_and_average_data(file_list, average_after_fft=True):
+    """Load and average correlation data from multiple files.
+    
+    Parameters:
+    file_list: List of file paths to load
+    average_after_fft: If True, compute FFT for each sample and average spectra.
+                      If False, average time-domain data (only works if time arrays match).
+    
+    Returns:
+    If average_after_fft=False: (mean_correlation, reference_time)
+    If average_after_fft=True: (mean_spectral_function, omega, all_time_arrays)
+    """
     all_data = []
     
     for file_path in file_list:
@@ -263,14 +319,49 @@ def _load_and_average_data(file_list):
             print(f"    Error reading {file_path}: {e}")
     
     if not all_data:
-        return None, None
+        return None, None, None if average_after_fft else None, None
     
-    # Average correlation functions
-    reference_time = all_data[0][0]
-    all_complex_values = np.vstack([data[1] for data in all_data])
-    mean_correlation = np.mean(all_complex_values, axis=0)
+    if not average_after_fft:
+        # Original behavior: average in time domain
+        # Warning: assumes all time arrays are identical!
+        reference_time = all_data[0][0]
+        all_complex_values = np.vstack([data[1] for data in all_data])
+        mean_correlation = np.mean(all_complex_values, axis=0)
+        return mean_correlation, reference_time
     
-    return mean_correlation, reference_time
+    else:
+        # New behavior: average after FFT
+        # This is more robust when time arrays differ between samples
+        print(f"    Computing FFT for {len(all_data)} samples individually...")
+        
+        # Check if time arrays are consistent
+        time_arrays_match = all(np.array_equal(all_data[0][0], d[0]) for d in all_data)
+        if not time_arrays_match:
+            print(f"    WARNING: Time arrays differ between samples - averaging after FFT is recommended!")
+        
+        all_spectra = []
+        omega_ref = None
+        
+        for time, correlation in all_data:
+            # Prepare full time range
+            t_full, C_full = _prepare_time_data(correlation, time)
+            
+            # Subtract mean
+            C_full = C_full - np.mean(C_full)
+            
+            # Apply broadening and compute FFT
+            gamma = 0.15
+            S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
+            
+            all_spectra.append(S_omega_real)
+            if omega_ref is None:
+                omega_ref = omega
+        
+        # Average spectra
+        mean_spectrum = np.mean(all_spectra, axis=0)
+        print(f"    Averaged {len(all_spectra)} spectra in frequency domain")
+        
+        return mean_spectrum, omega_ref, [d[0] for d in all_data]
 
 
 def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
