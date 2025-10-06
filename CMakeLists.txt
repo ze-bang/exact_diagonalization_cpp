@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 
 # Options (define before project)
-option(WITH_CUDA "Build with CUDA support" OFF)
+option(WITH_CUDA "Build with CUDA support" ON)
 option(WITH_MPI "Build with MPI support" ON)
 
 # Set languages based on options
