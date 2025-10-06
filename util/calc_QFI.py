@@ -1798,8 +1798,8 @@ if __name__ == "__main__":
     across_QFI = sys.argv[2] if len(sys.argv) > 2 else 'False'
     across_QFI = across_QFI.lower() == 'true'
     if across_QFI:
-        # parse_QFI_across_Jpm(data_dir)
-        # parse_QFI_across_hi(data_dir)
+        parse_QFI_across_Jpm(data_dir)
+        parse_QFI_across_hi(data_dir)
         plot_heatmaps_from_processed_data(data_dir)
     else:
         parse_QFI_data_new(data_dir)
