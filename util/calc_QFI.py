@@ -19,7 +19,7 @@ try:
     HAS_MPI = True
 except ImportError:
     HAS_MPI = False
-    print("Warning: mpi4py not available. Running in serial mode.")
+    sys.exit(1)
 
 # NumPy compatibility: use trapezoid (new) or trapz (old)
 if hasattr(np, 'trapezoid'):
@@ -531,8 +531,8 @@ def _extract_positive_frequencies(S_omega_real, omega):
     
     # Calculate compensation factor
     integral_after = np_trapz(s_omega_pos, omega_pos)
-    compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
-    
+    # compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
+    compensation_factor = 1
     s_omega_compensated = s_omega_pos * compensation_factor
     
     print(f"    Compensation factor: {compensation_factor:.6f}")
@@ -1193,31 +1193,60 @@ def plot_heatmaps_from_processed_data(data_dir):
     """Plot heatmaps and fixed-beta line plots by reading processed QFI data from subdirectories.
        Only plot rows where there is no NaN, and save all intermediate and plot data."""
     
+    print(f"\n{'='*70}")
+    print(f"Starting heatmap plotting from processed data")
+    print(f"Data directory: {data_dir}")
+    print(f"{'='*70}\n")
+    
     # Step 1: Load all QFI and derivative data
     all_qfi_data, all_derivative_data = load_processed_data(data_dir)
+    
+    print(f"Loaded QFI data for {len(all_qfi_data)} species")
+    print(f"Loaded derivative data for {len(all_derivative_data)} species")
     
     # Step 2: Create output directory
     plot_outdir = os.path.join(data_dir, 'plots')
     os.makedirs(plot_outdir, exist_ok=True)
+    print(f"Output directory: {plot_outdir}")
     
     # Step 3: Save raw data points
     save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir)
     
     # Step 4: Process and plot QFI heatmaps
+    print(f"\n{'='*70}")
+    print("Processing QFI heatmaps...")
+    print(f"{'='*70}")
     for species, data_points in all_qfi_data.items():
         if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir, 
-                data_type='qfi', ref_target=0.08
-            )
+            try:
+                process_species_heatmap(
+                    species, data_points, plot_outdir, 
+                    data_type='qfi', ref_target=0.08
+                )
+            except Exception as e:
+                print(f"ERROR processing QFI heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
     
     # Step 5: Process and plot derivative heatmaps
+    print(f"\n{'='*70}")
+    print("Processing derivative heatmaps...")
+    print(f"{'='*70}")
     for species, data_points in all_derivative_data.items():
         if data_points:
-            process_species_heatmap(
-                species, data_points, plot_outdir,
-                data_type='derivative', ref_target=0.09
-            )
+            try:
+                process_species_heatmap(
+                    species, data_points, plot_outdir,
+                    data_type='derivative', ref_target=0.09
+                )
+            except Exception as e:
+                print(f"ERROR processing derivative heatmap for {species}: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    print(f"\n{'='*70}")
+    print("Heatmap plotting complete!")
+    print(f"{'='*70}\n")
 
 
 def load_processed_data(data_dir):
@@ -1311,23 +1340,41 @@ def save_raw_data_points(all_qfi_data, all_derivative_data, plot_outdir):
 def process_species_heatmap(species, data_points, plot_outdir, data_type, ref_target):
     """Process and create heatmaps for a single species."""
     
+    print(f"\n{'='*60}")
+    print(f"Processing heatmap for species: {species}, type: {data_type}")
+    print(f"Number of data points: {len(data_points)}")
+    
     # Convert data to array
     arr = np.array(data_points, dtype=float)
     jpm_vals, beta_vals, values = arr[:, 0], arr[:, 1], arr[:, 2]
     
+    print(f"Jpm range: [{jpm_vals.min():.3f}, {jpm_vals.max():.3f}]")
+    print(f"Beta range: [{beta_vals.min():.3f}, {beta_vals.max():.3f}]")
+    print(f"Value range: [{values.min():.3f}, {values.max():.3f}]")
+    
     # Get beta grid
     target_beta = get_beta_grid(jpm_vals, beta_vals, ref_target)
     if target_beta.size < 2:
+        print(f"WARNING: Insufficient beta grid size ({target_beta.size}). Skipping species.")
         return
+    
+    print(f"Target beta grid size: {target_beta.size}")
     
     # Split into positive and negative Jpm
     jpm_neg, jpm_pos = split_jpm_values(jpm_vals)
+    
+    print(f"Negative Jpm values: {jpm_neg.size}, Positive Jpm values: {jpm_pos.size}")
     
     # Interpolate data onto regular grid
     Z_neg, Z_pos = interpolate_to_grid(
         jpm_vals, beta_vals, values, 
         jpm_neg, jpm_pos, target_beta
     )
+    
+    if Z_neg is not None:
+        print(f"Z_neg shape: {Z_neg.shape}, NaN count: {np.isnan(Z_neg).sum()}")
+    if Z_pos is not None:
+        print(f"Z_pos shape: {Z_pos.shape}, NaN count: {np.isnan(Z_pos).sum()}")
     
     # Save grids
     save_grids(species, target_beta, jpm_neg, jpm_pos, 
@@ -1336,18 +1383,34 @@ def process_species_heatmap(species, data_points, plot_outdir, data_type, ref_ta
     # Filter rows with no NaN
     filtered_data = filter_nan_rows(target_beta, Z_neg, Z_pos, True)
     
+    print(f"Filtered data keys: {filtered_data.keys()}")
+    
     # Save filtered grids
     save_filtered_grids(species, filtered_data, jpm_neg, jpm_pos, 
                        plot_outdir, data_type)
     
     # Create plots
-    create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, 
-                        plot_outdir, data_type)
+    try:
+        create_heatmap_plots(species, filtered_data, jpm_neg, jpm_pos, 
+                            plot_outdir, data_type)
+        print(f"Successfully created heatmap plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating heatmap plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Create line plots at fixed beta
-    create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, 
-                           jpm_neg, jpm_pos, filtered_data, 
-                           plot_outdir, data_type)
+    try:
+        create_fixed_beta_plots(species, target_beta, Z_neg, Z_pos, 
+                               jpm_neg, jpm_pos, filtered_data, 
+                               plot_outdir, data_type)
+        print(f"Successfully created fixed beta plots for {species}")
+    except Exception as e:
+        print(f"ERROR creating fixed beta plots for {species}: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print(f"{'='*60}\n")
 
 
 def get_beta_grid(jpm_vals, beta_vals, ref_target):
@@ -1425,6 +1488,11 @@ def filter_nan_rows(target_beta, Z_neg, Z_pos, naive = False):
         result['Z_pos_f'] = Z_pos
         result['beta_neg_f'] = target_beta
         result['beta_pos_f'] = target_beta
+        # Create masks for naive mode too (all True if data exists)
+        if Z_neg is not None and Z_neg.size > 0:
+            result['mask_neg'] = np.ones(len(target_beta), dtype=bool)
+        if Z_pos is not None and Z_pos.size > 0:
+            result['mask_pos'] = np.ones(len(target_beta), dtype=bool)
         return result
     else:
         if Z_neg is not None and Z_neg.size > 0:
