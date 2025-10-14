@@ -334,6 +334,7 @@ EDResults exact_diagonalization_core(
 
 
         case DiagonalizationMethod::mTPQ_CUDA:
+#if defined(WITH_CUDA)
             std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
 
             microcanonical_tpq_unified(H, hilbert_space_dim,
@@ -347,6 +348,10 @@ EDResults exact_diagonalization_core(
                             params.omega_min, params.omega_max,
                             params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size,
                             /*use_cuda=*/true);
+#else
+            std::cerr << "Error: CUDA support not enabled. Please rebuild with WITH_CUDA=ON or use DiagonalizationMethod::mTPQ instead." << std::endl;
+            throw std::runtime_error("CUDA not available");
+#endif
             break;
         
 

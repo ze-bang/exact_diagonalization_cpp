@@ -13,6 +13,8 @@
 #include <Eigen/Dense>
 #include <set>
 #include <queue>
+#include <map>
+#include <tuple>
 
 // Define complex number type and matrix type for convenience
 using Complex = std::complex<double>;
@@ -2411,5 +2413,128 @@ public:
         }
     }
 };
+
+
+/**
+ * SumOperator class represents a sum of single-site operators with position-dependent phases
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
+ */
+class TransverseOperator : public Operator {
+public:
+    /**
+     * Constructor for sum operator with momentum-dependent phases
+     * @param num_site Total number of sites/qubits
+     * @param spin_l Spin quantum number
+     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * @param Q_vector Momentum vector [Qx, Qy, Qz]
+     * @param positions_file Path to file containing site positions
+     */
+    TransverseOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::vector<double>& v, const std::string& positions_file) 
+        : Operator(num_site, spin_l) {
+        
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        // Read positions from file
+        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        // Calculate phase factors for each site
+        std::vector<Complex> phase_factors(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+
+        for (int i = 0; i < num_site; ++i) {
+            if (positions[i].size() < 3) {
+                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
+            }
+            int sublattice = i % 4;
+            double factor = z_mu[sublattice][0]*v[0] + z_mu[sublattice][1]*v[1] + z_mu[sublattice][2]*v[2];
+            double phase = Q_vector[0] * positions[i][0] + 
+                          Q_vector[1] * positions[i][1] + 
+                          Q_vector[2] * positions[i][2];
+            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site)*factor, std::sin(phase)/std::sqrt(num_site)*factor);
+        }
+
+        // Add transforms for each site with appropriate phase factor
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase_factor = phase_factors[site];
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    // Sz operator
+                    int bit = (basis >> site) & 1;
+                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
+                } else {
+                    // S+ or S- operator
+                    if (((basis >> site) & 1) != op) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * double(spin_l * 2)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+
+    /**
+     * Read site positions from file
+     * Expected format: Each line contains x y z coordinates for one site
+     * @param filename Path to positions file
+     * @param expected_sites Expected number of sites
+     * @return Vector of position vectors
+     */
+    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, int expected_sites) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open positions file: " + filename);
+        }
+        
+        std::vector<std::vector<double>> positions(expected_sites);
+        std::string line;
+        
+        // Skip the header lines (comments starting with #)
+        while (std::getline(file, line) && line[0] == '#') {
+            // Skip header lines
+        }
+        
+        // Process the first non-header line (if we stopped at one)
+        bool process_current_line = !line.empty() && line[0] != '#';
+        
+        do {
+            if (process_current_line) {
+                std::istringstream iss(line);
+                int site_id, matrix_index, sublattice_index;
+                double x, y, z;
+                
+                if (iss >> site_id >> matrix_index >> sublattice_index >> x >> y >> z) {
+                    if (site_id >= 0 && site_id < expected_sites) {
+                        positions[site_id] = {x, y, z};
+                    }
+                }
+            }
+            process_current_line = true;
+        } while (std::getline(file, line));
+        
+        // Verify all positions were loaded
+        for (int i = 0; i < expected_sites; ++i) {
+            if (positions[i].empty()) {
+                throw std::runtime_error("Missing position data for site " + std::to_string(i));
+            }
+        }
+        
+        return positions;
+    }
+
+};
+
 
 #endif // CONSTRUCT_HAM_H
