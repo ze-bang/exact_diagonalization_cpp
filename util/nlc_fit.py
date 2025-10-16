@@ -1,15 +1,30 @@
+#!/usr/bin/env python3
+"""
+NLCE Fitting Tool for Specific Heat Data
+
+This script fits Numerical Linked Cluster Expansion (NLCE) calculations
+to experimental specific heat data using various optimization methods.
+"""
+
 import os
 import sys
 import subprocess
 import argparse
+import logging
+import tempfile
+import shutil
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing import Pool
+
 import numpy as np
+import matplotlib.pyplot as plt
 from scipy.optimize import minimize, NonlinearConstraint, differential_evolution, basinhopping, dual_annealing
 from scipy.stats import qmc
 from scipy.interpolate import interp1d
 from scipy.ndimage import gaussian_filter1d
-from multiprocessing import Pool
 
-# Bayesian optimization imports
+# Bayesian optimization imports (optional dependency)
 try:
     from skopt import gp_minimize, forest_minimize, gbrt_minimize
     from skopt.space import Real
@@ -20,14 +35,7 @@ except ImportError:
     BAYESIAN_OPT_AVAILABLE = False
     print("Warning: scikit-optimize not available. Install with: pip install scikit-optimize")
     print("Bayesian optimization methods will not be available.")
-import logging
-import tempfile
-import shutil
-import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-#!/usr/bin/env python3
-import matplotlib.pyplot as plt
 
 class NumpyJSONEncoder(json.JSONEncoder):
     """Custom JSON encoder to handle NumPy data types"""
@@ -42,6 +50,9 @@ class NumpyJSONEncoder(json.JSONEncoder):
             return obj.tolist()
         return super().default(obj)
 
+
+
+
 def setup_logging(log_file):
     """Set up logging to file and console"""
     logging.basicConfig(
@@ -53,12 +64,18 @@ def setup_logging(log_file):
         ]
     )
 
+
+
+
 def load_experimental_data(file_path):
     """Load experimental data from the specified file"""
     data = np.loadtxt(file_path)
     temp = data[:, 0]  # Temperature (K)
     spec_heat = data[:, 1]  # Specific heat (J*mol/K)
     return temp, spec_heat
+
+
+
 
 def load_multiple_experimental_data(exp_data_configs):
     """Load experimental data from multiple files with their respective parameters"""
@@ -79,6 +96,8 @@ def load_multiple_experimental_data(exp_data_configs):
             dataset['temp_max'] = config['temp_max']
         exp_datasets.append(dataset)
     return exp_datasets
+
+
 
 def apply_gaussian_broadening(temp, spec_heat, sigma, broadening_type='linear'):
     """
@@ -170,14 +189,12 @@ def get_symmetry_equivalent_field_dirs(field_dir):
     """
     Generate all cubic symmetry-equivalent field directions for a given field_dir.
     For [1,1,1], returns all 8 [±1,±1,±1] directions (normalized).
+    For [1,0,0], returns all 6 [±1,0,0], [0,±1,0], [0,0,±1] directions.
     """
-    # Only handle [1,1,1] and [1,0,0] style directions for now
     field_dir = np.array(field_dir, dtype=float)
-    # Check if field_dir is close to [1,1,1] (within tolerance)
-    print("Checking field direction:", field_dir)
+    
     if np.allclose(np.abs(field_dir), [1/np.sqrt(3)]*3, atol=1e-6) or np.allclose(np.abs(field_dir), [1,1,1], atol=1e-6):
         # All 8 permutations of [±1,±1,±1]
-        print("Generating symmetry-equivalent field directions for [1,1,1] style direction")
         dirs = []
         for sx in [-1, 1]:
             for sy in [-1, 1]:
@@ -201,10 +218,11 @@ def get_symmetry_equivalent_field_dirs(field_dir):
         return [v]
 
 
+
 def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
     # Extract J parameters (first 3) - other parameters are handled in calc_chi_squared
-    print("Running NLCE with parameters:", params)
+    logging.info(f"Running NLCE with parameters: {params}")
 
     Jxx, Jyy, Jzz = params[:3]
     
@@ -212,14 +230,11 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
     h_value = h_field if h_field is not None else fixed_params["h"]
     field_dir = fixed_params["field_dir"]
     
-    # If h_value is nonzero, average over all symmetry-equivalent field directions
-    # if h_value != 0:
-    #     field_dirs = get_symmetry_equivalent_field_dirs(field_dir)
-    # else:
+    # Currently using single field direction (symmetry averaging commented out)
     field_dirs = [field_dir]
     all_calc_temp = []
     all_calc_spec_heat = []
-    print("Symmetry-equivalent field directions:", field_dirs)
+    
     for sym_field_dir in field_dirs:
         # Determine temperature range
         temp_min = temp_range['temp_min'] if temp_range and 'temp_min' in temp_range else fixed_params["temp_min"]
@@ -285,6 +300,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             cmd.append('--measure_spin')
         if random_transverse_field > 0:
             cmd.extend(['--random_field_width', f'{random_transverse_field:.12f}'])
+            
         if n_runs > 1:
             num_workers = fixed_params.get("num_workers", os.cpu_count())
             logging.info(f"Running {n_runs} NLCE instances in parallel with {num_workers} workers (symmetry field_dir: {sym_field_dir})")
@@ -297,7 +313,6 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}, field_dir={sym_field_dir}")
             cmd.extend(['--base_dir', work_dir])
             try:
-                # logging.info(f"Command: {' '.join(cmd)}")
                 env = os.environ.copy()
                 base_seed = int(fixed_params.get("disorder_seed_base", 123456))
                 env['NLC_DISORDER_SEED'] = str(base_seed)
@@ -315,8 +330,9 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
                 logging.error(f"Error running NLCE: {e}")
                 logging.error(f"Stdout: {e.stdout.decode('utf-8')}")
                 logging.error(f"Stderr: {e.stderr.decode('utf-8')}")
-                logging.info("NLCE calculation failed, trying with lanczos")
+                logging.info("NLCE calculation failed")
                 continue
+                
         # Average over n_runs for this field_dir
         if len(calc_spec_heat_list) == 0:
             logging.error(f"All NLCE runs failed for field_dir {sym_field_dir}")
@@ -332,10 +348,12 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             averaged_spec_heat /= len(calc_spec_heat_list)
             all_calc_temp.append(final_calc_temp)
             all_calc_spec_heat.append(averaged_spec_heat)
+            
     # Now average over all symmetry-equivalent field directions
     if len(all_calc_spec_heat) == 0:
         logging.error("All NLCE runs failed for all symmetry-equivalent field directions")
         return np.array([]), np.array([])
+        
     # Use the temperature grid from the first successful run
     final_calc_temp = all_calc_temp[0]
     averaged_spec_heat = np.zeros_like(all_calc_spec_heat[0])
@@ -343,6 +361,7 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
         averaged_spec_heat += spec_heat
     averaged_spec_heat /= len(all_calc_spec_heat)
     return final_calc_temp, averaged_spec_heat
+
 
 def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     """Interpolate calculated data to match experimental temperature points"""
@@ -361,6 +380,12 @@ def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     # Interpolate at experimental temperatures
     interp_spec_heat = interp_func(exp_temp)
     
+    # Replace NaN values with zeros
+    interp_spec_heat = np.nan_to_num(interp_spec_heat)
+    
+    return interp_spec_heat
+
+
     # Replace NaN values with zeros
     interp_spec_heat = np.nan_to_num(interp_spec_heat)
     
@@ -444,10 +469,8 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         # Interpolate calculated data to match experimental temperature points
         calc_interp = interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp)
         
-        # Plot results for this dataset if in plot-only mode
+        # Plot results for this dataset
         if len(calc_temp) > 0:
-            import matplotlib.pyplot as plt
-            
             plt.figure(figsize=(12, 10))
             
             # Plot 1: Experimental vs Calculated with weight visualization
@@ -576,8 +599,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     if fit_broadening:
         sigmas = best_params[3:3+n_datasets] if len(best_params) > 3 else [0.0] * n_datasets
     else:
-        # sigmas = [5, 0.4771, 0.4771, 0.4771]
-        sigmas = [0, 0, 0, 0]
+        sigmas = [0.0] * n_datasets
     
     # Extract g_renorm if fitted
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
@@ -1062,8 +1084,6 @@ def plot_bayesian_convergence(result, output_dir):
         return
     
     try:
-        import matplotlib.pyplot as plt
-        
         plt.figure(figsize=(12, 8))
         
         # Plot convergence
@@ -1133,6 +1153,8 @@ def plot_bayesian_convergence(result, output_dir):
     except Exception as e:
         logging.warning(f"Error creating Bayesian convergence plot: {e}")
 
+
+
 def main():
     parser = argparse.ArgumentParser(description='Fit NLCE calculations to experimental specific heat data')
     
@@ -1156,8 +1178,8 @@ def main():
     parser.add_argument('--initial_sigma', type=float, default=0.1, help='Initial guess for Gaussian broadening width')
     parser.add_argument('--initial_g_renorm', type=float, default=1.0, help='Initial guess for g-factor renormalization')
     parser.add_argument('--initial_random_transverse_field', type=float, default=0.0, help='Initial guess for random transverse field')
-    parser.add_argument('--bound_min', type=float, default=-10.0, help='Lower bound for J parameters')
-    parser.add_argument('--bound_max', type=float, default=10.0, help='Upper bound for J parameters')
+    parser.add_argument('--bound_min', type=float, default=-5.0, help='Lower bound for J parameters')
+    parser.add_argument('--bound_max', type=float, default=5.0, help='Upper bound for J parameters')
     parser.add_argument('--sigma_bound_min', type=float, default=0.0, help='Lower bound for sigma parameters')
     parser.add_argument('--sigma_bound_max', type=float, default=10.0, help='Upper bound for sigma parameters')
     parser.add_argument('--g_renorm_bound_min', type=float, default=0.8, help='Lower bound for g_renorm parameter')
@@ -1234,13 +1256,10 @@ def main():
         work_dir = args.work_dir
         os.makedirs(work_dir, exist_ok=True)
 
-
     # Generate clusters once before optimization starts to avoid redundant generation
     if not args.skip_cluster_gen:
         # Check if we need multiple runs (for random transverse field fitting)
         n_runs = args.random_field_n_runs if args.fit_random_transverse_field else 1
-        
-        # Parallel cluster generation using subprocess
         
         def generate_clusters_subprocess(run_idx):
             """Generate clusters for a single run using subprocess"""
@@ -1264,7 +1283,7 @@ def main():
         
         # Use ThreadPoolExecutor for parallel subprocess execution
         max_workers = min(args.num_workers, n_runs)
-        print(f"Using {max_workers} parallel workers for cluster generation")
+        logging.info(f"Using {max_workers} parallel workers for cluster generation")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all tasks
             futures = {executor.submit(generate_clusters_subprocess, i): i for i in range(n_runs)}
@@ -1285,7 +1304,7 @@ def main():
             
             if failed > 0:
                 logging.warning("Some cluster generations failed, but continuing with optimization")
-            
+    else:
         # Single run - generate clusters in main work directory
         logging.info(f"Generating pyrochlore clusters up to order {args.max_order}")
         cluster_gen_cmd = [
@@ -1300,7 +1319,6 @@ def main():
         except subprocess.CalledProcessError as e:
             logging.error(f"Error generating clusters: {e}")
             logging.error("Continuing without pre-generating clusters")
-
     
     # Define fixed parameters for NLCE
     fixed_params = {
@@ -1353,8 +1371,6 @@ def main():
                 'weight': 1.0
             }]
             logging.info(f"Loaded {len(exp_temp)} data points")
-        
-
         
         # Filter experimental data based on temperature range for all datasets
         filtered_datasets = []
