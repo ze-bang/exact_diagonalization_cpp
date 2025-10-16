@@ -271,10 +271,16 @@ int main(int argc, char* argv[]) {
     int N = static_cast<int>(N64);
     
     // Define momentum points
+    // const std::vector<std::vector<double>> momentum_points = {
+    //     {0.0, 0.0, 0.0},
+    //     {0, 0, 2*M_PI},
+    //     {4*M_PI, 4*M_PI, 0}
+    // };
+
     const std::vector<std::vector<double>> momentum_points = {
-        {0.0, 0.0, 0.0},
-        {0, 0, 2*M_PI},
-        {4*M_PI, 4*M_PI, 0}
+        // {0.0, 0.0, 0.0},
+        // {0, 0, 2*M_PI},
+        {0, 0, 4*M_PI}
     };
     
     // Create output directory (only rank 0)
@@ -484,10 +490,10 @@ int main(int argc, char* argv[]) {
         transverse_basis_2.resize(num_momentum);
         transverse_basis_1[0] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
         transverse_basis_2[0] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_1[2] = {0.0, 0.0, 1.0};
-        transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        // transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
+        // transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        // transverse_basis_1[2] = {0.0, 0.0, 1.0};
+        // transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
         
         if (rank == 0) {
             std::cout << "Transverse bases for momentum points:" << std::endl;
