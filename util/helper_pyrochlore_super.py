@@ -4,6 +4,7 @@ import os
 import re
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib as mpl
+from matplotlib.ticker import NullFormatter
 
 import matplotlib.pyplot as plt
 
@@ -419,50 +420,16 @@ def write_two_body_correlations(output_dir, Op1, Op2, N, file_name):
                        f" {0:8f}   " \
                        f"\n")
 
+
 def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=None):
     """
-    Plot the cluster with tetrahedra surfaces and NN connections.
-    Tetrahedra are colored using the requested scheme:
-      - down (negative signed volume): (59/256, 137/256, 255/256)
-      - up   (positive signed volume): (42/256, 232/256, 137/256)
+    Plot the cluster showing sites, bonds, and tetrahedra with muted sublattice colors
+    and two-tone tetrahedron shading. Adjust POV for clearer 3D perception.
     """
     try:
         import matplotlib.pyplot as plt
 
-        # ---------- helpers ----------
-        def find_tetrahedra_from_edges(vertices_dict, edge_list):
-            # Build adjacency
-            adj = {v: set() for v in vertices_dict}
-            for a, b in edge_list:
-                adj[a].add(b)
-                adj[b].add(a)
-            # Find all 4-cliques (K4)
-            tets = set()
-            verts = sorted(vertices_dict.keys())
-            for a in verts:
-                na = adj[a]
-                neigh = [b for b in na if b > a]
-                ln = len(neigh)
-                for i in range(ln):
-                    b = neigh[i]
-                    nb = adj[b]
-                    for j in range(i + 1, ln):
-                        c = neigh[j]
-                        if c not in nb:
-                            continue
-                        common = (na & nb & adj[c])
-                        for d in [x for x in common if x > c]:
-                            tets.add(tuple(sorted((a, b, c, d))))
-            return [tuple(t) for t in tets]
-
-        def signed_volume(a, b, c, d):
-            # Signed volume of tetrahedron (a,b,c,d)
-            v1 = b - a
-            v2 = c - a
-            v3 = d - a
-            return np.linalg.det(np.vstack([v1, v2, v3]))
-
-        # ---------- style ----------
+        # Publication-quality params
         mpl.rcParams['font.family'] = 'serif'
         mpl.rcParams['font.serif'] = ['Computer Modern Roman', 'Times New Roman']
         mpl.rcParams['font.size'] = 10
@@ -477,121 +444,116 @@ def plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices=N
         mpl.rcParams['xtick.major.width'] = 0.8
         mpl.rcParams['ytick.major.width'] = 0.8
 
-        fig = plt.figure(figsize=(7, 7/1.618))
+        # Helper: equal aspect ratio
+        def set_equal_aspect_3d(ax, pts):
+            pts = np.asarray(pts)
+            mins = pts.min(axis=0)
+            maxs = pts.max(axis=0)
+            centers = (mins + maxs) / 2.0
+            max_range = ((maxs - mins).max()) / 2.0
+            ax.set_xlim(centers[0] - max_range, centers[0] + max_range)
+            ax.set_ylim(centers[1] - max_range, centers[1] + max_range)
+            ax.set_zlim(centers[2] - max_range, centers[2] + max_range)
+
+        # Helper: plot one tetrahedron with requested color scheme
+        def _plot_tetra(ax, coords, down=1, a=0.35, ap=1):
+            # Two-tone colors per user's spec
+            c = (59/256, 137/256, 255/256) if down == 1 else (42/256, 232/256, 137/256)
+            tri_idx = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+            ax.plot_trisurf(coords[:, 0], coords[:, 1], coords[:, 2],
+                            triangles=tri_idx,
+                            edgecolor=[[0.1, 0.1, 0.1]],
+                            linewidth=0.6, alpha=a, shade=True, color=c, zorder=0)
+
+        # Build adjacency
+        adj = {v: set() for v in vertices}
+        for a, b in edges:
+            adj[a].add(b)
+            adj[b].add(a)
+
+        # Detect tetrahedra as 4-cliques in NN graph
+        tetra_indices = []
+        for a in adj:
+            for b in [x for x in adj[a] if x > a]:
+                common_ab = adj[a].intersection(adj[b])
+                for c in [x for x in common_ab if x > b]:
+                    common_abc = common_ab.intersection(adj[c])
+                    for d in [x for x in common_abc if x > c]:
+                        tetra_indices.append((a, b, c, d))
+
+        # Precompute positions and defaults
+        v_ids = list(vertices.keys())
+        pos_arr = np.array([vertices[v] for v in v_ids])
+
+        # Figure
+        fig = plt.figure(figsize=(7.2, 7.2/1.35))
         ax = fig.add_subplot(111, projection='3d')
 
-        # ---------- data ----------
-        positions_array = np.array([vertices[v] for v in sorted(vertices.keys())])
+        # Plot tetrahedra first
+        for (a, b, c, d) in tetra_indices:
+            coords = np.array([vertices[a], vertices[b], vertices[c], vertices[d]], dtype=float)
+            # Orientation via signed volume to choose color
+            V = np.linalg.det(np.vstack([coords[0]-coords[3], coords[1]-coords[3], coords[2]-coords[3]])) / 6.0
+            down = 1 if V < 0 else -1
+            _plot_tetra(ax, coords, down=down, a=0.35, ap=1)
 
-        # ---------- plot tetrahedra ----------
-        # Colors from user scheme
-        c_down = (59/256, 137/256, 255/256)   # down
-        c_up   = (42/256, 232/256, 137/256)   # up
-        tris = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+        # Muted, colorblind-friendly sublattice palette
+        muted_colors = ['#0072B2', '#009E73', '#E69F00', '#CC79A7']
 
-        tetrahedra = find_tetrahedra_from_edges(vertices, edges)
-        down_added, up_added = False, False
+        # Plot vertices by sublattice
+        if sublattice_indices is None:
+            sublattice_indices = {}
 
-        for tet in tetrahedra:
-            coords = np.array([vertices[i] for i in tet])
-            vol = signed_volume(coords[0], coords[1], coords[2], coords[3])
-            is_up = vol > 0
-            color = c_up if is_up else c_down
-            # Plot surface
-            ax.plot_trisurf(coords[:, 0], coords[:, 1], coords[:, 2],
-                            triangles=tris, edgecolor=[[0.1, 0.1, 0.1]],
-                            linewidth=0.6, alpha=0.28, shade=True, color=color,
-                            antialiased=True,
-                            label=('Up tetra' if is_up and not up_added else
-                                   'Down tetra' if (not is_up) and not down_added else None))
-            if is_up and not up_added:
-                up_added = True
-            if (not is_up) and not down_added:
-                down_added = True
+        for sub_idx in range(4):
+            sub_ids = [v for v in vertices if sublattice_indices.get(v, v % 4) == sub_idx]
+            if not sub_ids:
+                continue
+            sub_positions = np.array([vertices[v] for v in sub_ids])
+            ax.scatter(sub_positions[:, 0], sub_positions[:, 1], sub_positions[:, 2],
+                        s=45, c=muted_colors[sub_idx], marker='o', alpha=0.9,
+                        edgecolors='black', linewidth=0.4,
+                        label=f'Sublattice {sub_idx}', depthshade=True, zorder=2)
 
-        # ---------- plot edges ----------
+        # Plot edges faintly
         for v1, v2 in edges:
             p1 = np.array(vertices[v1])
             p2 = np.array(vertices[v2])
             ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
-                    color='k', alpha=0.12, linewidth=0.4, zorder=1)
+                    color='k', alpha=0.5, linewidth=0.5, zorder=1)
 
-        # ---------- plot sites ----------
-        if sublattice_indices is None:
-            sublattice_indices = {v: (v % 4) for v in vertices}
+        # Aspect and limits
+        set_equal_aspect_3d(ax, list(vertices.values()))
 
-        colors_sites = ['#000000', '#000000', '#000000', '#000000']
-        verts_sorted = sorted(vertices.keys())
-        pos_sorted = np.array([vertices[v] for v in verts_sorted])
-        subs = np.array([sublattice_indices.get(v, v % 4) for v in verts_sorted])
+        # POV: isometric-like view for better 3D readability
+        ax.view_init(elev=24, azim=135)
 
-        for sub_idx in range(4):
-            mask = (subs == sub_idx)
-            if np.any(mask):
-                sub_pos = pos_sorted[mask]
-                ax.scatter(sub_pos[:, 0], sub_pos[:, 1], sub_pos[:, 2],
-                           s=30, c=colors_sites[sub_idx], marker='o', alpha=0.85,
-                           edgecolors='black', linewidth=0.4,
-                           label=f'Sublattice {sub_idx}', depthshade=True)
-
-        # Optional: label site indices (keep subtle)
-        for v_id, pos in vertices.items():
-            ax.text(pos[0], pos[1], pos[2], str(v_id),
-                    fontsize=5, ha='center', va='bottom',
-                    color='black', alpha=0.7)
-
-        # ---------- axes/limits ----------
-        all_pos = np.array(list(vertices.values()))
-        max_range = np.max(all_pos)
-        min_range = np.min(all_pos)
-        margin = 0.1 * (max_range - min_range + 1e-9)
-
-        ax.set_xlim([min_range - margin, max_range + margin])
-        ax.set_ylim([min_range - margin, max_range + margin])
-        ax.set_zlim([min_range - margin, max_range + margin])
-
-        ax.set_xlabel('x (a.u.)', fontsize=12, labelpad=8)
-        ax.set_ylabel('y (a.u.)', fontsize=12, labelpad=8)
-        ax.set_zlabel('z (a.u.)', fontsize=12, labelpad=8)
-
-        # ---------- viewpoint (POV) ----------
-        # Chosen for a clearer 3D perception
-        ax.view_init(elev=25, azim=135)
-        try:
-            ax.dist = 9  # step back a bit for depth perception
-        except Exception:
-            pass
-
-        # ---------- aesthetics ----------
-        ax.xaxis.pane.fill = False
-        ax.yaxis.pane.fill = False
-        ax.zaxis.pane.fill = False
-        ax.xaxis.pane.set_edgecolor('black')
-        ax.yaxis.pane.set_edgecolor('black')
-        ax.zaxis.pane.set_edgecolor('black')
-        ax.grid(True, alpha=0.3, linewidth=0.5)
+        # Show grid but hide axis numbers
+        ax.grid(True, alpha=0.35, linewidth=0.6)
+        ax.xaxis.set_major_formatter(NullFormatter())
+        ax.yaxis.set_major_formatter(NullFormatter())
+        ax.zaxis.set_major_formatter(NullFormatter())
 
         # Legend
-        lg = ax.legend(loc='upper left', frameon=True,
-                       fancybox=False, shadow=False,
-                       framealpha=0.9, edgecolor='black',
-                       borderpad=0.5, columnspacing=1.0,
-                       handlelength=1.5, handletextpad=0.5)
-        lg.get_frame().set_linewidth(0.5)
+        leg = ax.legend(loc='upper left', frameon=True,
+                        fancybox=False, shadow=False, framealpha=0.9,
+                        edgecolor='black', borderpad=0.5, columnspacing=1.0,
+                        handlelength=1.5, handletextpad=0.5)
+        leg.get_frame().set_linewidth(0.5)
 
-        plt.tight_layout(pad=0.5)
-
-        # Save
+        # Layout and save
         if not os.path.isdir(output_dir):
             os.makedirs(output_dir)
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.png", dpi=300, bbox_inches='tight', pad_inches=0.02)
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.pdf", bbox_inches='tight', pad_inches=0.02)
-        plt.savefig(f"{output_dir}/{cluster_name}_plot.eps", bbox_inches='tight', pad_inches=0.02)
 
-        # Optionally show (comment out in headless runs)
-        # plt.show()
+        plt.tight_layout(pad=0.6)
 
-        plt.close()
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.png",
+                    dpi=300, bbox_inches='tight', pad_inches=0.02)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.pdf",
+                    bbox_inches='tight', pad_inches=0.02)
+        plt.savefig(f"{output_dir}/{cluster_name}_plot.eps",
+                    bbox_inches='tight', pad_inches=0.02)
+
+        plt.close(fig)
         return True
 
     except ImportError:
