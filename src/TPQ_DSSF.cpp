@@ -127,13 +127,14 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 9) {
+    if (argc < 6 || argc > 10) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor" << std::endl;
-            std::cerr << "  dt,t_end (optional, only for taylor): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps] [unit_cell_size]" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | pedantic" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor/pedantic): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
+            std::cerr << "  unit_cell_size (optional, for pedantic mode): number of sublattices (default: 4)" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -163,8 +164,13 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    if (argc == 9) {
+    if (argc >= 9) {
         try { steps_opt = std::stoi(argv[8]); } catch (...) { steps_opt = -1; }
+    }
+    
+    int unit_cell_size = 4; // Default for pyrochlore
+    if (argc == 10) {
+        try { unit_cell_size = std::stoi(argv[9]); } catch (...) { unit_cell_size = 4; }
     }
 
     // Parse spin combinations
@@ -271,17 +277,17 @@ int main(int argc, char* argv[]) {
     int N = static_cast<int>(N64);
     
     // Define momentum points
-    // const std::vector<std::vector<double>> momentum_points = {
-    //     {0.0, 0.0, 0.0},
-    //     {0, 0, 2*M_PI},
-    //     {4*M_PI, 4*M_PI, 0}
-    // };
-
     const std::vector<std::vector<double>> momentum_points = {
-        // {0.0, 0.0, 0.0},
-        // {0, 0, 2*M_PI},
-        {0, 0, 4*M_PI}
+        {0.0, 0.0, 0.0},
+        {0, 0, 2*M_PI},
+        {4*M_PI, 4*M_PI, 0}
     };
+
+    // const std::vector<std::vector<double>> momentum_points = {
+    //     // {0.0, 0.0, 0.0},
+    //     // {0, 0, 2*M_PI},
+    //     {0, 0, 4*M_PI}
+    // };
     
     // Create output directory (only rank 0)
     std::string output_base_dir = directory + "/structure_factor_results";
@@ -354,11 +360,13 @@ int main(int argc, char* argv[]) {
     MPI_Bcast(file_sizes.data(), num_files, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
     
     // Build fine-grained task list for operator-level parallelization
-    // Each task is (state_idx, momentum_idx, combo_idx)
+    // Each task is (state_idx, momentum_idx, combo_idx, sublattice_i, sublattice_j)
     struct Task {
         int state_idx;
         int momentum_idx;
         int combo_idx;
+        int sublattice_i;
+        int sublattice_j;
         size_t weight;  // file_size as proxy for cost
     };
     
@@ -370,16 +378,35 @@ int main(int argc, char* argv[]) {
         if (method == "krylov" || method == "spin_correlation") {
             // These methods process entire states atomically
             for (int s = 0; s < num_files; s++) {
-                all_tasks.push_back({s, -1, -1, file_sizes[s]});
+                all_tasks.push_back({s, -1, -1, -1, -1, file_sizes[s]});
             }
             std::cout << "Parallelization: per-state (" << num_files << " tasks)" << std::endl;
+        } else if (method == "pedantic") {
+            // pedantic: parallelize across (state, momentum, combo, sublattice pairs)
+            // Only compute upper triangle: sublattice_i <= sublattice_j (symmetry)
+            int num_sublattice_pairs = unit_cell_size * (unit_cell_size + 1) / 2;
+            for (int s = 0; s < num_files; s++) {
+                for (int q = 0; q < num_momentum; q++) {
+                    for (int c = 0; c < num_combos; c++) {
+                        for (int sub_i = 0; sub_i < unit_cell_size; sub_i++) {
+                            for (int sub_j = sub_i; sub_j < unit_cell_size; sub_j++) {
+                                size_t task_weight = file_sizes[s] / (num_momentum * num_combos * num_sublattice_pairs);
+                                all_tasks.push_back({s, q, c, sub_i, sub_j, task_weight});
+                            }
+                        }
+                    }
+                }
+            }
+            std::cout << "Parallelization: per-sublattice-pair (upper triangle, " << all_tasks.size() << " tasks = "
+                      << num_files << " states × " << num_momentum << " momenta × "
+                      << num_combos << " combos × " << num_sublattice_pairs << " unique sublattice pairs)" << std::endl;
         } else {
             // taylor/global: can parallelize across (state, momentum, combo)
             for (int s = 0; s < num_files; s++) {
                 for (int q = 0; q < num_momentum; q++) {
                     for (int c = 0; c < num_combos; c++) {
                         size_t task_weight = file_sizes[s] / (num_momentum * num_combos);
-                        all_tasks.push_back({s, q, c, task_weight});
+                        all_tasks.push_back({s, q, c, -1, -1, task_weight});
                     }
                 }
             }
@@ -403,12 +430,13 @@ int main(int argc, char* argv[]) {
     
     // Broadcast all tasks (struct is POD-like)
     for (int i = 0; i < num_tasks; i++) {
-        int buf[3] = {all_tasks[i].state_idx, all_tasks[i].momentum_idx, all_tasks[i].combo_idx};
+        int buf[5] = {all_tasks[i].state_idx, all_tasks[i].momentum_idx, all_tasks[i].combo_idx, 
+                      all_tasks[i].sublattice_i, all_tasks[i].sublattice_j};
         size_t w = all_tasks[i].weight;
-        MPI_Bcast(buf, 3, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(buf, 5, MPI_INT, 0, MPI_COMM_WORLD);
         MPI_Bcast(&w, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
         if (rank != 0) {
-            all_tasks[i] = {buf[0], buf[1], buf[2], w};
+            all_tasks[i] = {buf[0], buf[1], buf[2], buf[3], buf[4], w};
         }
     }
     
@@ -476,7 +504,7 @@ int main(int argc, char* argv[]) {
     std::vector<std::array<double,3>> transverse_basis_1, transverse_basis_2;
     bool precomputed_U = false;
     
-    if (method == "taylor" || method == "global") {
+    if (method == "taylor" || method == "global" || method == "pedantic") {
         if (rank == 0) {
             std::cout << "Pre-computing time evolution operator (n_max=" << krylov_dim_or_nmax
                       << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
@@ -490,10 +518,10 @@ int main(int argc, char* argv[]) {
         transverse_basis_2.resize(num_momentum);
         transverse_basis_1[0] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
         transverse_basis_2[0] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        // transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
-        // transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        // transverse_basis_1[2] = {0.0, 0.0, 1.0};
-        // transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
+        transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        transverse_basis_1[2] = {0.0, 0.0, 1.0};
+        transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
         
         if (rank == 0) {
             std::cout << "Transverse bases for momentum points:" << std::endl;
@@ -513,6 +541,8 @@ int main(int argc, char* argv[]) {
         int state_idx = task.state_idx;
         int momentum_idx = task.momentum_idx;
         int combo_idx = task.combo_idx;
+        int sublattice_i = task.sublattice_i;
+        int sublattice_j = task.sublattice_j;
         
         int sample_index = sample_indices[state_idx];
         double beta = beta_values[state_idx];
@@ -624,6 +654,40 @@ int main(int argc, char* argv[]) {
                           << e.what() << std::endl;
                 return false;
             }
+        } else if (method == "pedantic") {
+            // Process single sublattice pair correlation at given (momentum, combo)
+            const auto &Q = momentum_points[momentum_idx];
+            int op_type_1 = spin_combinations[combo_idx].first;
+            int op_type_2 = spin_combinations[combo_idx].second;
+            
+            std::stringstream name_ss;
+            name_ss << spin_combination_names[combo_idx] 
+                    << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2]
+                    << "_sub" << sublattice_i << "_sub" << sublattice_j;
+            std::string obs_name = name_ss.str();
+            
+            try {
+                // Create sublattice operators for sites i and j
+                std::vector<double> Q_vec = {Q[0], Q[1], Q[2]};
+                SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
+                SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
+                
+                std::vector<Operator> obs_1 = {std::move(sub_op_1)};
+                std::vector<Operator> obs_2 = {std::move(sub_op_2)};
+                std::vector<std::string> obs_names = {obs_name};
+                
+                std::string pedantic_dir = output_dir + "/pedantic";
+                ensureDirectoryExists(pedantic_dir);
+                
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                    pedantic_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            } catch (const std::exception &e) {
+                std::cerr << "Rank " << rank << " failed sublattice operator construction for " 
+                          << obs_name << ": " << e.what() << std::endl;
+                return false;
+            }
         }
         
         return true;
@@ -694,7 +758,12 @@ int main(int argc, char* argv[]) {
                 if (all_tasks[task_id].momentum_idx >= 0) {
                     std::cout << " (state=" << all_tasks[task_id].state_idx 
                               << ", Q=" << all_tasks[task_id].momentum_idx
-                              << ", combo=" << all_tasks[task_id].combo_idx << ")";
+                              << ", combo=" << all_tasks[task_id].combo_idx;
+                    if (all_tasks[task_id].sublattice_i >= 0) {
+                        std::cout << ", sub_i=" << all_tasks[task_id].sublattice_i 
+                                  << ", sub_j=" << all_tasks[task_id].sublattice_j;
+                    }
+                    std::cout << ")";
                 }
                 std::cout << std::endl;
                 
