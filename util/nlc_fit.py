@@ -667,23 +667,53 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     
     plt.close()
 
-def multi_start_optimization(obj_func, initial_params, bounds, n_starts=10, method='SLSQP', 
-                            constraints=None, args=(), **kwargs):
+def multi_start_optimization(obj_func, initial_params, bounds, n_starts=30, method='COBYLA', 
+                            constraints=None, args=(), top_m=10, randomize=False, **kwargs):
     """
     Perform multi-start optimization with different initial conditions
+    
+    Parameters:
+    -----------
+    obj_func : callable
+        Objective function to minimize
+    initial_params : array
+        Initial parameter values (used as center for randomization if randomize=True)
+    bounds : list of tuples
+        Parameter bounds
+    n_starts : int
+        Number of starting points to try
+    method : str
+        Optimization method
+    constraints : object
+        Constraints for optimization
+    args : tuple
+        Additional arguments to pass to obj_func
+    top_m : int
+        Number of top results to display (default: 5)
+    randomize : bool
+        If True, use pure random sampling; if False, use Latin Hypercube Sampling
+    **kwargs : dict
+        Additional keyword arguments for the optimizer
     """
     best_result = None
     best_score = np.inf
     all_results = []
     
-    # Generate initial points using Latin Hypercube Sampling for better coverage
-    sampler = qmc.LatinHypercube(d=len(initial_params), seed=42)
-    sample = sampler.random(n=n_starts)
-    
-    # Scale to bounds
+    # Generate initial points
     lower_bounds = np.array([b[0] for b in bounds])
     upper_bounds = np.array([b[1] for b in bounds])
-    scaled_samples = qmc.scale(sample, lower_bounds, upper_bounds)
+    
+    if randomize:
+        # Use pure random sampling
+        logging.info(f"Using random sampling for {n_starts} starting points")
+        np.random.seed(42)
+        scaled_samples = np.random.uniform(lower_bounds, upper_bounds, (n_starts, len(initial_params)))
+    else:
+        # Use Latin Hypercube Sampling for better coverage
+        logging.info(f"Using Latin Hypercube Sampling for {n_starts} starting points")
+        sampler = qmc.LatinHypercube(d=len(initial_params), seed=42)
+        sample = sampler.random(n=n_starts)
+        scaled_samples = qmc.scale(sample, lower_bounds, upper_bounds)
     
     logging.info(f"Starting multi-start optimization with {n_starts} different initial conditions using {method}")
     
@@ -712,7 +742,28 @@ def multi_start_optimization(obj_func, initial_params, bounds, n_starts=10, meth
             logging.warning(f"Multi-start iteration {i+1} failed: {e}")
             continue
     
-    logging.info(f"Multi-start optimization completed. Best chi-squared: {best_score:.4f}")
+    # Sort results by objective function value
+    successful_results = [r for r in all_results if hasattr(r, 'fun')]
+    successful_results.sort(key=lambda x: x.fun)
+    
+    # Display top m results
+    logging.info(f"\n{'='*80}")
+    logging.info(f"Multi-start optimization completed. Displaying top {min(top_m, len(successful_results))} results:")
+    logging.info(f"{'='*80}")
+    
+    for i, result in enumerate(successful_results[:top_m]):
+        logging.info(f"\nRank {i+1}:")
+        logging.info(f"  Chi-squared: {result.fun:.6f}")
+        param_str = ", ".join([f"{result.x[j]:.6f}" for j in range(min(3, len(result.x)))])
+        logging.info(f"  Parameters (Jxx, Jyy, Jzz): {param_str}")
+        if len(result.x) > 3:
+            extra_params = ", ".join([f"{result.x[j]:.6f}" for j in range(3, len(result.x))])
+            logging.info(f"  Additional parameters: {extra_params}")
+    
+    logging.info(f"\n{'='*80}")
+    logging.info(f"Best chi-squared: {best_score:.4f}")
+    logging.info(f"{'='*80}\n")
+    
     return best_result, all_results
 
 def basin_hopping_optimization(obj_func, initial_params, bounds, args=(), **kwargs):
@@ -729,7 +780,7 @@ def basin_hopping_optimization(obj_func, initial_params, bounds, args=(), **kwar
         return True
     
     minimizer_kwargs = {
-        "method": "SLSQP",
+        "method": "COBYLA",
         "bounds": bounds,
         "args": args,
         "options": kwargs.get('options', {})
@@ -959,6 +1010,8 @@ def robust_optimization(obj_func, initial_params, bounds, method='auto', constra
             result, all_results = multi_start_optimization(
                 obj_func, initial_params, bounds, 
                 n_starts=kwargs.get('n_starts', 10),
+                top_m=kwargs.get('top_m', 5),
+                randomize=kwargs.get('randomize', False),
                 constraints=constraints, args=args
             )
             results['multi_start'] = result
@@ -1178,14 +1231,14 @@ def main():
     parser.add_argument('--initial_sigma', type=float, default=0.1, help='Initial guess for Gaussian broadening width')
     parser.add_argument('--initial_g_renorm', type=float, default=1.0, help='Initial guess for g-factor renormalization')
     parser.add_argument('--initial_random_transverse_field', type=float, default=0.0, help='Initial guess for random transverse field')
-    parser.add_argument('--bound_min', type=float, default=-5.0, help='Lower bound for J parameters')
-    parser.add_argument('--bound_max', type=float, default=5.0, help='Upper bound for J parameters')
+    parser.add_argument('--bound_min', type=float, default=-6.0, help='Lower bound for J parameters')
+    parser.add_argument('--bound_max', type=float, default=6.0, help='Upper bound for J parameters')
     parser.add_argument('--sigma_bound_min', type=float, default=0.0, help='Lower bound for sigma parameters')
     parser.add_argument('--sigma_bound_max', type=float, default=10.0, help='Upper bound for sigma parameters')
     parser.add_argument('--g_renorm_bound_min', type=float, default=0.8, help='Lower bound for g_renorm parameter')
     parser.add_argument('--g_renorm_bound_max', type=float, default=1.2, help='Upper bound for g_renorm parameter')
     parser.add_argument('--random_transverse_field_bound_min', type=float, default=0.0, help='Lower bound for random transverse field parameter')
-    parser.add_argument('--random_transverse_field_bound_max', type=float, default=10.0, help='Upper bound for random transverse field parameter')
+    parser.add_argument('--random_transverse_field_bound_max', type=float, default=1.0, help='Upper bound for random transverse field parameter')
     parser.add_argument('--fit_broadening', action='store_true', help='Include Gaussian broadening as fitting parameters')
     parser.add_argument('--fit_g_renorm', action='store_true', help='Include g-factor renormalization as fitting parameter')
     parser.add_argument('--fit_random_transverse_field', action='store_true', help='Include random transverse field as fitting parameter')
@@ -1210,6 +1263,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=os.cpu_count(), 
                         help='Number of parallel workers for random field averaging')
     parser.add_argument('--n_starts', type=int, default=10, help='Number of random starts for multi-start optimization')
+    parser.add_argument('--top_m', type=int, default=5, help='Number of top results to display in multi-start optimization')
+    parser.add_argument('--randomize', action='store_true', help='Use random sampling instead of Latin Hypercube Sampling for multi-start')
     parser.add_argument('--popsize', type=int, default=15, help='Population size for differential evolution')
     parser.add_argument('--n_calls', type=int, default=100, help='Number of function calls for Bayesian optimization')
     parser.add_argument('--n_initial_points', type=int, default=10, help='Number of initial points for Bayesian optimization')
@@ -1502,6 +1557,8 @@ def main():
                     args=(fixed_params, exp_datasets, work_dir),
                     maxiter=args.max_iter,
                     n_starts=args.n_starts,
+                    top_m=args.top_m,
+                    randomize=args.randomize,
                     popsize=args.popsize,
                     atol=args.tolerance,
                     n_calls=args.n_calls,
