@@ -20,6 +20,46 @@ using ComplexVector = std::vector<Complex>;
 namespace fs = std::filesystem;
 #include <mpi.h>
 
+
+void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
+    // Compute and print <S_i> for all sites
+    std::vector<std::vector<Complex>> result(num_sites, std::vector<Complex>(3));
+
+    for (int i = 0; i < num_sites; i++) {
+        SingleSiteOperator S_plus(num_sites, spin_length, 0, i);
+        SingleSiteOperator S_minus(num_sites, spin_length, 1, i);
+        SingleSiteOperator S_z(num_sites, spin_length, 2, i);
+
+        ComplexVector temp_plus(state.size(), Complex(0.0, 0.0));
+        ComplexVector temp_minus(state.size(), Complex(0.0, 0.0));
+        ComplexVector temp_z(state.size(), Complex(0.0, 0.0));
+
+        S_plus.apply(state.data(), temp_plus.data(), state.size());
+        S_minus.apply(state.data(), temp_minus.data(), state.size());
+        S_z.apply(state.data(), temp_z.data(), state.size());
+
+        Complex expectation_plus = 0.0;
+        Complex expectation_minus = 0.0;
+        Complex expectation_z = 0.0;
+        for (size_t k = 0; k < state.size(); k++) {
+            expectation_plus += std::conj(state[k]) * temp_plus[k];
+            expectation_minus += std::conj(state[k]) * temp_minus[k];
+            expectation_z += std::conj(state[k]) * temp_z[k];
+        }
+        result[i][0] = expectation_plus;
+        result[i][1] = expectation_minus;
+        result[i][2] = expectation_z;
+    }
+    // Write results to file
+    std::ofstream outfile(dir + "/spin_configuration.txt");
+    outfile << std::fixed << std::setprecision(6);
+    outfile << "Site S+ S- Sz\n";
+    for (int i = 0; i < num_sites; i++) {
+        outfile << i << " " << result[i][0] << " " << result[i][1] << " " << result[i][2] << "\n";
+    }
+    outfile.close();
+}
+
 void printSpinCorrelation(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {
     // Compute and print <S_i . S_j> for all pairs (i,j)
     std::vector<std::vector<std::vector<Complex>>> result(2, std::vector<std::vector<Complex>>(num_sites, std::vector<Complex>(num_sites)));
@@ -277,12 +317,16 @@ int main(int argc, char* argv[]) {
     int N = static_cast<int>(N64);
     
     // Define momentum points
+    // const std::vector<std::vector<double>> momentum_points = {
+    //     {0.0, 0.0, 0.0},
+    //     {0, 0, 2*M_PI},
+    //     {4*M_PI, 4*M_PI, 0}
+    // };
+    // Define momentum points
     const std::vector<std::vector<double>> momentum_points = {
         {0.0, 0.0, 0.0},
-        {0, 0, 2*M_PI},
-        {4*M_PI, 4*M_PI, 0}
+        {0, 0, 2*M_PI}
     };
-
     // const std::vector<std::vector<double>> momentum_points = {
     //     // {0.0, 0.0, 0.0},
     //     // {0, 0, 2*M_PI},
@@ -375,7 +419,7 @@ int main(int argc, char* argv[]) {
     int num_combos = spin_combinations.size();
     
     if (rank == 0) {
-        if (method == "krylov" || method == "spin_correlation") {
+        if (method == "krylov" || method == "spin_correlation" || method == "spin_configuration") {
             // These methods process entire states atomically
             for (int s = 0; s < num_files; s++) {
                 all_tasks.push_back({s, -1, -1, -1, -1, file_sizes[s]});
@@ -577,6 +621,8 @@ int main(int argc, char* argv[]) {
             );
         } else if (method == "spin_correlation") {
             printSpinCorrelation(tpq_state, num_sites, spin_length, output_dir);
+        } else if (method == "spin_configuration") {
+            printSpinConfiguration(tpq_state, num_sites, spin_length, output_dir);
         } else if (method == "taylor") {
             // Process single (momentum, combo) pair
             const auto &Q = momentum_points[momentum_idx];
