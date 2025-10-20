@@ -49,6 +49,45 @@ FREQ_MAX = 4.0
 SUBLATTICE_A = [0]  # Modify as needed
 SUBLATTICE_B = [1, 2, 3]  # Modify as needed
 
+# Pyrochlore local frame definitions (for global magnetization calculation)
+# For pyrochlore lattice, each of the 4 sublattices has a local coordinate frame
+# z-axis (local quantization axis)
+z_local = np.array([
+    [1, 1, 1] / np.sqrt(3),      # Sublattice 0
+    [1, -1, -1] / np.sqrt(3),    # Sublattice 1
+    [-1, 1, -1] / np.sqrt(3),    # Sublattice 2
+    [-1, -1, 1] / np.sqrt(3)     # Sublattice 3
+])
+
+# x-axis (local frame)
+x_local = np.array([
+    [-2, 1, 1] / np.sqrt(6),     # Sublattice 0
+    [-2, -1, -1] / np.sqrt(6),   # Sublattice 1
+    [2, 1, -1] / np.sqrt(6),     # Sublattice 2
+    [2, -1, 1] / np.sqrt(6)      # Sublattice 3
+])
+
+# y-axis (local frame)
+y_local = np.array([
+    [0, -1, 1] / np.sqrt(2),     # Sublattice 0
+    [0, 1, -1] / np.sqrt(2),     # Sublattice 1
+    [0, -1, -1] / np.sqrt(2),    # Sublattice 2
+    [0, 1, 1] / np.sqrt(2)       # Sublattice 3
+])
+
+# Stack into a single array: localframe[component, sublattice, xyz]
+localframe = np.array([x_local, y_local, z_local])
+
+# Magnetic field direction (normalized)
+# Specify the direction of the applied magnetic field in global coordinates
+# Common choices:
+# [0, 0, 1] for field along z-axis
+# [1, 1, 1]/sqrt(3) for field along [111] direction
+# [1, 1, 0]/sqrt(2) for field along [110] direction
+# [1, -1, 0]/sqrt(2) for field along [1-10] direction
+FIELD_DIRECTION = np.array([1, 1, 1])  # Default: [111] direction
+FIELD_DIRECTION = FIELD_DIRECTION / np.linalg.norm(FIELD_DIRECTION)  # Normalize
+
 # Pyrochlore lattice local z-axes (sublattice quantization axes)
 # These are the <111> directions for the four sublattices
 PYROCHLORE_Z_AXES = np.array([
@@ -335,41 +374,149 @@ def create_global_transverse_sublattice_data(h_values, h_dirs, base_species_patt
 
 
 def read_spin_configuration(h_dir):
-    """Read spin configuration file and calculate magnetization"""
+    """Read spin configuration file and calculate magnetization including Sx, Sy, Sz components
+    Also calculates global magnetization in the pyrochlore lattice global coordinate frame"""
     file_path = os.path.join(h_dir, "structure_factor_results", "beta_inf", "spin_configuration.txt")
     
     if not os.path.exists(file_path):
         return None
     
     try:
-        # Extract Sz values from format (real,imag)
+        # Extract S+, S-, Sz values from format (real,imag)
         with open(file_path, 'r') as f:
             lines = f.readlines()[1:]  # Skip header
         
-        sz_values = []
+        sp_values = []  # S+ values
+        sm_values = []  # S- values
+        sz_values = []  # Sz values
+        site_indices = []  # Site indices to determine sublattice
+        
         for line in lines:
             parts = line.strip().split()
             if len(parts) >= 4:
-                # Parse Sz which is in format (real,imag)
-                sz_str = parts[3]
-                # Remove parentheses and split by comma
-                sz_str = sz_str.strip('()').split(',')
+                # Site index (column 0)
+                site_idx = int(parts[0])
+                site_indices.append(site_idx)
+                
+                # Parse S+ (column 1), S- (column 2), Sz (column 3)
+                # All are in format (real,imag)
+                
+                # S+ (parts[1])
+                sp_str = parts[1].strip('()').split(',')
+                sp_complex = complex(float(sp_str[0]), float(sp_str[1]))
+                sp_values.append(sp_complex)
+                
+                # S- (parts[2])
+                sm_str = parts[2].strip('()').split(',')
+                sm_complex = complex(float(sm_str[0]), float(sm_str[1]))
+                sm_values.append(sm_complex)
+                
+                # Sz (parts[3])
+                sz_str = parts[3].strip('()').split(',')
                 sz_real = float(sz_str[0])
                 sz_values.append(sz_real)
         
-        # Calculate total magnetization (sum of all Sz components)
-        magnetization = np.sum(sz_values)
-        # Calculate magnetization per site
-        magnetization_per_site = magnetization / len(sz_values)
+        # Convert to numpy arrays
+        sp_values = np.array(sp_values)
+        sm_values = np.array(sm_values)
+        sz_values = np.array(sz_values)
+        site_indices = np.array(site_indices)
+        
+        # Calculate Sx and Sy from S+ and S-
+        # Sx = (S+ + S-) / 2
+        # Sy = (S+ - S-) / (2i) = -i(S+ - S-) / 2
+        sx_values = (sp_values + sm_values) / 2.0
+        sy_values = -1j * (sp_values - sm_values) / 2.0
+        
+        # Calculate total magnetization for each component (local frame)
+        mag_x = np.sum(sx_values.real)  # Take real part of Sx
+        mag_y = np.sum(sy_values.real)  # Take real part of Sy
+        mag_z = np.sum(sz_values)
+        
+        # Calculate total magnitude of magnetization (local frame)
+        mag_total = np.sqrt(mag_x**2 + mag_y**2 + mag_z**2)
+        
+        # Calculate per-site magnetizations (local frame)
+        n_sites = len(sz_values)
+        mag_x_per_site = mag_x / n_sites
+        mag_y_per_site = mag_y / n_sites
+        mag_z_per_site = mag_z / n_sites
+        mag_total_per_site = mag_total / n_sites
+        
+        # Calculate GLOBAL magnetization (pyrochlore lattice global frame)
+        # Assume sites cycle through sublattices 0,1,2,3,0,1,2,3,...
+        n_sites_per_sublattice = n_sites // 4
+        
+        # Initialize global magnetization vector
+        mag_global = np.zeros(3)
+        
+        for i in range(n_sites):
+            sublattice = i % 4  # Determine which sublattice (0, 1, 2, or 3)
+            
+            # Local spin components (real parts)
+            s_local = np.array([
+                sx_values[i].real,
+                sy_values[i].real,
+                sz_values[i]
+            ])
+            
+            # Transform to global coordinates using local frame basis
+            # s_global = sum_alpha s_local[alpha] * localframe[alpha, sublattice, :]
+            s_global = (s_local[0] * localframe[0, sublattice, :] +
+                       s_local[1] * localframe[1, sublattice, :] +
+                       s_local[2] * localframe[2, sublattice, :])
+            
+            mag_global += s_global
+        
+        # Calculate global magnetization magnitude and components
+        mag_global_x = mag_global[0]
+        mag_global_y = mag_global[1]
+        mag_global_z = mag_global[2]
+        mag_global_total = np.linalg.norm(mag_global)
+        
+        # Per-site global magnetization
+        mag_global_x_per_site = mag_global_x / n_sites
+        mag_global_y_per_site = mag_global_y / n_sites
+        mag_global_z_per_site = mag_global_z / n_sites
+        mag_global_total_per_site = mag_global_total / n_sites
+        
+        # Calculate magnetization component along the field direction
+        # M_parallel = M_global · field_direction
+        mag_along_field = np.dot(mag_global, FIELD_DIRECTION)
+        mag_along_field_per_site = mag_along_field / n_sites
         
         return {
-            'total_magnetization': magnetization,
-            'magnetization_per_site': magnetization_per_site,
-            'num_sites': len(sz_values),
-            'sz_values': np.array(sz_values)
+            # Local frame magnetizations
+            'total_magnetization': mag_total,
+            'magnetization_per_site': mag_total_per_site,
+            'mag_x': mag_x,
+            'mag_y': mag_y,
+            'mag_z': mag_z,
+            'mag_x_per_site': mag_x_per_site,
+            'mag_y_per_site': mag_y_per_site,
+            'mag_z_per_site': mag_z_per_site,
+            # Global frame magnetizations
+            'mag_global_x': mag_global_x,
+            'mag_global_y': mag_global_y,
+            'mag_global_z': mag_global_z,
+            'mag_global_total': mag_global_total,
+            'mag_global_x_per_site': mag_global_x_per_site,
+            'mag_global_y_per_site': mag_global_y_per_site,
+            'mag_global_z_per_site': mag_global_z_per_site,
+            'mag_global_total_per_site': mag_global_total_per_site,
+            # Magnetization along field direction
+            'mag_along_field': mag_along_field,
+            'mag_along_field_per_site': mag_along_field_per_site,
+            # Raw data
+            'num_sites': n_sites,
+            'sx_values': sx_values,
+            'sy_values': sy_values,
+            'sz_values': sz_values
         }
     except Exception as e:
         print(f"Error reading {file_path}: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 def create_do_channel(h_values, h_dirs, base_species):
@@ -634,11 +781,17 @@ def create_combined_component_plot_direct(h_values, all_freq_data, all_spectral_
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten()
     
-    # Plot for each h value (show up to 4 representative h values)
-    num_plots = min(4, len(h_values))
-    plot_indices = np.linspace(0, len(h_values)-1, num_plots, dtype=int)
+    # Select specific h values: 0T, closest to 0.3T, closest to 1T, closest to 2.5T
+    target_fields_tesla = [0.0, 0.3, 1.0, 2.5]
+    h_values_tesla = np.array(h_values) * H_CONVERSION_FACTOR
     
-    for plot_idx, h_idx in enumerate(plot_indices):
+    selected_h_indices = []
+    for target_field in target_fields_tesla:
+        # Find the closest h value to the target field
+        closest_idx = np.argmin(np.abs(h_values_tesla - target_field))
+        selected_h_indices.append(closest_idx)
+    
+    for plot_idx, h_idx in enumerate(selected_h_indices):
         h = h_values[h_idx]
         ax = axes[plot_idx]
         
@@ -940,11 +1093,17 @@ def create_sublattice_comparison_plot(h_values, freq_data_aa, spectral_data_aa,
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten()
     
-    # Plot for each h value (show up to 4 representative h values)
-    num_plots = min(4, len(h_values))
-    plot_indices = np.linspace(0, len(h_values)-1, num_plots, dtype=int)
+    # Select specific h values: 0T, closest to 0.3T, closest to 1T, closest to 2.5T
+    target_fields_tesla = [0.0, 0.3, 1.0, 2.5]
+    h_values_tesla = np.array(h_values) * H_CONVERSION_FACTOR
     
-    for plot_idx, h_idx in enumerate(plot_indices):
+    selected_h_indices = []
+    for target_field in target_fields_tesla:
+        # Find the closest h value to the target field
+        closest_idx = np.argmin(np.abs(h_values_tesla - target_field))
+        selected_h_indices.append(closest_idx)
+    
+    for plot_idx, h_idx in enumerate(selected_h_indices):
         h = h_values[h_idx]
         ax = axes[plot_idx]
         
@@ -1249,7 +1408,9 @@ def create_sublattice_animation(h_values, freq_data_aa, spectral_data_aa,
 def create_magnetization_plot(h_values, h_dirs, output_file):
 
     """
-    Create a plot showing magnetization as a function of magnetic field h.
+    Create a plot showing magnetization components (Mx, My, Mz) and total magnitude 
+    as a function of magnetic field h.
+    Includes both local frame and global frame (pyrochlore lattice) magnetizations.
     
     Parameters:
     - h_values: list of h values
@@ -1260,8 +1421,28 @@ def create_magnetization_plot(h_values, h_dirs, output_file):
     
     # Collect magnetization data
     h_list = []
+    mag_x_list = []
+    mag_y_list = []
+    mag_z_list = []
     mag_total_list = []
-    mag_per_site_list = []
+    mag_x_per_site_list = []
+    mag_y_per_site_list = []
+    mag_z_per_site_list = []
+    mag_total_per_site_list = []
+    
+    # Global frame magnetization
+    mag_global_x_list = []
+    mag_global_y_list = []
+    mag_global_z_list = []
+    mag_global_total_list = []
+    mag_global_x_per_site_list = []
+    mag_global_y_per_site_list = []
+    mag_global_z_per_site_list = []
+    mag_global_total_per_site_list = []
+    
+    # Magnetization along field direction
+    mag_along_field_list = []
+    mag_along_field_per_site_list = []
     
     for h in h_values:
         h_dir = h_dirs[h]
@@ -1269,31 +1450,139 @@ def create_magnetization_plot(h_values, h_dirs, output_file):
         
         if mag_data is not None:
             h_list.append(h * H_CONVERSION_FACTOR)  # Convert to Tesla
+            # Local frame
+            mag_x_list.append(mag_data['mag_x'])
+            mag_y_list.append(mag_data['mag_y'])
+            mag_z_list.append(mag_data['mag_z'])
             mag_total_list.append(mag_data['total_magnetization'])
-            mag_per_site_list.append(mag_data['magnetization_per_site'])
+            mag_x_per_site_list.append(mag_data['mag_x_per_site'])
+            mag_y_per_site_list.append(mag_data['mag_y_per_site'])
+            mag_z_per_site_list.append(mag_data['mag_z_per_site'])
+            mag_total_per_site_list.append(mag_data['magnetization_per_site'])
+            # Global frame
+            mag_global_x_list.append(mag_data['mag_global_x'])
+            mag_global_y_list.append(mag_data['mag_global_y'])
+            mag_global_z_list.append(mag_data['mag_global_z'])
+            mag_global_total_list.append(mag_data['mag_global_total'])
+            mag_global_x_per_site_list.append(mag_data['mag_global_x_per_site'])
+            mag_global_y_per_site_list.append(mag_data['mag_global_y_per_site'])
+            mag_global_z_per_site_list.append(mag_data['mag_global_z_per_site'])
+            mag_global_total_per_site_list.append(mag_data['mag_global_total_per_site'])
+            # Along field direction
+            mag_along_field_list.append(mag_data['mag_along_field'])
+            mag_along_field_per_site_list.append(mag_data['mag_along_field_per_site'])
     
     if not h_list:
         print("  ⚠ No magnetization data found!")
         return
     
-    # Create figure with two subplots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    # Create figure with seven subplots
+    # Top: 1 large plot for magnetization along field
+    # Middle and Bottom: 3x2 layout for local and global frames
+    fig = plt.figure(figsize=(16, 20))
+    gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1, 1], hspace=0.3, wspace=0.3)
     
-    # Plot 1: Total magnetization
-    ax1.plot(h_list, mag_total_list, 'bo-', linewidth=2, markersize=6, alpha=0.7)
+    # ========== TOP PLOT: MAGNETIZATION ALONG FIELD DIRECTION ==========
+    ax_field = fig.add_subplot(gs[0, :])  # Span both columns
+    
+    # Format field direction for display
+    field_dir_str = f"[{FIELD_DIRECTION[0]:.3f}, {FIELD_DIRECTION[1]:.3f}, {FIELD_DIRECTION[2]:.3f}]"
+    
+    # Plot magnetization along field (total and per-site)
+    ax_field.plot(h_list, mag_along_field_list, 'ko-', linewidth=3, markersize=6, alpha=0.9, 
+                  label=f'M·ĥ (total)', zorder=3)
+    ax_field.plot(h_list, mag_along_field_per_site_list, 'ro--', linewidth=2, markersize=4, alpha=0.7, 
+                  label=f'(M·ĥ)/site', zorder=2)
+    
+    # Also show total magnetization magnitude for comparison
+    ax_field.plot(h_list, mag_global_total_list, 'b-^', linewidth=2, markersize=4, alpha=0.6, 
+                  label='|M| (total)', zorder=1)
+    
+    ax_field.set_xlabel('Magnetic Field (h) [T]', fontsize=14, fontweight='bold')
+    ax_field.set_ylabel('Magnetization (Global Frame)', fontsize=14, fontweight='bold')
+    ax_field.set_title(f'Magnetization Along Field Direction ĥ = {field_dir_str}', 
+                       fontsize=16, fontweight='bold', pad=15)
+    ax_field.legend(loc='best', fontsize=12, framealpha=0.9)
+    ax_field.grid(True, alpha=0.3, linestyle='--')
+    ax_field.tick_params(labelsize=11)
+    
+    # Add zero line for reference
+    ax_field.axhline(y=0, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+    
+    # ========== LOCAL FRAME PLOTS (Left Column) ==========
+    
+    # Plot 1: Total magnetization components (local frame)
+    ax1 = fig.add_subplot(gs[1, 0])
+    ax1.plot(h_list, mag_x_list, 'r-o', linewidth=2, markersize=4, alpha=0.7, label='Mx (local)')
+    ax1.plot(h_list, mag_y_list, 'g-o', linewidth=2, markersize=4, alpha=0.7, label='My (local)')
+    ax1.plot(h_list, mag_z_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Mz (local)')
+    ax1.plot(h_list, mag_total_list, 'k-o', linewidth=2.5, markersize=5, alpha=0.9, label='|M| Total')
     ax1.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
-    ax1.set_ylabel('Total Magnetization', fontsize=12)
-    ax1.set_title('Total Magnetization vs Magnetic Field', fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Total Magnetization (Local Frame)', fontsize=12)
+    ax1.set_title('Local Frame: Total Magnetization vs Field', fontsize=13, fontweight='bold')
+    ax1.legend(loc='best', fontsize=9)
     ax1.grid(True, alpha=0.3)
     
-    # Plot 2: Magnetization per site
-    ax2.plot(h_list, mag_per_site_list, 'ro-', linewidth=2, markersize=6, alpha=0.7)
+    # Plot 2: Magnetization per site components (local frame)
+    ax2 = fig.add_subplot(gs[2, 0])
+    ax2.plot(h_list, mag_x_per_site_list, 'r-o', linewidth=2, markersize=4, alpha=0.7, label='Mx/site')
+    ax2.plot(h_list, mag_y_per_site_list, 'g-o', linewidth=2, markersize=4, alpha=0.7, label='My/site')
+    ax2.plot(h_list, mag_z_per_site_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Mz/site')
+    ax2.plot(h_list, mag_total_per_site_list, 'k-o', linewidth=2.5, markersize=5, alpha=0.9, label='|M|/site')
     ax2.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
-    ax2.set_ylabel('Magnetization per Site', fontsize=12)
-    ax2.set_title('Magnetization per Site vs Magnetic Field', fontsize=14, fontweight='bold')
+    ax2.set_ylabel('Magnetization per Site (Local)', fontsize=12)
+    ax2.set_title('Local Frame: Per-Site Magnetization vs Field', fontsize=13, fontweight='bold')
+    ax2.legend(loc='best', fontsize=9)
     ax2.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    # Plot 3: Transverse vs Longitudinal (local frame)
+    ax3 = fig.add_subplot(gs[3, 0])
+    transverse_mag = np.sqrt(np.array(mag_x_list)**2 + np.array(mag_y_list)**2)
+    ax3.plot(h_list, transverse_mag, 'm-o', linewidth=2.5, markersize=5, alpha=0.9, label='Transverse √(Mx²+My²)')
+    ax3.plot(h_list, mag_z_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Longitudinal Mz')
+    ax3.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax3.set_ylabel('Magnetization (Local Frame)', fontsize=12)
+    ax3.set_title('Local Frame: Transverse vs Longitudinal', fontsize=13, fontweight='bold')
+    ax3.legend(loc='best', fontsize=9)
+    ax3.grid(True, alpha=0.3)
+    
+    # ========== GLOBAL FRAME PLOTS (Right Column) ==========
+    
+    # Plot 4: Total magnetization components (global frame)
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax4.plot(h_list, mag_global_x_list, 'r-o', linewidth=2, markersize=4, alpha=0.7, label='Mx (global)')
+    ax4.plot(h_list, mag_global_y_list, 'g-o', linewidth=2, markersize=4, alpha=0.7, label='My (global)')
+    ax4.plot(h_list, mag_global_z_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Mz (global)')
+    ax4.plot(h_list, mag_global_total_list, 'k-o', linewidth=2.5, markersize=5, alpha=0.9, label='|M| Total')
+    ax4.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax4.set_ylabel('Total Magnetization (Global Frame)', fontsize=12)
+    ax4.set_title('Global Frame: Total Magnetization vs Field', fontsize=13, fontweight='bold')
+    ax4.legend(loc='best', fontsize=9)
+    ax4.grid(True, alpha=0.3)
+    
+    # Plot 5: Magnetization per site components (global frame)
+    ax5 = fig.add_subplot(gs[2, 1])
+    ax5.plot(h_list, mag_global_x_per_site_list, 'r-o', linewidth=2, markersize=4, alpha=0.7, label='Mx/site')
+    ax5.plot(h_list, mag_global_y_per_site_list, 'g-o', linewidth=2, markersize=4, alpha=0.7, label='My/site')
+    ax5.plot(h_list, mag_global_z_per_site_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Mz/site')
+    ax5.plot(h_list, mag_global_total_per_site_list, 'k-o', linewidth=2.5, markersize=5, alpha=0.9, label='|M|/site')
+    ax5.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax5.set_ylabel('Magnetization per Site (Global)', fontsize=12)
+    ax5.set_title('Global Frame: Per-Site Magnetization vs Field', fontsize=13, fontweight='bold')
+    ax5.legend(loc='best', fontsize=9)
+    ax5.grid(True, alpha=0.3)
+    
+    # Plot 6: Transverse vs Longitudinal (global frame)
+    ax6 = fig.add_subplot(gs[3, 1])
+    transverse_mag_global = np.sqrt(np.array(mag_global_x_list)**2 + np.array(mag_global_y_list)**2)
+    ax6.plot(h_list, transverse_mag_global, 'm-o', linewidth=2.5, markersize=5, alpha=0.9, label='Transverse √(Mx²+My²)')
+    ax6.plot(h_list, mag_global_z_list, 'b-o', linewidth=2, markersize=4, alpha=0.7, label='Longitudinal Mz')
+    ax6.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax6.set_ylabel('Magnetization (Global Frame)', fontsize=12)
+    ax6.set_title('Global Frame: Transverse vs Longitudinal', fontsize=13, fontweight='bold')
+    ax6.legend(loc='best', fontsize=9)
+    ax6.grid(True, alpha=0.3)
+    
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"  ✓ Saved magnetization plot: {output_file}")
     plt.close()
@@ -1301,9 +1590,19 @@ def create_magnetization_plot(h_values, h_dirs, output_file):
     # Also save magnetization data to a text file
     data_file = output_file.replace('.png', '_data.txt')
     with open(data_file, 'w') as f:
-        f.write("# Magnetic Field (T)\tTotal Magnetization\tMagnetization per Site\n")
-        for h, mag_tot, mag_per in zip(h_list, mag_total_list, mag_per_site_list):
-            f.write(f"{h:.6f}\t{mag_tot:.6f}\t{mag_per:.6f}\n")
+        f.write("# Magnetic Field (T)\t")
+        f.write("M_along_field\tM_along_field/site\t")
+        f.write("Mx_local\tMy_local\tMz_local\t|M|_local\t")
+        f.write("Mx_local/site\tMy_local/site\tMz_local/site\t|M|_local/site\t")
+        f.write("Mx_global\tMy_global\tMz_global\t|M|_global\t")
+        f.write("Mx_global/site\tMy_global/site\tMz_global/site\t|M|_global/site\n")
+        for i, h in enumerate(h_list):
+            f.write(f"{h:.6f}\t")
+            f.write(f"{mag_along_field_list[i]:.6f}\t{mag_along_field_per_site_list[i]:.6f}\t")
+            f.write(f"{mag_x_list[i]:.6f}\t{mag_y_list[i]:.6f}\t{mag_z_list[i]:.6f}\t{mag_total_list[i]:.6f}\t")
+            f.write(f"{mag_x_per_site_list[i]:.6f}\t{mag_y_per_site_list[i]:.6f}\t{mag_z_per_site_list[i]:.6f}\t{mag_total_per_site_list[i]:.6f}\t")
+            f.write(f"{mag_global_x_list[i]:.6f}\t{mag_global_y_list[i]:.6f}\t{mag_global_z_list[i]:.6f}\t{mag_global_total_list[i]:.6f}\t")
+            f.write(f"{mag_global_x_per_site_list[i]:.6f}\t{mag_global_y_per_site_list[i]:.6f}\t{mag_global_z_per_site_list[i]:.6f}\t{mag_global_total_per_site_list[i]:.6f}\n")
     print(f"  ✓ Saved magnetization data: {data_file}")
 
 
@@ -1561,7 +1860,7 @@ def main():
             
             # 1. Stacked plot
             stacked_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_stacked.png")
-            create_stacked_plot(h_values, freq_data, spectral_data, species, stacked_file)
+            1(h_values, freq_data, spectral_data, species, stacked_file)
             
             # 2. Heatmap
             heatmap_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_heatmap.png")
@@ -1806,6 +2105,65 @@ def main():
         except Exception as e:
             print(f"  ✗ Error processing sublattice for {base_pattern}: {e}")
             continue
+    
+    # Process individual sublattice pair plots for SmSp and SzSz
+    print("\n" + "="*80)
+    print("Creating individual sublattice pair plots (SmSp, SzSz, Combined)...")
+    print("="*80)
+    
+    # Find all individual sublattice pair species
+    individual_sublattice_pairs = {}
+    for species in all_species:
+        if '_sub' in species:
+            sub1, sub2 = parse_sublattice_indices(species)
+            if sub1 is not None and sub2 is not None:
+                base = get_base_species_name(species)
+                pair_key = (base, sub1, sub2)
+                if pair_key not in individual_sublattice_pairs:
+                    individual_sublattice_pairs[pair_key] = {}
+                individual_sublattice_pairs[pair_key][species] = (sub1, sub2)
+    
+    # Group by SmSp/SzSz pairs for each sublattice pair
+    for (base, sub1, sub2), species_dict in individual_sublattice_pairs.items():
+        # Find SmSp and SzSz species for this sublattice pair
+        smsp_species = None
+        szsz_species = None
+        for sp in species_dict.keys():
+            if sp.startswith("SmSp_"):
+                smsp_species = sp
+            elif sp.startswith("SzSz_"):
+                szsz_species = sp
+        
+        if smsp_species and szsz_species:
+            try:
+                print(f"\nCreating combined sublattice pair plot: {base} sub{sub1}_sub{sub2}")
+                print("-"*80)
+                
+                safe_name = f"{base}_sub{sub1}_sub{sub2}".replace("/", "_").replace(" ", "_")
+                display_name = f"{base} (sublattice {sub1}-{sub2})"
+                
+                # 1. Combined component plot
+                combined_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_components.png")
+                create_combined_component_plot_direct(h_values, all_freq_data, all_spectral_data, 
+                                                      smsp_species, szsz_species, 
+                                                      display_name, combined_file)
+                
+                # 2. Combined heatmap
+                heatmap_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_heatmap.png")
+                create_combined_heatmap_direct(h_values, all_freq_data, all_spectral_data, 
+                                              smsp_species, szsz_species,
+                                              display_name, heatmap_file)
+                
+                # 3. Combined animation
+                anim_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_animation.gif")
+                create_combined_animation_direct(h_values, all_freq_data, all_spectral_data,
+                                               smsp_species, szsz_species,
+                                               display_name, anim_file)
+                
+                print(f"  ✓ Completed combined sublattice pair plots for {base} sub{sub1}_sub{sub2}")
+            except Exception as e:
+                print(f"  ✗ Error creating combined sublattice pair plots for {base} sub{sub1}_sub{sub2}: {e}")
+                continue
     
     # Process combined SmSp + SzSz sublattice correlations
     if sublattice_combined_pairs:

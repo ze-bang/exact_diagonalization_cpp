@@ -271,7 +271,7 @@ def write_cluster_nn_list(output_dir, cluster_name, nn_list, positions, sublatti
             f.write(f"{i} {offset[0]:.6f} {offset[1]:.6f} {offset[2]:.6f}\n")
 
 def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, field_dir):
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir):
     """
     Prepare Hamiltonian parameters for exact diagonalization
     """
@@ -309,8 +309,11 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         # Zeeman term
         sub_idx = sublattice_indices[site_id]
         local_field = h * np.dot(field_dir, z_local[sub_idx])
-        transfer.append([0, node_mapping[i], -local_field/2, 0])
-        transfer.append([1, node_mapping[i], -local_field/2, 0])
+        local_field_z = local_field * np.cos(theta)
+        local_field_x = local_field * np.sin(theta)
+        transfer.append([0, node_mapping[i], -local_field_x/2, 0])
+        transfer.append([1, node_mapping[i], -local_field_x/2, 0])
+        transfer.append([2, node_mapping[i], -local_field_z, 0])  # Sz term
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
             if site_id < neighbor_id:  # Only add each bond once
@@ -578,7 +581,7 @@ def main():
     dim3 = int(sys.argv[11])
     use_pbc = bool(int(sys.argv[12]))
     non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
-    
+    theta = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Default theta=0.0 if not provided
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
@@ -599,7 +602,7 @@ def main():
     
     # Prepare Hamiltonian parameters
     prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, sublattice_indices, 
-                                  node_mapping, Jxx, Jyy, Jzz, h, field_dir)
+                                  node_mapping, Jxx, Jyy, Jzz, h, theta, field_dir)
 
     # Plot cluster
     plot_cluster(vertices, edges, output_dir, cluster_name, sublattice_indices)

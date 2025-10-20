@@ -564,8 +564,8 @@ int main(int argc, char* argv[]) {
         transverse_basis_2[0] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
         transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
         transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_1[2] = {0.0, 0.0, 1.0};
-        transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        // transverse_basis_1[2] = {0.0, 0.0, 1.0};
+        // transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
         
         if (rank == 0) {
             std::cout << "Transverse bases for momentum points:" << std::endl;
@@ -638,8 +638,17 @@ int main(int argc, char* argv[]) {
                 SumOperator sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
                 SumOperator sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
                 
-                std::vector<Operator> obs_1 = {std::move(sum_op_1)};
-                std::vector<Operator> obs_2 = {std::move(sum_op_2)};
+                // Use copy assignment to avoid move issues
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(1);
+                obs_2.reserve(1);
+                
+                Operator op1 = sum_op_1;
+                Operator op2 = sum_op_2;
+                obs_1.push_back(op1);
+                obs_2.push_back(op2);
+                
                 std::vector<std::string> obs_names = {obs_name};
                 
                 std::string taylor_dir = output_dir + "/taylor";
@@ -666,27 +675,41 @@ int main(int argc, char* argv[]) {
             int op_type_2 = spin_combinations[combo_idx].second;
             std::string base_name = std::string(spin_combination_names[combo_idx]);
             
-            std::vector<Operator> obs_1, obs_2;
             std::vector<std::string> obs_names;
             
             try {
-                // SF component
+                // SF component names
                 std::stringstream name_sf;
                 name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
-                TransverseOperator op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
-                TransverseOperator op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
-                obs_1.push_back(std::move(op1_sf));
-                obs_2.push_back(std::move(op2_sf));
                 obs_names.push_back(name_sf.str());
                 
-                // NSF component
+                // NSF component names
                 std::stringstream name_nsf;
                 name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
+                obs_names.push_back(name_nsf.str());
+                
+                // Create operators with explicit lifetime management
+                TransverseOperator op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseOperator op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
                 TransverseOperator op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
                 TransverseOperator op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
-                obs_1.push_back(std::move(op1_nsf));
-                obs_2.push_back(std::move(op2_nsf));
-                obs_names.push_back(name_nsf.str());
+                
+                // Build vectors by copying (avoids move issues)
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(2);
+                obs_2.reserve(2);
+                
+                // Use copy assignment which is properly defined in Operator class
+                Operator obs_1_sf = op1_sf;
+                Operator obs_2_sf = op2_sf;
+                Operator obs_1_nsf = op1_nsf;
+                Operator obs_2_nsf = op2_nsf;
+                
+                obs_1.push_back(obs_1_sf);
+                obs_2.push_back(obs_2_sf);
+                obs_1.push_back(obs_1_nsf);
+                obs_2.push_back(obs_2_nsf);
                 
                 std::string global_dir = output_dir + "/global";
                 ensureDirectoryExists(global_dir);
@@ -718,8 +741,17 @@ int main(int argc, char* argv[]) {
                 SublatticeOperator sub_op_1(sublattice_i, unit_cell_size, num_sites, spin_length, op_type_1, Q_vec, positions_file);
                 SublatticeOperator sub_op_2(sublattice_j, unit_cell_size, num_sites, spin_length, op_type_2, Q_vec, positions_file);
                 
-                std::vector<Operator> obs_1 = {std::move(sub_op_1)};
-                std::vector<Operator> obs_2 = {std::move(sub_op_2)};
+                // Use copy assignment to avoid move issues
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(1);
+                obs_2.reserve(1);
+                
+                Operator op1 = sub_op_1;
+                Operator op2 = sub_op_2;
+                obs_1.push_back(op1);
+                obs_2.push_back(op2);
+                
                 std::vector<std::string> obs_names = {obs_name};
                 
                 std::string pedantic_dir = output_dir + "/pedantic";
