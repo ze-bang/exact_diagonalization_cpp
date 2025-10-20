@@ -203,6 +203,14 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
                 species_names.add(species_with_momentum)
                 species_data[species_with_momentum][bin_idx].append(file_path)
 
+        pedantic_dir = os.path.join(beta_dir, 'pedantic')
+        pedantic_files = glob.glob(os.path.join(pedantic_dir, 'time_corr_rand*.dat'))
+        for file_path in pedantic_files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+
 
 def _extract_beta_from_dirname(beta_dir):
     """Extract beta value from directory name."""

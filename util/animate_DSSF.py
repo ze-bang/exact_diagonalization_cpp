@@ -15,9 +15,24 @@ from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
 
 # Configuration
-BASE_DIR = "/scratch/zhouzb79/DSSF_PCD_mag_field_sweep_0_flux"
+BASE_DIR = "/scratch/zhouzb79/DSSF_PCD_mag_field_sweep_pi_flux"
 OUTPUT_DIR = os.path.join(BASE_DIR, "spectral_animations")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Create organized subdirectories
+SUBDIRS = {
+    'individual': os.path.join(OUTPUT_DIR, "1_individual_species"),
+    'do_channels': os.path.join(OUTPUT_DIR, "2_DO_channels"),
+    'combined': os.path.join(OUTPUT_DIR, "3_combined_SmSp_SzSz"),
+    'sublattice': os.path.join(OUTPUT_DIR, "4_sublattice_correlations"),
+    'transverse': os.path.join(OUTPUT_DIR, "5_global_transverse"),
+    'magnetization': os.path.join(OUTPUT_DIR, "6_magnetization"),
+    'summary': os.path.join(OUTPUT_DIR, "0_summary")
+}
+
+# Create all subdirectories
+for subdir in SUBDIRS.values():
+    os.makedirs(subdir, exist_ok=True)
 
 # Conversion factors
 # For h values (magnetic field)
@@ -28,6 +43,23 @@ ENERGY_CONVERSION_FACTOR = 0.063  # converts from Jzz units to meV
 # Frequency range limits (in Jzz units)
 FREQ_MIN = -0.5
 FREQ_MAX = 4.0
+
+# Sublattice grouping configuration
+# Define which sublattice indices belong to set A and set B
+SUBLATTICE_A = [0]  # Modify as needed
+SUBLATTICE_B = [1, 2, 3]  # Modify as needed
+
+# Pyrochlore lattice local z-axes (sublattice quantization axes)
+# These are the <111> directions for the four sublattices
+PYROCHLORE_Z_AXES = np.array([
+    [1, 1, 1],      # sublattice 0
+    [-1, -1, 1],    # sublattice 1
+    [-1, 1, -1],    # sublattice 2
+    [1, -1, -1]     # sublattice 3
+]) / np.sqrt(3)  # Normalize
+
+# Q-vector for transverse operator (default: (0,0,0), can be modified)
+Q_VECTOR = np.array([0, 0, 0])
 
 # Factor to apply to SmSp when calculating total
 SMSP_FACTOR = 0.5
@@ -82,6 +114,263 @@ def read_spectral_data(h_dir, species):
     except Exception as e:
         print(f"Error reading {file_path}: {e}")
         return None, None
+
+def parse_sublattice_indices(species_name):
+    """Extract sublattice indices from species name like 'SmSp_q_Qx0_Qy0_Qz0_sub2_sub3'"""
+    match = re.search(r'_sub(\d+)_sub(\d+)', species_name)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return None, None
+
+def get_base_species_name(species_name):
+    """Remove sublattice suffix from species name"""
+    # Remove _subX_subY pattern
+    return re.sub(r'_sub\d+_sub\d+$', '', species_name)
+
+def find_sublattice_species(h_dir):
+    """Find all species with sublattice information"""
+    all_species = find_all_species(h_dir)
+    sublattice_species = [sp for sp in all_species if '_sub' in sp]
+    return sublattice_species
+
+def calculate_transverse_weight(sub1, sub2, Q=None):
+    """
+    Calculate the transverse operator weight for a sublattice pair.
+    
+    Transverse operator: (z_mu · z_nu - (z_mu · Q̂)(z_nu · Q̂))
+    
+    Parameters:
+    - sub1, sub2: sublattice indices (0-3 for pyrochlore)
+    - Q: Q-vector (defaults to global Q_VECTOR)
+    
+    Returns:
+    - weight: transverse operator weight
+    """
+    if Q is None:
+        Q = Q_VECTOR
+    
+    # Get sublattice z-axes
+    z_mu = PYROCHLORE_Z_AXES[sub1]
+    z_nu = PYROCHLORE_Z_AXES[sub2]
+    
+    # Calculate z_mu · z_nu
+    dot_product = np.dot(z_mu, z_nu)
+    
+    # If Q is zero vector, second term vanishes
+    Q_norm = np.linalg.norm(Q)
+    if Q_norm < 1e-10:
+        return dot_product
+    
+    # Normalize Q
+    Q_hat = Q / Q_norm
+    
+    # Calculate (z_mu · Q̂)(z_nu · Q̂)
+    z_mu_dot_Q = np.dot(z_mu, Q_hat)
+    z_nu_dot_Q = np.dot(z_nu, Q_hat)
+    
+    # Return transverse weight
+    return dot_product - z_mu_dot_Q * z_nu_dot_Q
+
+def create_sublattice_correlation_data(h_values, h_dirs, base_species_pattern):
+    """
+    Create AA, BB, and AB correlation data by summing over sublattice pairs.
+    
+    Parameters:
+    - h_values: list of h values
+    - h_dirs: dict mapping h -> directory path
+    - base_species_pattern: base pattern like "SmSp_q_Qx0_Qy0_Qz0" or "SzSz_q_Qx0_Qy0_Qz6.28319"
+    
+    Returns:
+    - Three dicts (freq_data, spectral_data) for AA, BB, AB correlations
+    """
+    freq_data_aa = {}
+    spectral_data_aa = {}
+    freq_data_bb = {}
+    spectral_data_bb = {}
+    freq_data_ab = {}
+    spectral_data_ab = {}
+    
+    for h in h_values:
+        h_dir = h_dirs[h]
+        
+        # Find all sublattice species matching the base pattern
+        all_species = find_all_species(h_dir)
+        matching_species = [sp for sp in all_species if sp.startswith(base_species_pattern) and '_sub' in sp]
+        
+        # Initialize accumulators
+        aa_spectral = None
+        bb_spectral = None
+        ab_spectral = None
+        freq_ref = None
+        
+        for species in matching_species:
+            sub1, sub2 = parse_sublattice_indices(species)
+            if sub1 is None or sub2 is None:
+                continue
+            
+            freq, spectral = read_spectral_data(h_dir, species)
+            if freq is None or spectral is None:
+                continue
+            
+            # Set reference frequency grid
+            if freq_ref is None:
+                freq_ref = freq
+                aa_spectral = np.zeros_like(spectral)
+                bb_spectral = np.zeros_like(spectral)
+                ab_spectral = np.zeros_like(spectral)
+            
+            # Interpolate to reference grid if needed
+            if len(freq) != len(freq_ref) or not np.allclose(freq, freq_ref):
+                spectral = np.interp(freq_ref, freq, spectral)
+            
+            # Categorize correlation
+            if sub1 in SUBLATTICE_A and sub2 in SUBLATTICE_A:
+                # AA correlation
+                aa_spectral += spectral
+            elif sub1 in SUBLATTICE_B and sub2 in SUBLATTICE_B:
+                # BB correlation
+                bb_spectral += spectral
+            elif (sub1 in SUBLATTICE_A and sub2 in SUBLATTICE_B) or \
+                 (sub1 in SUBLATTICE_B and sub2 in SUBLATTICE_A):
+                # AB correlation (cross-correlation)
+                ab_spectral += spectral
+        
+        # Store results if we found any data
+        if freq_ref is not None:
+            freq_data_aa[h] = freq_ref
+            spectral_data_aa[h] = aa_spectral
+            freq_data_bb[h] = freq_ref
+            spectral_data_bb[h] = bb_spectral
+            freq_data_ab[h] = freq_ref
+            spectral_data_ab[h] = ab_spectral
+    
+    return (freq_data_aa, spectral_data_aa), \
+           (freq_data_bb, spectral_data_bb), \
+           (freq_data_ab, spectral_data_ab)
+
+def create_global_transverse_sublattice_data(h_values, h_dirs, base_species_pattern):
+    """
+    Create AA, BB, and AB correlation data with transverse operator weighting.
+    
+    Applies the transverse operator: (z_mu · z_nu - (z_mu · Q̂)(z_nu · Q̂))
+    to weight each sublattice pair correlation.
+    
+    Parameters:
+    - h_values: list of h values
+    - h_dirs: dict mapping h -> directory path
+    - base_species_pattern: base pattern like "SmSp_q_Qx0_Qy0_Qz0" or "SzSz_q_Qx0_Qy0_Qz6.28319"
+    
+    Returns:
+    - Three dicts (freq_data, spectral_data) for transverse-weighted AA, BB, AB correlations
+    """
+    freq_data_aa = {}
+    spectral_data_aa = {}
+    freq_data_bb = {}
+    spectral_data_bb = {}
+    freq_data_ab = {}
+    spectral_data_ab = {}
+    
+    for h in h_values:
+        h_dir = h_dirs[h]
+        
+        # Find all sublattice species matching the base pattern
+        all_species = find_all_species(h_dir)
+        matching_species = [sp for sp in all_species if sp.startswith(base_species_pattern) and '_sub' in sp]
+        
+        # Initialize accumulators
+        aa_spectral = None
+        bb_spectral = None
+        ab_spectral = None
+        freq_ref = None
+        
+        for species in matching_species:
+            sub1, sub2 = parse_sublattice_indices(species)
+            if sub1 is None or sub2 is None:
+                continue
+            
+            freq, spectral = read_spectral_data(h_dir, species)
+            if freq is None or spectral is None:
+                continue
+            
+            # Calculate transverse weight for this sublattice pair
+            weight = calculate_transverse_weight(sub1, sub2)
+            
+            # Set reference frequency grid
+            if freq_ref is None:
+                freq_ref = freq
+                aa_spectral = np.zeros_like(spectral)
+                bb_spectral = np.zeros_like(spectral)
+                ab_spectral = np.zeros_like(spectral)
+            
+            # Interpolate to reference grid if needed
+            if len(freq) != len(freq_ref) or not np.allclose(freq, freq_ref):
+                spectral = np.interp(freq_ref, freq, spectral)
+            
+            # Apply transverse weight and categorize correlation
+            weighted_spectral = spectral * weight
+            
+            if sub1 in SUBLATTICE_A and sub2 in SUBLATTICE_A:
+                # AA correlation
+                aa_spectral += weighted_spectral
+            elif sub1 in SUBLATTICE_B and sub2 in SUBLATTICE_B:
+                # BB correlation
+                bb_spectral += weighted_spectral
+            elif (sub1 in SUBLATTICE_A and sub2 in SUBLATTICE_B) or \
+                 (sub1 in SUBLATTICE_B and sub2 in SUBLATTICE_A):
+                # AB correlation (cross-correlation)
+                ab_spectral += weighted_spectral
+        
+        # Store results if we found any data
+        if freq_ref is not None:
+            freq_data_aa[h] = freq_ref
+            spectral_data_aa[h] = aa_spectral
+            freq_data_bb[h] = freq_ref
+            spectral_data_bb[h] = bb_spectral
+            freq_data_ab[h] = freq_ref
+            spectral_data_ab[h] = ab_spectral
+    
+    return (freq_data_aa, spectral_data_aa), \
+           (freq_data_bb, spectral_data_bb), \
+           (freq_data_ab, spectral_data_ab)
+
+
+def read_spin_configuration(h_dir):
+    """Read spin configuration file and calculate magnetization"""
+    file_path = os.path.join(h_dir, "structure_factor_results", "beta_inf", "spin_configuration.txt")
+    
+    if not os.path.exists(file_path):
+        return None
+    
+    try:
+        # Extract Sz values from format (real,imag)
+        with open(file_path, 'r') as f:
+            lines = f.readlines()[1:]  # Skip header
+        
+        sz_values = []
+        for line in lines:
+            parts = line.strip().split()
+            if len(parts) >= 4:
+                # Parse Sz which is in format (real,imag)
+                sz_str = parts[3]
+                # Remove parentheses and split by comma
+                sz_str = sz_str.strip('()').split(',')
+                sz_real = float(sz_str[0])
+                sz_values.append(sz_real)
+        
+        # Calculate total magnetization (sum of all Sz components)
+        magnetization = np.sum(sz_values)
+        # Calculate magnetization per site
+        magnetization_per_site = magnetization / len(sz_values)
+        
+        return {
+            'total_magnetization': magnetization,
+            'magnetization_per_site': magnetization_per_site,
+            'num_sites': len(sz_values),
+            'sz_values': np.array(sz_values)
+        }
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        return None
 
 def create_do_channel(h_values, h_dirs, base_species):
     """
@@ -236,18 +525,27 @@ def create_heatmap_plot(h_values, freq_data, spectral_data, species, output_file
     
     fig, ax = plt.subplots(figsize=(12, 8))
     
-    # Convert h values for plotting
-    h_min_converted = min(h_values) * H_CONVERSION_FACTOR
-    h_max_converted = max(h_values) * H_CONVERSION_FACTOR
+    # Convert h values and frequency for plotting
+    h_values_converted = np.array(h_values) * H_CONVERSION_FACTOR
+    freq_meV = freq_ref * ENERGY_CONVERSION_FACTOR
     
-    # Convert frequency to meV
-    freq_min_meV = min(freq_ref) * ENERGY_CONVERSION_FACTOR
-    freq_max_meV = max(freq_ref) * ENERGY_CONVERSION_FACTOR
+    # Create meshgrid for pcolormesh (edges needed)
+    # Add boundary points for proper bin edges
+    h_edges = np.zeros(len(h_values_converted) + 1)
+    h_edges[0] = h_values_converted[0] - (h_values_converted[1] - h_values_converted[0]) / 2
+    h_edges[-1] = h_values_converted[-1] + (h_values_converted[-1] - h_values_converted[-2]) / 2
+    for i in range(1, len(h_values_converted)):
+        h_edges[i] = (h_values_converted[i-1] + h_values_converted[i]) / 2
     
-    # Create heatmap
-    im = ax.imshow(spectral_matrix, aspect='auto', origin='lower', 
-                   cmap='viridis', interpolation='bilinear',
-                   extent=[h_min_converted, h_max_converted, freq_min_meV, freq_max_meV])
+    freq_edges = np.zeros(len(freq_meV) + 1)
+    freq_edges[0] = freq_meV[0] - (freq_meV[1] - freq_meV[0]) / 2
+    freq_edges[-1] = freq_meV[-1] + (freq_meV[-1] - freq_meV[-2]) / 2
+    for i in range(1, len(freq_meV)):
+        freq_edges[i] = (freq_meV[i-1] + freq_meV[i]) / 2
+    
+    # Create heatmap with proper non-uniform spacing
+    im = ax.pcolormesh(h_edges, freq_edges, spectral_matrix, 
+                       cmap='viridis', shading='flat')
     
     ax.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
     ax.set_ylabel('Energy (meV)', fontsize=12)
@@ -454,37 +752,46 @@ def create_combined_heatmap_direct(h_values, all_freq_data, all_spectral_data, s
     # Create 3-panel figure
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
     
-    h_min_converted = min(h_values) * H_CONVERSION_FACTOR
-    h_max_converted = max(h_values) * H_CONVERSION_FACTOR
-    freq_min_meV = min(freq_ref) * ENERGY_CONVERSION_FACTOR
-    freq_max_meV = max(freq_ref) * ENERGY_CONVERSION_FACTOR
+    # Convert h values and frequency for plotting
+    h_values_converted = np.array(h_values) * H_CONVERSION_FACTOR
+    freq_meV = freq_ref * ENERGY_CONVERSION_FACTOR
+    
+    # Create meshgrid edges for pcolormesh (non-uniform spacing)
+    h_edges = np.zeros(len(h_values_converted) + 1)
+    h_edges[0] = h_values_converted[0] - (h_values_converted[1] - h_values_converted[0]) / 2
+    h_edges[-1] = h_values_converted[-1] + (h_values_converted[-1] - h_values_converted[-2]) / 2
+    for i in range(1, len(h_values_converted)):
+        h_edges[i] = (h_values_converted[i-1] + h_values_converted[i]) / 2
+    
+    freq_edges = np.zeros(len(freq_meV) + 1)
+    freq_edges[0] = freq_meV[0] - (freq_meV[1] - freq_meV[0]) / 2
+    freq_edges[-1] = freq_meV[-1] + (freq_meV[-1] - freq_meV[-2]) / 2
+    for i in range(1, len(freq_meV)):
+        freq_edges[i] = (freq_meV[i-1] + freq_meV[i]) / 2
     
     # Determine common color scale for consistency
     vmin = min(spm_matrix.min(), szz_matrix.min(), total_matrix.min())
     vmax = max(spm_matrix.max(), szz_matrix.max(), total_matrix.max())
     
     # Plot SmSp
-    im1 = axes[0].imshow(spm_matrix, aspect='auto', origin='lower', 
-                         cmap='viridis', interpolation='bilinear', vmin=vmin, vmax=vmax,
-                         extent=[h_min_converted, h_max_converted, freq_min_meV, freq_max_meV])
+    im1 = axes[0].pcolormesh(h_edges, freq_edges, spm_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
     axes[0].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
     axes[0].set_ylabel('Energy (meV)', fontsize=11)
     axes[0].set_title('SmSp', fontsize=12, fontweight='bold')
     fig.colorbar(im1, ax=axes[0])
     
     # Plot SzSz
-    im2 = axes[1].imshow(szz_matrix, aspect='auto', origin='lower', 
-                         cmap='viridis', interpolation='bilinear', vmin=vmin, vmax=vmax,
-                         extent=[h_min_converted, h_max_converted, freq_min_meV, freq_max_meV])
+    im2 = axes[1].pcolormesh(h_edges, freq_edges, szz_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
     axes[1].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
     axes[1].set_ylabel('Energy (meV)', fontsize=11)
     axes[1].set_title('SzSz', fontsize=12, fontweight='bold')
     fig.colorbar(im2, ax=axes[1])
     
     # Plot Total
-    im3 = axes[2].imshow(total_matrix, aspect='auto', origin='lower', 
-                         cmap='viridis', interpolation='bilinear', vmin=vmin, vmax=vmax,
-                         extent=[h_min_converted, h_max_converted, freq_min_meV, freq_max_meV])
+    im3 = axes[2].pcolormesh(h_edges, freq_edges, total_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
     axes[2].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
     axes[2].set_ylabel('Energy (meV)', fontsize=11)
     axes[2].set_title('Total (SmSp+SzSz)', fontsize=12, fontweight='bold')
@@ -590,15 +897,14 @@ def create_combined_animation_direct(h_values, all_freq_data, all_spectral_data,
         if freq_smsp_meV is not None and freq_szsz_meV is not None:
             # Interpolate to common grid if needed
             if len(freq_smsp_meV) == len(freq_szsz_meV) and np.allclose(freq_smsp_meV, freq_szsz_meV):
+                freq_total = freq_smsp_meV
                 spec_total = spec_smsp_filtered + spec_szsz_filtered
-                freq_total = freq_smsp_meV
             else:
-                # Use SmSp grid as reference
-                freq_smsp_raw = freq_smsp[mask_smsp]
-                freq_szsz_raw = freq_szsz[mask_szsz]
-                spec_szsz_interp = np.interp(freq_smsp_raw, freq_szsz_raw, spec_szsz_filtered)
-                spec_total = spec_smsp_filtered + spec_szsz_interp
+                # Use the first frequency grid as reference
                 freq_total = freq_smsp_meV
+                spec_smsp_interp = spec_smsp_filtered
+                spec_szsz_interp = np.interp(freq_smsp_meV, freq_szsz_meV, spec_szsz_filtered)
+                spec_total = spec_smsp_interp + spec_szsz_interp
             
             line_total.set_data(freq_total, spec_total)
         else:
@@ -615,6 +921,561 @@ def create_combined_animation_direct(h_values, all_freq_data, all_spectral_data,
     anim.save(output_file, writer=writer)
     print(f"  ✓ Saved combined animation: {output_file}")
     plt.close()
+
+def create_sublattice_comparison_plot(h_values, freq_data_aa, spectral_data_aa, 
+                                      freq_data_bb, spectral_data_bb,
+                                      freq_data_ab, spectral_data_ab,
+                                      base_species, output_file):
+    """
+    Create a plot showing AA, BB, and AB correlations for selected h values.
+    
+    Parameters:
+    - h_values: list of h values
+    - freq_data_aa, spectral_data_aa: AA correlation data
+    - freq_data_bb, spectral_data_bb: BB correlation data
+    - freq_data_ab, spectral_data_ab: AB correlation data
+    - base_species: base species name for title
+    - output_file: path to save the plot
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+    
+    # Plot for each h value (show up to 4 representative h values)
+    num_plots = min(4, len(h_values))
+    plot_indices = np.linspace(0, len(h_values)-1, num_plots, dtype=int)
+    
+    for plot_idx, h_idx in enumerate(plot_indices):
+        h = h_values[h_idx]
+        ax = axes[plot_idx]
+        
+        # Plot AA correlation
+        if h in freq_data_aa and h in spectral_data_aa:
+            freq = freq_data_aa[h]
+            spec = spectral_data_aa[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            ax.plot(freq_meV, spec[mask], 'b-', label='AA', linewidth=2, alpha=0.7)
+        
+        # Plot BB correlation
+        if h in freq_data_bb and h in spectral_data_bb:
+            freq = freq_data_bb[h]
+            spec = spectral_data_bb[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            ax.plot(freq_meV, spec[mask], 'r-', label='BB', linewidth=2, alpha=0.7)
+        
+        # Plot AB correlation
+        if h in freq_data_ab and h in spectral_data_ab:
+            freq = freq_data_ab[h]
+            spec = spectral_data_ab[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            ax.plot(freq_meV, spec[mask], 'g-', label='AB', linewidth=2, alpha=0.7)
+        
+        # Plot Total = AA + BB + 2*AB
+        if h in freq_data_aa and h in spectral_data_aa and \
+           h in freq_data_bb and h in spectral_data_bb and \
+           h in freq_data_ab and h in spectral_data_ab:
+            # Get all three spectra
+            freq_aa_full = freq_data_aa[h]
+            spec_aa_full = spectral_data_aa[h]
+            freq_bb_full = freq_data_bb[h]
+            spec_bb_full = spectral_data_bb[h]
+            freq_ab_full = freq_data_ab[h]
+            spec_ab_full = spectral_data_ab[h]
+            
+            # Use AA as reference grid
+            mask_aa = (freq_aa_full >= FREQ_MIN) & (freq_aa_full <= FREQ_MAX)
+            freq_ref = freq_aa_full[mask_aa]
+            spec_aa_filtered = spec_aa_full[mask_aa]
+            
+            # Interpolate BB and AB to AA grid
+            spec_bb_interp = np.interp(freq_ref, freq_bb_full, spec_bb_full)
+            spec_ab_interp = np.interp(freq_ref, freq_ab_full, spec_ab_full)
+            
+            # Calculate total
+            spec_total = spec_aa_filtered + spec_bb_interp + 2 * spec_ab_interp
+            freq_meV = freq_ref * ENERGY_CONVERSION_FACTOR
+            ax.plot(freq_meV, spec_total, 'm-', label='Total (AA+BB+2AB)', linewidth=2.5, alpha=0.9)
+        
+        h_converted = h * H_CONVERSION_FACTOR
+        ax.set_xlabel('Energy (meV)', fontsize=11)
+        ax.set_ylabel('Spectral Function', fontsize=11)
+        ax.set_title(f'{base_species} - h={h_converted:.3f} T', fontsize=12, fontweight='bold')
+        ax.legend(loc='best', fontsize=10)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim([FREQ_MIN * ENERGY_CONVERSION_FACTOR, FREQ_MAX * ENERGY_CONVERSION_FACTOR])
+    
+    plt.suptitle(f'Sublattice Correlations (AA/BB/AB/Total) - {base_species}', 
+                 fontsize=14, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"  ✓ Saved sublattice comparison plot: {output_file}")
+    plt.close()
+
+def create_sublattice_heatmap(h_values, freq_data_aa, spectral_data_aa, 
+                              freq_data_bb, spectral_data_bb,
+                              freq_data_ab, spectral_data_ab,
+                              base_species, output_file):
+    """
+    Create a 4-panel heatmap showing AA, BB, AB, and Total correlations side by side.
+    """
+    # Get a common frequency grid
+    if not h_values or h_values[0] not in freq_data_aa:
+        print(f"  ⚠ No data available for sublattice heatmap of {base_species}")
+        return
+    
+    freq_ref_full = freq_data_aa[h_values[0]]
+    mask = (freq_ref_full >= FREQ_MIN) & (freq_ref_full <= FREQ_MAX)
+    freq_ref = freq_ref_full[mask]
+    
+    # Create data matrices
+    aa_matrix = np.zeros((len(freq_ref), len(h_values)))
+    bb_matrix = np.zeros((len(freq_ref), len(h_values)))
+    ab_matrix = np.zeros((len(freq_ref), len(h_values)))
+    total_matrix = np.zeros((len(freq_ref), len(h_values)))
+    
+    for i, h in enumerate(h_values):
+        # Process AA
+        if h in spectral_data_aa:
+            freq_h = freq_data_aa[h]
+            spec_h = spectral_data_aa[h]
+            mask_h = (freq_h >= FREQ_MIN) & (freq_h <= FREQ_MAX)
+            aa_matrix[:, i] = np.interp(freq_ref, freq_h[mask_h], spec_h[mask_h])
+        
+        # Process BB
+        if h in spectral_data_bb:
+            freq_h = freq_data_bb[h]
+            spec_h = spectral_data_bb[h]
+            mask_h = (freq_h >= FREQ_MIN) & (freq_h <= FREQ_MAX)
+            bb_matrix[:, i] = np.interp(freq_ref, freq_h[mask_h], spec_h[mask_h])
+        
+        # Process AB
+        if h in spectral_data_ab:
+            freq_h = freq_data_ab[h]
+            spec_h = spectral_data_ab[h]
+            mask_h = (freq_h >= FREQ_MIN) & (freq_h <= FREQ_MAX)
+            ab_matrix[:, i] = np.interp(freq_ref, freq_h[mask_h], spec_h[mask_h])
+        
+        # Calculate Total = AA + BB + 2*AB
+        total_matrix[:, i] = aa_matrix[:, i] + bb_matrix[:, i] + 2 * ab_matrix[:, i]
+    
+    # Create 4-panel figure (2x2 layout)
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    axes = axes.flatten()
+    
+    # Convert h values and frequency for plotting
+    h_values_converted = np.array(h_values) * H_CONVERSION_FACTOR
+    freq_meV = freq_ref * ENERGY_CONVERSION_FACTOR
+    
+    # Create meshgrid edges for pcolormesh (non-uniform spacing)
+    h_edges = np.zeros(len(h_values_converted) + 1)
+    h_edges[0] = h_values_converted[0] - (h_values_converted[1] - h_values_converted[0]) / 2
+    h_edges[-1] = h_values_converted[-1] + (h_values_converted[-1] - h_values_converted[-2]) / 2
+    for i in range(1, len(h_values_converted)):
+        h_edges[i] = (h_values_converted[i-1] + h_values_converted[i]) / 2
+    
+    freq_edges = np.zeros(len(freq_meV) + 1)
+    freq_edges[0] = freq_meV[0] - (freq_meV[1] - freq_meV[0]) / 2
+    freq_edges[-1] = freq_meV[-1] + (freq_meV[-1] - freq_meV[-2]) / 2
+    for i in range(1, len(freq_meV)):
+        freq_edges[i] = (freq_meV[i-1] + freq_meV[i]) / 2
+    
+    # Determine common color scale
+    vmin = min(aa_matrix.min(), bb_matrix.min(), ab_matrix.min(), total_matrix.min())
+    vmax = max(aa_matrix.max(), bb_matrix.max(), ab_matrix.max(), total_matrix.max())
+    
+    # Plot AA
+    im1 = axes[0].pcolormesh(h_edges, freq_edges, aa_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
+    axes[0].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
+    axes[0].set_ylabel('Energy (meV)', fontsize=11)
+    axes[0].set_title('AA Correlation', fontsize=12, fontweight='bold')
+    fig.colorbar(im1, ax=axes[0])
+    
+    # Plot BB
+    im2 = axes[1].pcolormesh(h_edges, freq_edges, bb_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
+    axes[1].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
+    axes[1].set_ylabel('Energy (meV)', fontsize=11)
+    axes[1].set_title('BB Correlation', fontsize=12, fontweight='bold')
+    fig.colorbar(im2, ax=axes[1])
+    
+    # Plot AB
+    im3 = axes[2].pcolormesh(h_edges, freq_edges, ab_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
+    axes[2].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
+    axes[2].set_ylabel('Energy (meV)', fontsize=11)
+    axes[2].set_title('AB Correlation', fontsize=12, fontweight='bold')
+    fig.colorbar(im3, ax=axes[2])
+    
+    # Plot Total
+    im4 = axes[3].pcolormesh(h_edges, freq_edges, total_matrix, 
+                             cmap='viridis', shading='flat', vmin=vmin, vmax=vmax)
+    axes[3].set_xlabel('Magnetic Field (h) [T]', fontsize=11)
+    axes[3].set_ylabel('Energy (meV)', fontsize=11)
+    axes[3].set_title('Total (AA+BB+2AB)', fontsize=12, fontweight='bold')
+    fig.colorbar(im4, ax=axes[3])
+    
+    plt.suptitle(f'Sublattice Correlations Heatmap - {base_species}', 
+                 fontsize=14, fontweight='bold')
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"  ✓ Saved sublattice heatmap: {output_file}")
+    plt.close()
+
+def create_sublattice_animation(h_values, freq_data_aa, spectral_data_aa, 
+                                freq_data_bb, spectral_data_bb,
+                                freq_data_ab, spectral_data_ab,
+                                base_species, output_file):
+    """
+    Create an animation showing AA, BB, and AB correlations evolving with h.
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Get y-axis limits
+    all_aa = [spectral_data_aa[h] for h in h_values if h in spectral_data_aa]
+    all_bb = [spectral_data_bb[h] for h in h_values if h in spectral_data_bb]
+    all_ab = [spectral_data_ab[h] for h in h_values if h in spectral_data_ab]
+    
+    if not all_aa and not all_bb and not all_ab:
+        print(f"  ⚠ No data available for sublattice animation of {base_species}")
+        return
+    
+    all_data = all_aa + all_bb + all_ab
+    ymin = min([np.min(s) for s in all_data if len(s) > 0])
+    ymax = max([np.max(s) for s in all_data if len(s) > 0])
+    
+    y_range = ymax - ymin
+    ymin -= 0.1 * y_range
+    ymax += 0.1 * y_range
+    
+    # Create line objects
+    line_aa, = ax.plot([], [], 'b-', linewidth=2, alpha=0.7, label='AA')
+    line_bb, = ax.plot([], [], 'r-', linewidth=2, alpha=0.7, label='BB')
+    line_ab, = ax.plot([], [], 'g-', linewidth=2, alpha=0.7, label='AB')
+    line_total, = ax.plot([], [], 'm-', linewidth=2.5, alpha=0.9, label='Total (AA+BB+2AB)')
+    
+    ax.set_xlim(FREQ_MIN * ENERGY_CONVERSION_FACTOR, FREQ_MAX * ENERGY_CONVERSION_FACTOR)
+    ax.set_ylim(ymin, ymax)
+    ax.set_xlabel('Energy (meV)', fontsize=12)
+    ax.set_ylabel('Spectral Function', fontsize=12)
+    ax.legend(loc='best', fontsize=11)
+    ax.grid(True, alpha=0.3)
+    
+    title = ax.set_title('', fontsize=14, fontweight='bold')
+    
+    def init():
+        line_aa.set_data([], [])
+        line_bb.set_data([], [])
+        line_ab.set_data([], [])
+        line_total.set_data([], [])
+        return line_aa, line_bb, line_ab, line_total, title
+    
+    def animate(frame):
+        h = h_values[frame]
+        h_converted = h * H_CONVERSION_FACTOR
+        
+        # Plot AA
+        freq_aa_data = None
+        spec_aa_data = None
+        if h in freq_data_aa and h in spectral_data_aa:
+            freq = freq_data_aa[h]
+            spec = spectral_data_aa[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            spec_filtered = spec[mask]
+            line_aa.set_data(freq_meV, spec_filtered)
+            freq_aa_data = freq[mask]
+            spec_aa_data = spec_filtered
+        else:
+            line_aa.set_data([], [])
+        
+        # Plot BB
+        freq_bb_data = None
+        spec_bb_data = None
+        if h in freq_data_bb and h in spectral_data_bb:
+            freq = freq_data_bb[h]
+            spec = spectral_data_bb[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            spec_filtered = spec[mask]
+            line_bb.set_data(freq_meV, spec_filtered)
+            freq_bb_data = freq[mask]
+            spec_bb_data = spec_filtered
+        else:
+            line_bb.set_data([], [])
+        
+        # Plot AB
+        freq_ab_data = None
+        spec_ab_data = None
+        if h in freq_data_ab and h in spectral_data_ab:
+            freq = freq_data_ab[h]
+            spec = spectral_data_ab[h]
+            mask = (freq >= FREQ_MIN) & (freq <= FREQ_MAX)
+            freq_meV = freq[mask] * ENERGY_CONVERSION_FACTOR
+            spec_filtered = spec[mask]
+            line_ab.set_data(freq_meV, spec_filtered)
+            freq_ab_data = freq[mask]
+            spec_ab_data = spec_filtered
+        else:
+            line_ab.set_data([], [])
+        
+        # Plot Total = AA + BB + 2*AB
+        if freq_aa_data is not None and spec_aa_data is not None and \
+           freq_bb_data is not None and spec_bb_data is not None and \
+           freq_ab_data is not None and spec_ab_data is not None:
+            # Interpolate all to AA grid
+            spec_bb_interp = np.interp(freq_aa_data, freq_bb_data, spec_bb_data)
+            spec_ab_interp = np.interp(freq_aa_data, freq_ab_data, spec_ab_data)
+            spec_total = spec_aa_data + spec_bb_interp + 2 * spec_ab_interp
+            freq_meV = freq_aa_data * ENERGY_CONVERSION_FACTOR
+            line_total.set_data(freq_meV, spec_total)
+        else:
+            line_total.set_data([], [])
+        
+        title.set_text(f'Sublattice Correlations - {base_species} - h={h_converted:.3f} T')
+        return line_aa, line_bb, line_ab, line_total, title
+    
+    anim = FuncAnimation(fig, animate, init_func=init, 
+                        frames=len(h_values), interval=200, blit=True)
+    
+    # Save animation
+    writer = PillowWriter(fps=2)
+    anim.save(output_file, writer=writer)
+    print(f"  ✓ Saved sublattice animation: {output_file}")
+    plt.close()
+
+def create_magnetization_plot(h_values, h_dirs, output_file):
+
+    """
+    Create a plot showing magnetization as a function of magnetic field h.
+    
+    Parameters:
+    - h_values: list of h values
+    - h_dirs: dict mapping h -> directory path
+    - output_file: path to save the plot
+    """
+    print("\nCreating magnetization plot...")
+    
+    # Collect magnetization data
+    h_list = []
+    mag_total_list = []
+    mag_per_site_list = []
+    
+    for h in h_values:
+        h_dir = h_dirs[h]
+        mag_data = read_spin_configuration(h_dir)
+        
+        if mag_data is not None:
+            h_list.append(h * H_CONVERSION_FACTOR)  # Convert to Tesla
+            mag_total_list.append(mag_data['total_magnetization'])
+            mag_per_site_list.append(mag_data['magnetization_per_site'])
+    
+    if not h_list:
+        print("  ⚠ No magnetization data found!")
+        return
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+    
+    # Plot 1: Total magnetization
+    ax1.plot(h_list, mag_total_list, 'bo-', linewidth=2, markersize=6, alpha=0.7)
+    ax1.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax1.set_ylabel('Total Magnetization', fontsize=12)
+    ax1.set_title('Total Magnetization vs Magnetic Field', fontsize=14, fontweight='bold')
+    ax1.grid(True, alpha=0.3)
+    
+    # Plot 2: Magnetization per site
+    ax2.plot(h_list, mag_per_site_list, 'ro-', linewidth=2, markersize=6, alpha=0.7)
+    ax2.set_xlabel('Magnetic Field (h) [T]', fontsize=12)
+    ax2.set_ylabel('Magnetization per Site', fontsize=12)
+    ax2.set_title('Magnetization per Site vs Magnetic Field', fontsize=14, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"  ✓ Saved magnetization plot: {output_file}")
+    plt.close()
+    
+    # Also save magnetization data to a text file
+    data_file = output_file.replace('.png', '_data.txt')
+    with open(data_file, 'w') as f:
+        f.write("# Magnetic Field (T)\tTotal Magnetization\tMagnetization per Site\n")
+        for h, mag_tot, mag_per in zip(h_list, mag_total_list, mag_per_site_list):
+            f.write(f"{h:.6f}\t{mag_tot:.6f}\t{mag_per:.6f}\n")
+    print(f"  ✓ Saved magnetization data: {data_file}")
+
+
+def create_summary_report(h_values, h_dirs, all_species, do_channels, 
+                         species_combinations, sublattice_base_patterns):
+    """
+    Create a comprehensive summary report of all processed data.
+    
+    Parameters:
+    - h_values: list of h field values
+    - h_dirs: dictionary mapping h values to directories
+    - all_species: list of all species found
+    - do_channels: dictionary of DO channels
+    - species_combinations: dictionary of species combinations
+    - sublattice_base_patterns: list of base patterns with sublattice data
+    """
+    summary_file = os.path.join(SUBDIRS['summary'], "ANALYSIS_SUMMARY.txt")
+    
+    with open(summary_file, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("DYNAMIC STRUCTURE FACTOR ANALYSIS SUMMARY\n")
+        f.write("="*80 + "\n\n")
+        
+        # Dataset information
+        f.write("DATASET INFORMATION\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Base Directory: {BASE_DIR}\n")
+        f.write(f"Output Directory: {OUTPUT_DIR}\n")
+        f.write(f"Number of h-field values: {len(h_values)}\n")
+        f.write(f"h-field range: {min(h_values):.3f} to {max(h_values):.3f} (Jzz units)\n")
+        f.write(f"h-field range: {min(h_values)*H_CONVERSION_FACTOR:.3f} to {max(h_values)*H_CONVERSION_FACTOR:.3f} (Tesla)\n")
+        f.write(f"\nEnergy conversion factor: {ENERGY_CONVERSION_FACTOR} meV/Jzz\n")
+        f.write(f"Field conversion factor: {H_CONVERSION_FACTOR:.6f} T/Jzz\n\n")
+        
+        # Species information
+        f.write("SPECIES ANALYZED\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Total number of species: {len(all_species)}\n\n")
+        
+        # Group species by type
+        smsp_species = [s for s in all_species if s.startswith("SmSp_")]
+        szsz_species = [s for s in all_species if s.startswith("SzSz_")]
+        other_species = [s for s in all_species if not (s.startswith("SmSp_") or s.startswith("SzSz_"))]
+        
+        f.write(f"SmSp Species ({len(smsp_species)}):\n")
+        for sp in sorted(smsp_species):
+            f.write(f"  - {sp}\n")
+        
+        f.write(f"\nSzSz Species ({len(szsz_species)}):\n")
+        for sp in sorted(szsz_species):
+            f.write(f"  - {sp}\n")
+        
+        if other_species:
+            f.write(f"\nOther Species ({len(other_species)}):\n")
+            for sp in sorted(other_species):
+                f.write(f"  - {sp}\n")
+        
+        # DO channels
+        f.write(f"\n\nDO CHANNELS (SF + NSF)\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Number of DO channels created: {len(do_channels)}\n\n")
+        for do_sp in sorted(do_channels.keys()):
+            f.write(f"  - {do_sp}\n")
+        
+        # Combined plots
+        f.write(f"\n\nCOMBINED SmSp + SzSz PLOTS\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Number of combined plots: {len(species_combinations)}\n\n")
+        for (base_pattern, suffix), components in sorted(species_combinations.items()):
+            f.write(f"  - {base_pattern}{suffix}\n")
+            f.write(f"    Components: {', '.join(sorted(components))}\n")
+        
+        # Sublattice correlations
+        f.write(f"\n\nSUBLATTICE CORRELATIONS\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Sublattice A indices: {SUBLATTICE_A}\n")
+        f.write(f"Sublattice B indices: {SUBLATTICE_B}\n")
+        f.write(f"Number of base patterns with sublattice data: {len(sublattice_base_patterns)}\n\n")
+        for pattern in sorted(sublattice_base_patterns):
+            f.write(f"  - {pattern}\n")
+        
+        # Output structure
+        f.write(f"\n\nOUTPUT STRUCTURE\n")
+        f.write("-"*80 + "\n")
+        f.write("The analysis outputs are organized in the following subdirectories:\n\n")
+        f.write("0_summary/\n")
+        f.write("  - This summary report\n")
+        f.write("  - Key figures and overview plots\n\n")
+        f.write("1_individual_species/\n")
+        f.write(f"  - {len(all_species)} individual species\n")
+        f.write("  - 4 plots per species: stacked, heatmap, 3D surface, animation\n\n")
+        f.write("2_DO_channels/\n")
+        f.write(f"  - {len(do_channels)} DO channels (SF + NSF)\n")
+        f.write("  - 4 plots per channel: stacked, heatmap, 3D surface, animation\n\n")
+        f.write("3_combined_SmSp_SzSz/\n")
+        f.write(f"  - {len([k for k, v in species_combinations.items() if 'SmSp' in v and 'SzSz' in v])} combined plots\n")
+        f.write("  - 3 plots per combination: components, heatmap, animation\n\n")
+        f.write("4_sublattice_correlations/\n")
+        f.write(f"  - {len(sublattice_base_patterns)} base patterns\n")
+        f.write("  - 3 plots per pattern: comparison, heatmap, animation\n\n")
+        f.write("5_global_transverse/\n")
+        f.write(f"  - {len(sublattice_base_patterns)} transverse sublattice plots\n")
+        f.write("  - 3 plots per pattern: comparison, heatmap, animation\n\n")
+        f.write("6_magnetization/\n")
+        f.write("  - Magnetization vs field plot and data\n\n")
+        
+        # Statistics
+        total_plots = (len(all_species) * 4 + 
+                      len(do_channels) * 4 + 
+                      len([k for k, v in species_combinations.items() if 'SmSp' in v and 'SzSz' in v]) * 3 +
+                      len(sublattice_base_patterns) * 3 * 2 +  # Regular + transverse
+                      1)  # Magnetization
+        
+        f.write(f"\n\nSTATISTICS\n")
+        f.write("-"*80 + "\n")
+        f.write(f"Total number of plots generated: ~{total_plots}\n")
+        f.write(f"Total h-field points analyzed: {len(h_values)}\n")
+        f.write(f"Frequency range analyzed: {FREQ_MIN} to {FREQ_MAX} Jzz\n")
+        f.write(f"Energy range analyzed: {FREQ_MIN*ENERGY_CONVERSION_FACTOR:.3f} to {FREQ_MAX*ENERGY_CONVERSION_FACTOR:.3f} meV\n\n")
+        
+        f.write("="*80 + "\n")
+        f.write("End of Summary Report\n")
+        f.write("="*80 + "\n")
+    
+    print(f"  ✓ Saved summary report: {summary_file}")
+    
+    # Also create a README file in the main output directory
+    readme_file = os.path.join(OUTPUT_DIR, "README.txt")
+    with open(readme_file, 'w') as f:
+        f.write("DYNAMIC STRUCTURE FACTOR ANALYSIS OUTPUT\n")
+        f.write("="*80 + "\n\n")
+        f.write("This directory contains comprehensive analysis of dynamic structure factor data\n")
+        f.write("across multiple magnetic field values.\n\n")
+        f.write("DIRECTORY STRUCTURE:\n\n")
+        f.write("0_summary/              - Summary report and overview\n")
+        f.write("1_individual_species/   - Individual species spectral functions\n")
+        f.write("2_DO_channels/          - Difference Orbital (SF + NSF) channels\n")
+        f.write("3_combined_SmSp_SzSz/   - Combined SmSp + SzSz analysis\n")
+        f.write("4_sublattice_correlations/ - Sublattice (AA/BB/AB) correlations\n")
+        f.write("5_global_transverse/    - Global transverse sublattice analysis\n")
+        f.write("6_magnetization/        - Magnetization vs field analysis\n\n")
+        f.write("For more details, see 0_summary/ANALYSIS_SUMMARY.txt\n")
+    
+    print(f"  ✓ Saved README: {readme_file}")
+    
+    # Create a file listing for easy navigation
+    catalog_file = os.path.join(SUBDIRS['summary'], "FILE_CATALOG.txt")
+    with open(catalog_file, 'w') as f:
+        f.write("="*80 + "\n")
+        f.write("FILE CATALOG - All Generated Outputs\n")
+        f.write("="*80 + "\n\n")
+        
+        for subdir_name, subdir_path in sorted(SUBDIRS.items()):
+            if os.path.exists(subdir_path):
+                files = sorted([f for f in os.listdir(subdir_path) if os.path.isfile(os.path.join(subdir_path, f))])
+                if files:
+                    f.write(f"\n{os.path.basename(subdir_path)}/\n")
+                    f.write("-"*80 + "\n")
+                    f.write(f"Total files: {len(files)}\n\n")
+                    for fname in files:
+                        fpath = os.path.join(subdir_path, fname)
+                        fsize = os.path.getsize(fpath)
+                        if fsize > 1024*1024:
+                            size_str = f"{fsize/(1024*1024):.2f} MB"
+                        elif fsize > 1024:
+                            size_str = f"{fsize/1024:.2f} KB"
+                        else:
+                            size_str = f"{fsize} B"
+                        f.write(f"  {fname:<60} {size_str:>10}\n")
+    
+    print(f"  ✓ Saved file catalog: {catalog_file}")
+
 
 def main():
     """Main function to process all data and create plots"""
@@ -669,51 +1530,55 @@ def main():
     # Process each species
     print("\n" + "="*80)
     for species in all_species:
-        print(f"\nProcessing species: {species}")
-        print("-"*80)
-        
-        # Collect data for this species across all h values
-        freq_data = {}
-        spectral_data = {}
-        
-        for h in h_values:
-            h_dir = h_dirs[h]
-            freq, spectral = read_spectral_data(h_dir, species)
+        try:
+            print(f"\nProcessing species: {species}")
+            print("-"*80)
             
-            if freq is not None and spectral is not None:
-                freq_data[h] = freq
-                spectral_data[h] = spectral
-                print(f"  ✓ h={h:.2f}: {len(freq)} data points")
-            else:
-                print(f"  ✗ h={h:.2f}: No data")
-        
-        if not spectral_data:
-            print(f"  No data found for {species}, skipping...")
+            # Collect data for this species across all h values
+            freq_data = {}
+            spectral_data = {}
+            
+            for h in h_values:
+                h_dir = h_dirs[h]
+                freq, spectral = read_spectral_data(h_dir, species)
+                
+                if freq is not None and spectral is not None:
+                    freq_data[h] = freq
+                    spectral_data[h] = spectral
+                    print(f"  ✓ h={h:.2f}: {len(freq)} data points")
+                else:
+                    print(f"  ✗ h={h:.2f}: No data")
+            
+            if not spectral_data:
+                print(f"  No data found for {species}, skipping...")
+                continue
+            
+            # Create safe filename
+            safe_species_name = species.replace("/", "_").replace(" ", "_")
+            
+            # Create plots in individual species subdirectory
+            print(f"\n  Creating plots for {species}...")
+            
+            # 1. Stacked plot
+            stacked_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_stacked.png")
+            create_stacked_plot(h_values, freq_data, spectral_data, species, stacked_file)
+            
+            # 2. Heatmap
+            heatmap_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_heatmap.png")
+            create_heatmap_plot(h_values, freq_data, spectral_data, species, heatmap_file)
+            
+            # 3. 3D surface plot
+            surface_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_3d_surface.png")
+            create_3d_surface_plot(h_values, freq_data, spectral_data, species, surface_file)
+            
+            # 4. Animation
+            anim_file = os.path.join(SUBDIRS['individual'], f"{safe_species_name}_animation.gif")
+            create_animation(h_values, freq_data, spectral_data, species, anim_file)
+            
+            print(f"  ✓ Completed {species}")
+        except Exception as e:
+            print(f"  ✗ Error processing {species}: {e}")
             continue
-        
-        # Create safe filename
-        safe_species_name = species.replace("/", "_").replace(" ", "_")
-        
-        # Create plots
-        print(f"\n  Creating plots for {species}...")
-        
-        # 1. Stacked plot
-        stacked_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_stacked.png")
-        create_stacked_plot(h_values, freq_data, spectral_data, species, stacked_file)
-        
-        # 2. Heatmap
-        heatmap_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_heatmap.png")
-        create_heatmap_plot(h_values, freq_data, spectral_data, species, heatmap_file)
-        
-        # 3. 3D surface plot
-        surface_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_3d_surface.png")
-        create_3d_surface_plot(h_values, freq_data, spectral_data, species, surface_file)
-        
-        # 4. Animation
-        anim_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_animation.gif")
-        create_animation(h_values, freq_data, spectral_data, species, anim_file)
-        
-        print(f"  ✓ Completed {species}")
     
     # Process DO channels
     if do_channels:
@@ -722,36 +1587,40 @@ def main():
         print("="*80)
         
         for do_species, (freq_data, spectral_data) in do_channels.items():
-            print(f"\nProcessing DO channel: {do_species}")
-            print("-"*80)
-            
-            if not spectral_data:
-                print(f"  No data found for {do_species}, skipping...")
+            try:
+                print(f"\nProcessing DO channel: {do_species}")
+                print("-"*80)
+                
+                if not spectral_data:
+                    print(f"  No data found for {do_species}, skipping...")
+                    continue
+                
+                # Create safe filename
+                safe_species_name = do_species.replace("/", "_").replace(" ", "_")
+                
+                # Create plots in DO channels subdirectory
+                print(f"  Creating plots for {do_species}...")
+                
+                # 1. Stacked plot
+                stacked_file = os.path.join(SUBDIRS['do_channels'], f"{safe_species_name}_stacked.png")
+                create_stacked_plot(h_values, freq_data, spectral_data, do_species, stacked_file)
+                
+                # 2. Heatmap
+                heatmap_file = os.path.join(SUBDIRS['do_channels'], f"{safe_species_name}_heatmap.png")
+                create_heatmap_plot(h_values, freq_data, spectral_data, do_species, heatmap_file)
+                
+                # 3. 3D surface plot
+                surface_file = os.path.join(SUBDIRS['do_channels'], f"{safe_species_name}_3d_surface.png")
+                create_3d_surface_plot(h_values, freq_data, spectral_data, do_species, surface_file)
+                
+                # 4. Animation
+                anim_file = os.path.join(SUBDIRS['do_channels'], f"{safe_species_name}_animation.gif")
+                create_animation(h_values, freq_data, spectral_data, do_species, anim_file)
+                
+                print(f"  ✓ Completed {do_species}")
+            except Exception as e:
+                print(f"  ✗ Error processing {do_species}: {e}")
                 continue
-            
-            # Create safe filename
-            safe_species_name = do_species.replace("/", "_").replace(" ", "_")
-            
-            # Create plots
-            print(f"  Creating plots for {do_species}...")
-            
-            # 1. Stacked plot
-            stacked_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_stacked.png")
-            create_stacked_plot(h_values, freq_data, spectral_data, do_species, stacked_file)
-            
-            # 2. Heatmap
-            heatmap_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_heatmap.png")
-            create_heatmap_plot(h_values, freq_data, spectral_data, do_species, heatmap_file)
-            
-            # 3. 3D surface plot
-            surface_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_3d_surface.png")
-            create_3d_surface_plot(h_values, freq_data, spectral_data, do_species, surface_file)
-            
-            # 4. Animation
-            anim_file = os.path.join(OUTPUT_DIR, f"{safe_species_name}_animation.gif")
-            create_animation(h_values, freq_data, spectral_data, do_species, anim_file)
-            
-            print(f"  ✓ Completed {do_species}")
     
     # Create combined Spm + Szz plots
     print("\n" + "="*80)
@@ -835,37 +1704,338 @@ def main():
     # Create combined plots for species with both SmSp and SzSz
     for (base_pattern, suffix), components in species_combinations.items():
         if "SmSp" in components and "SzSz" in components:
-            print(f"\nCreating combined plots for {base_pattern}{suffix}")
+            try:
+                print(f"\nCreating combined plots for {base_pattern}{suffix}")
+                print("-"*80)
+                
+                # Reconstruct the full species names
+                smsp_species = f"SmSp_{base_pattern}{suffix}"
+                szsz_species = f"SzSz_{base_pattern}{suffix}"
+                
+                safe_name = f"{base_pattern}{suffix}".replace("/", "_").replace(" ", "_")
+                
+                # 1. Combined component plot (line plots at different h values) - in combined subdirectory
+                combined_file = os.path.join(SUBDIRS['combined'], f"{safe_name}_combined_components.png")
+                create_combined_component_plot_direct(h_values, all_freq_data, all_spectral_data, 
+                                                      smsp_species, szsz_species, 
+                                                      f"{base_pattern}{suffix}", combined_file)
+                
+                # 2. Combined heatmap (3-panel: SmSp, SzSz, Total)
+                heatmap_file = os.path.join(SUBDIRS['combined'], f"{safe_name}_combined_heatmap.png")
+                create_combined_heatmap_direct(h_values, all_freq_data, all_spectral_data, 
+                                              smsp_species, szsz_species,
+                                              f"{base_pattern}{suffix}", heatmap_file)
+                
+                # 3. Combined animation (GIF showing SmSp, SzSz, and Total evolving with h)
+                anim_file = os.path.join(SUBDIRS['combined'], f"{safe_name}_combined_animation.gif")
+                create_combined_animation_direct(h_values, all_freq_data, all_spectral_data,
+                                               smsp_species, szsz_species,
+                                               f"{base_pattern}{suffix}", anim_file)
+                
+                print(f"  ✓ Completed combined plots for {base_pattern}{suffix}")
+            except Exception as e:
+                print(f"  ✗ Error creating combined plots for {base_pattern}{suffix}: {e}")
+                continue
+    
+    # Process sublattice correlations
+    print("\n" + "="*80)
+    print("Processing sublattice correlations (AA/BB/AB)...")
+    print(f"Sublattice A: {SUBLATTICE_A}, Sublattice B: {SUBLATTICE_B}")
+    print("="*80)
+    
+    # Find all unique base species patterns that have sublattice data
+    sublattice_base_patterns = set()
+    for species in all_species:
+        if '_sub' in species:
+            base = get_base_species_name(species)
+            sublattice_base_patterns.add(base)
+    
+    sublattice_base_patterns = sorted(list(sublattice_base_patterns))
+    print(f"Found {len(sublattice_base_patterns)} base patterns with sublattice data:")
+    for pattern in sublattice_base_patterns:
+        print(f"  - {pattern}")
+    
+    # Group patterns by SmSp/SzSz pairs for combined processing
+    sublattice_smsp_patterns = [p for p in sublattice_base_patterns if p.startswith("SmSp_")]
+    sublattice_szsz_patterns = [p for p in sublattice_base_patterns if p.startswith("SzSz_")]
+    
+    # Create mapping of SmSp to SzSz pairs (same Q-vector and suffix)
+    sublattice_combined_pairs = []
+    for smsp_pattern in sublattice_smsp_patterns:
+        # Extract base part (without SmSp_)
+        smsp_base = smsp_pattern.replace("SmSp_", "")
+        # Look for corresponding SzSz pattern
+        szsz_pattern = f"SzSz_{smsp_base}"
+        if szsz_pattern in sublattice_szsz_patterns:
+            sublattice_combined_pairs.append((smsp_pattern, szsz_pattern, smsp_base))
+    
+    # Process each base pattern
+    for base_pattern in sublattice_base_patterns:
+        try:
+            print(f"\nProcessing sublattice correlations for: {base_pattern}")
             print("-"*80)
             
-            # Reconstruct the full species names
-            smsp_species = f"SmSp_{base_pattern}{suffix}"
-            szsz_species = f"SzSz_{base_pattern}{suffix}"
+            # Create AA, BB, AB correlation data
+            (freq_aa, spec_aa), (freq_bb, spec_bb), (freq_ab, spec_ab) = \
+                create_sublattice_correlation_data(h_values, h_dirs, base_pattern)
             
-            safe_name = f"{base_pattern}{suffix}".replace("/", "_").replace(" ", "_")
+            # Check if we have data
+            if not spec_aa and not spec_bb and not spec_ab:
+                print(f"  ⚠ No sublattice data found for {base_pattern}, skipping...")
+                continue
             
-            # 1. Combined component plot (line plots at different h values)
-            combined_file = os.path.join(OUTPUT_DIR, f"{safe_name}_combined_components.png")
-            create_combined_component_plot_direct(h_values, all_freq_data, all_spectral_data, 
-                                                  smsp_species, szsz_species, 
-                                                  f"{base_pattern}{suffix}", combined_file)
+            # Create safe filename
+            safe_pattern = base_pattern.replace("/", "_").replace(" ", "_")
             
-            # 2. Combined heatmap (3-panel: SmSp, SzSz, Total)
-            heatmap_file = os.path.join(OUTPUT_DIR, f"{safe_name}_combined_heatmap.png")
-            create_combined_heatmap_direct(h_values, all_freq_data, all_spectral_data, 
-                                          smsp_species, szsz_species,
-                                          f"{base_pattern}{suffix}", heatmap_file)
+            # 1. Sublattice comparison plot (line plots at different h values) - in sublattice subdirectory
+            comparison_file = os.path.join(SUBDIRS['sublattice'], f"{safe_pattern}_sublattice_comparison.png")
+            create_sublattice_comparison_plot(h_values, freq_aa, spec_aa, freq_bb, spec_bb, 
+                                             freq_ab, spec_ab, base_pattern, comparison_file)
             
-            # 3. Combined animation (GIF showing SmSp, SzSz, and Total evolving with h)
-            anim_file = os.path.join(OUTPUT_DIR, f"{safe_name}_combined_animation.gif")
-            create_combined_animation_direct(h_values, all_freq_data, all_spectral_data,
-                                           smsp_species, szsz_species,
-                                           f"{base_pattern}{suffix}", anim_file)
+            # 2. Sublattice heatmap (3-panel: AA, BB, AB)
+            heatmap_file = os.path.join(SUBDIRS['sublattice'], f"{safe_pattern}_sublattice_heatmap.png")
+            create_sublattice_heatmap(h_values, freq_aa, spec_aa, freq_bb, spec_bb, 
+                                     freq_ab, spec_ab, base_pattern, heatmap_file)
             
-            print(f"  ✓ Completed combined plots for {base_pattern}{suffix}")
+            # 3. Sublattice animation (GIF showing AA, BB, AB evolving with h)
+            anim_file = os.path.join(SUBDIRS['sublattice'], f"{safe_pattern}_sublattice_animation.gif")
+            create_sublattice_animation(h_values, freq_aa, spec_aa, freq_bb, spec_bb, 
+                                       freq_ab, spec_ab, base_pattern, anim_file)
+            
+            print(f"  ✓ Completed sublattice plots for {base_pattern}")
+        except Exception as e:
+            print(f"  ✗ Error processing sublattice for {base_pattern}: {e}")
+            continue
+    
+    # Process combined SmSp + SzSz sublattice correlations
+    if sublattice_combined_pairs:
+        print("\n" + "="*80)
+        print("Processing COMBINED SmSp + SzSz sublattice correlations...")
+        print("="*80)
+        
+        for smsp_pattern, szsz_pattern, base_name in sublattice_combined_pairs:
+            try:
+                print(f"\nProcessing combined sublattice for: {base_name}")
+                print(f"  SmSp: {smsp_pattern}")
+                print(f"  SzSz: {szsz_pattern}")
+                print("-"*80)
+                
+                # Get SmSp sublattice data
+                (freq_aa_sm, spec_aa_sm), (freq_bb_sm, spec_bb_sm), (freq_ab_sm, spec_ab_sm) = \
+                    create_sublattice_correlation_data(h_values, h_dirs, smsp_pattern)
+                
+                # Get SzSz sublattice data
+                (freq_aa_sz, spec_aa_sz), (freq_bb_sz, spec_bb_sz), (freq_ab_sz, spec_ab_sz) = \
+                    create_sublattice_correlation_data(h_values, h_dirs, szsz_pattern)
+                
+                # Check if we have data for both
+                if (not spec_aa_sm and not spec_aa_sz) or (not spec_bb_sm and not spec_bb_sz):
+                    print(f"  ⚠ Insufficient data for combined sublattice, skipping...")
+                    continue
+                
+                # Combine: Total = SmSp * SMSP_FACTOR + SzSz
+                freq_aa_combined = {}
+                spec_aa_combined = {}
+                freq_bb_combined = {}
+                spec_bb_combined = {}
+                freq_ab_combined = {}
+                spec_ab_combined = {}
+                
+                for h in h_values:
+                    if h in spec_aa_sm and h in spec_aa_sz:
+                        freq_aa_combined[h] = freq_aa_sm[h]
+                        spec_aa_combined[h] = spec_aa_sm[h] * SMSP_FACTOR + spec_aa_sz[h]
+                    
+                    if h in spec_bb_sm and h in spec_bb_sz:
+                        freq_bb_combined[h] = freq_bb_sm[h]
+                        spec_bb_combined[h] = spec_bb_sm[h] * SMSP_FACTOR + spec_bb_sz[h]
+                    
+                    if h in spec_ab_sm and h in spec_ab_sz:
+                        freq_ab_combined[h] = freq_ab_sm[h]
+                        spec_ab_combined[h] = spec_ab_sm[h] * SMSP_FACTOR + spec_ab_sz[h]
+                
+                # Create safe filename
+                safe_name = base_name.replace("/", "_").replace(" ", "_")
+                
+                # Create combined plots
+                comparison_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_sublattice_comparison.png")
+                create_sublattice_comparison_plot(h_values, freq_aa_combined, spec_aa_combined, 
+                                                 freq_bb_combined, spec_bb_combined, 
+                                                 freq_ab_combined, spec_ab_combined, 
+                                                 f"{base_name} (SmSp*{SMSP_FACTOR} + SzSz)", comparison_file)
+                
+                heatmap_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_sublattice_heatmap.png")
+                create_sublattice_heatmap(h_values, freq_aa_combined, spec_aa_combined, 
+                                         freq_bb_combined, spec_bb_combined, 
+                                         freq_ab_combined, spec_ab_combined, 
+                                         f"{base_name} (SmSp*{SMSP_FACTOR} + SzSz)", heatmap_file)
+                
+                anim_file = os.path.join(SUBDIRS['sublattice'], f"{safe_name}_combined_sublattice_animation.gif")
+                create_sublattice_animation(h_values, freq_aa_combined, spec_aa_combined, 
+                                           freq_bb_combined, spec_bb_combined, 
+                                           freq_ab_combined, spec_ab_combined, 
+                                           f"{base_name} (SmSp*{SMSP_FACTOR} + SzSz)", anim_file)
+                
+                print(f"  ✓ Completed combined sublattice plots for {base_name}")
+            except Exception as e:
+                print(f"  ✗ Error processing combined sublattice for {base_name}: {e}")
+                continue
+    
+    # Process global transverse sublattice correlations
+    print("\n" + "="*80)
+    print("Processing GLOBAL TRANSVERSE sublattice correlations (AA/BB/AB)...")
+    print(f"Sublattice A: {SUBLATTICE_A}, Sublattice B: {SUBLATTICE_B}")
+    print(f"Q-vector: {Q_VECTOR}")
+    print("Applying transverse operator: (z_μ·z_ν - (z_μ·Q̂)(z_ν·Q̂))")
+    print("="*80)
+    
+    # Process each base pattern with transverse weighting
+    for base_pattern in sublattice_base_patterns:
+        try:
+            print(f"\nProcessing GLOBAL TRANSVERSE sublattice correlations for: {base_pattern}")
+            print("-"*80)
+            
+            # Create transverse-weighted AA, BB, AB correlation data
+            (freq_aa_t, spec_aa_t), (freq_bb_t, spec_bb_t), (freq_ab_t, spec_ab_t) = \
+                create_global_transverse_sublattice_data(h_values, h_dirs, base_pattern)
+            
+            # Check if we have data
+            if not spec_aa_t and not spec_bb_t and not spec_ab_t:
+                print(f"  ⚠ No transverse sublattice data found for {base_pattern}, skipping...")
+                continue
+            
+            # Create safe filename
+            safe_pattern = base_pattern.replace("/", "_").replace(" ", "_")
+            
+            # 1. Global transverse sublattice comparison plot - in transverse subdirectory
+            comparison_file = os.path.join(SUBDIRS['transverse'], f"{safe_pattern}_global_transverse_sublattice_comparison.png")
+            create_sublattice_comparison_plot(h_values, freq_aa_t, spec_aa_t, freq_bb_t, spec_bb_t, 
+                                             freq_ab_t, spec_ab_t, 
+                                             f"{base_pattern} (Global Transverse)", comparison_file)
+            
+            # 2. Global transverse sublattice heatmap
+            heatmap_file = os.path.join(SUBDIRS['transverse'], f"{safe_pattern}_global_transverse_sublattice_heatmap.png")
+            create_sublattice_heatmap(h_values, freq_aa_t, spec_aa_t, freq_bb_t, spec_bb_t, 
+                                     freq_ab_t, spec_ab_t, 
+                                     f"{base_pattern} (Global Transverse)", heatmap_file)
+            
+            # 3. Global transverse sublattice animation
+            anim_file = os.path.join(SUBDIRS['transverse'], f"{safe_pattern}_global_transverse_sublattice_animation.gif")
+            create_sublattice_animation(h_values, freq_aa_t, spec_aa_t, freq_bb_t, spec_bb_t, 
+                                       freq_ab_t, spec_ab_t, 
+                                       f"{base_pattern} (Global Transverse)", anim_file)
+            
+            print(f"  ✓ Completed global transverse sublattice plots for {base_pattern}")
+        except Exception as e:
+            print(f"  ✗ Error processing global transverse sublattice for {base_pattern}: {e}")
+            continue
+    
+    # Process combined SmSp + SzSz global transverse sublattice correlations
+    if sublattice_combined_pairs:
+        print("\n" + "="*80)
+        print("Processing COMBINED SmSp + SzSz GLOBAL TRANSVERSE sublattice correlations...")
+        print("="*80)
+        
+        for smsp_pattern, szsz_pattern, base_name in sublattice_combined_pairs:
+            try:
+                print(f"\nProcessing combined global transverse sublattice for: {base_name}")
+                print(f"  SmSp: {smsp_pattern}")
+                print(f"  SzSz: {szsz_pattern}")
+                print("-"*80)
+                
+                # Get SmSp global transverse sublattice data
+                (freq_aa_sm_t, spec_aa_sm_t), (freq_bb_sm_t, spec_bb_sm_t), (freq_ab_sm_t, spec_ab_sm_t) = \
+                    create_global_transverse_sublattice_data(h_values, h_dirs, smsp_pattern)
+                
+                # Get SzSz global transverse sublattice data
+                (freq_aa_sz_t, spec_aa_sz_t), (freq_bb_sz_t, spec_bb_sz_t), (freq_ab_sz_t, spec_ab_sz_t) = \
+                    create_global_transverse_sublattice_data(h_values, h_dirs, szsz_pattern)
+                
+                # Check if we have data for both
+                if (not spec_aa_sm_t and not spec_aa_sz_t) or (not spec_bb_sm_t and not spec_bb_sz_t):
+                    print(f"  ⚠ Insufficient data for combined global transverse sublattice, skipping...")
+                    continue
+                
+                # Combine: Total = SmSp * SMSP_FACTOR + SzSz
+                freq_aa_combined_t = {}
+                spec_aa_combined_t = {}
+                freq_bb_combined_t = {}
+                spec_bb_combined_t = {}
+                freq_ab_combined_t = {}
+                spec_ab_combined_t = {}
+                
+                for h in h_values:
+                    if h in spec_aa_sm_t and h in spec_aa_sz_t:
+                        freq_aa_combined_t[h] = freq_aa_sm_t[h]
+                        spec_aa_combined_t[h] = spec_aa_sm_t[h] * SMSP_FACTOR + spec_aa_sz_t[h]
+                    
+                    if h in spec_bb_sm_t and h in spec_bb_sz_t:
+                        freq_bb_combined_t[h] = freq_bb_sm_t[h]
+                        spec_bb_combined_t[h] = spec_bb_sm_t[h] * SMSP_FACTOR + spec_bb_sz_t[h]
+                    
+                    if h in spec_ab_sm_t and h in spec_ab_sz_t:
+                        freq_ab_combined_t[h] = freq_ab_sm_t[h]
+                        spec_ab_combined_t[h] = spec_ab_sm_t[h] * SMSP_FACTOR + spec_ab_sz_t[h]
+                
+                # Create safe filename
+                safe_name = base_name.replace("/", "_").replace(" ", "_")
+                
+                # Create combined global transverse plots
+                comparison_file = os.path.join(SUBDIRS['transverse'], f"{safe_name}_combined_global_transverse_sublattice_comparison.png")
+                create_sublattice_comparison_plot(h_values, freq_aa_combined_t, spec_aa_combined_t, 
+                                                 freq_bb_combined_t, spec_bb_combined_t, 
+                                                 freq_ab_combined_t, spec_ab_combined_t, 
+                                                 f"{base_name} (Global Transverse, SmSp*{SMSP_FACTOR} + SzSz)", comparison_file)
+                
+                heatmap_file = os.path.join(SUBDIRS['transverse'], f"{safe_name}_combined_global_transverse_sublattice_heatmap.png")
+                create_sublattice_heatmap(h_values, freq_aa_combined_t, spec_aa_combined_t, 
+                                         freq_bb_combined_t, spec_bb_combined_t, 
+                                         freq_ab_combined_t, spec_ab_combined_t, 
+                                         f"{base_name} (Global Transverse, SmSp*{SMSP_FACTOR} + SzSz)", heatmap_file)
+                
+                anim_file = os.path.join(SUBDIRS['transverse'], f"{safe_name}_combined_global_transverse_sublattice_animation.gif")
+                create_sublattice_animation(h_values, freq_aa_combined_t, spec_aa_combined_t, 
+                                           freq_bb_combined_t, spec_bb_combined_t, 
+                                           freq_ab_combined_t, spec_ab_combined_t, 
+                                           f"{base_name} (Global Transverse, SmSp*{SMSP_FACTOR} + SzSz)", anim_file)
+                
+                print(f"  ✓ Completed combined global transverse sublattice plots for {base_name}")
+            except Exception as e:
+                print(f"  ✗ Error processing combined global transverse sublattice for {base_name}: {e}")
+                continue
+    
+    # Create magnetization plot
+    print("\n" + "="*80)
+    print("Creating magnetization plot...")
+    print("="*80)
+    try:
+        magnetization_file = os.path.join(SUBDIRS['magnetization'], "magnetization_vs_field.png")
+        create_magnetization_plot(h_values, h_dirs, magnetization_file)
+        print("  ✓ Magnetization plot created")
+    except Exception as e:
+        print(f"  ✗ Error creating magnetization plot: {e}")
+    
+    # Create summary report
+    print("\n" + "="*80)
+    print("Creating summary report...")
+    print("="*80)
+    try:
+        create_summary_report(h_values, h_dirs, all_species, do_channels, 
+                             species_combinations, sublattice_base_patterns)
+        print("  ✓ Summary report created")
+    except Exception as e:
+        print(f"  ✗ Error creating summary report: {e}")
     
     print("\n" + "="*80)
-    print(f"\nAll plots saved to: {OUTPUT_DIR}")
+    print(f"\nAll plots saved to organized subdirectories in: {OUTPUT_DIR}")
+    print("\nOutput Structure:")
+    print(f"  0_summary/              - Summary report and key figures")
+    print(f"  1_individual_species/   - Individual species plots")
+    print(f"  2_DO_channels/          - DO channel (SF + NSF) plots")
+    print(f"  3_combined_SmSp_SzSz/   - Combined SmSp + SzSz plots")
+    print(f"  4_sublattice_correlations/ - Sublattice AA/BB/AB plots")
+    print(f"  5_global_transverse/    - Global transverse sublattice plots")
+    print(f"  6_magnetization/        - Magnetization vs field plots")
     print("="*80)
 
 if __name__ == "__main__":

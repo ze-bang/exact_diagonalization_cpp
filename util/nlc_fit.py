@@ -576,11 +576,14 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         logging.info(log_msg)
     
     param_str = f"Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}"
-    if fit_random_transverse_field:
-        param_str += f", random_field_strength={params[3]:.4f}"
     if fit_broadening and len(params) > 3:
         sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(sigmas)])
         param_str += f", {sigma_str}"
+    if fit_random_transverse_field:
+        # Get the correct index for random transverse field
+        random_field_idx = 3 + n_datasets if fit_broadening else 3
+        if len(params) > random_field_idx:
+            param_str += f", random_field_strength={params[random_field_idx]:.4f}"
     if fit_g_renorm:
         param_str += f", g_renorm={g_renorm:.4f}"
 
@@ -668,7 +671,8 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     plt.close()
 
 def multi_start_optimization(obj_func, initial_params, bounds, n_starts=30, method='COBYLA', 
-                            constraints=None, args=(), top_m=10, randomize=False, **kwargs):
+                            constraints=None, args=(), top_m=10, randomize=False, 
+                            output_dir=None, **kwargs):
     """
     Perform multi-start optimization with different initial conditions
     
@@ -689,9 +693,11 @@ def multi_start_optimization(obj_func, initial_params, bounds, n_starts=30, meth
     args : tuple
         Additional arguments to pass to obj_func
     top_m : int
-        Number of top results to display (default: 5)
+        Number of top results to display and save (default: 10)
     randomize : bool
         If True, use pure random sampling; if False, use Latin Hypercube Sampling
+    output_dir : str
+        Directory to save top m results (optional)
     **kwargs : dict
         Additional keyword arguments for the optimizer
     """
@@ -751,18 +757,86 @@ def multi_start_optimization(obj_func, initial_params, bounds, n_starts=30, meth
     logging.info(f"Multi-start optimization completed. Displaying top {min(top_m, len(successful_results))} results:")
     logging.info(f"{'='*80}")
     
+    top_results_data = []
     for i, result in enumerate(successful_results[:top_m]):
         logging.info(f"\nRank {i+1}:")
         logging.info(f"  Chi-squared: {result.fun:.6f}")
         param_str = ", ".join([f"{result.x[j]:.6f}" for j in range(min(3, len(result.x)))])
         logging.info(f"  Parameters (Jxx, Jyy, Jzz): {param_str}")
+        
+        # Store result data
+        result_data = {
+            'rank': i + 1,
+            'chi_squared': float(result.fun),
+            'Jxx': float(result.x[0]),
+            'Jyy': float(result.x[1]),
+            'Jzz': float(result.x[2]),
+            'success': bool(getattr(result, 'success', None)) if getattr(result, 'success', None) is not None else None,
+            'nfev': int(getattr(result, 'nfev', 0)) if getattr(result, 'nfev', None) is not None else None,
+            'nit': int(getattr(result, 'nit', 0)) if getattr(result, 'nit', None) is not None else None
+        }
+        
         if len(result.x) > 3:
             extra_params = ", ".join([f"{result.x[j]:.6f}" for j in range(3, len(result.x))])
             logging.info(f"  Additional parameters: {extra_params}")
+            # Store additional parameters
+            for j in range(3, len(result.x)):
+                result_data[f'param_{j}'] = float(result.x[j])
+        
+        top_results_data.append(result_data)
     
     logging.info(f"\n{'='*80}")
     logging.info(f"Best chi-squared: {best_score:.4f}")
     logging.info(f"{'='*80}\n")
+    
+    # Save top m results to file if output_dir is provided
+    if output_dir is not None and len(top_results_data) > 0:
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Save as JSON
+        json_file = os.path.join(output_dir, 'multi_start_top_results.json')
+        with open(json_file, 'w') as f:
+            json.dump({
+                'method': method,
+                'n_starts': n_starts,
+                'top_m': top_m,
+                'results': top_results_data
+            }, f, indent=2, cls=NumpyJSONEncoder)
+        logging.info(f"Top {len(top_results_data)} results saved to {json_file}")
+        
+        # Save as human-readable text file
+        txt_file = os.path.join(output_dir, 'multi_start_top_results.txt')
+        with open(txt_file, 'w') as f:
+            f.write(f"Multi-Start Optimization Results\n")
+            f.write(f"{'='*80}\n")
+            f.write(f"Method: {method}\n")
+            f.write(f"Number of starts: {n_starts}\n")
+            f.write(f"Top {len(top_results_data)} results:\n")
+            f.write(f"{'='*80}\n\n")
+            
+            for result_data in top_results_data:
+                f.write(f"Rank {result_data['rank']}:\n")
+                f.write(f"  Chi-squared: {result_data['chi_squared']:.8f}\n")
+                f.write(f"  Jxx: {result_data['Jxx']:.8f}\n")
+                f.write(f"  Jyy: {result_data['Jyy']:.8f}\n")
+                f.write(f"  Jzz: {result_data['Jzz']:.8f}\n")
+                if result_data['success'] is not None:
+                    f.write(f"  Success: {result_data['success']}\n")
+                if result_data['nfev'] is not None and result_data['nfev'] > 0:
+                    f.write(f"  Function evaluations: {result_data['nfev']}\n")
+                if result_data['nit'] is not None and result_data['nit'] > 0:
+                    f.write(f"  Iterations: {result_data['nit']}\n")
+                
+                # Write additional parameters
+                extra_param_keys = [k for k in result_data.keys() if k.startswith('param_')]
+                if extra_param_keys:
+                    f.write("  Additional parameters:\n")
+                    for key in sorted(extra_param_keys):
+                        idx = int(key.split('_')[1])
+                        f.write(f"    param[{idx}]: {result_data[key]:.8f}\n")
+                f.write("\n")
+        
+        logging.info(f"Top {len(top_results_data)} results saved to {txt_file}")
     
     return best_result, all_results
 
@@ -999,7 +1073,7 @@ def multi_objective_bayesian_optimization(obj_func, bounds, args=(), **kwargs):
     
     return best_result
 
-def robust_optimization(obj_func, initial_params, bounds, method='auto', constraints=None, args=(), **kwargs):
+def robust_optimization(obj_func, initial_params, bounds, method='auto', constraints=None, args=(), output_dir=None, **kwargs):
     """
     Robust optimization combining multiple algorithms
     """
@@ -1012,7 +1086,8 @@ def robust_optimization(obj_func, initial_params, bounds, method='auto', constra
                 n_starts=kwargs.get('n_starts', 10),
                 top_m=kwargs.get('top_m', 5),
                 randomize=kwargs.get('randomize', False),
-                constraints=constraints, args=args
+                constraints=constraints, args=args,
+                output_dir=output_dir
             )
             results['multi_start'] = result
         except Exception as e:
@@ -1555,6 +1630,7 @@ def main():
                     method=args.method,
                     constraints=constraints if args.method not in ['differential_evolution', 'dual_annealing'] and not args.method.startswith('bayesian') and args.method != 'adaptive_bayesian' and args.method != 'multi_fidelity_bayesian' else None,
                     args=(fixed_params, exp_datasets, work_dir),
+                    output_dir=args.output_dir,
                     maxiter=args.max_iter,
                     n_starts=args.n_starts,
                     top_m=args.top_m,

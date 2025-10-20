@@ -309,8 +309,8 @@ def prepare_hamiltonian_parameters(output_dir, non_kramer, nn_list, positions, s
         # Zeeman term
         sub_idx = sublattice_indices[site_id]
         local_field = h * np.dot(field_dir, z_local[sub_idx])
-        transfer.append([2, node_mapping[i], -local_field, 0])
-        
+        transfer.append([0, node_mapping[i], -local_field/2, 0])
+        transfer.append([1, node_mapping[i], -local_field/2, 0])
         # Exchange interactions
         for neighbor_id in nn_list[site_id]:
             if site_id < neighbor_id:  # Only add each bond once
