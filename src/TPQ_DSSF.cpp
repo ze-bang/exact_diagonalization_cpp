@@ -8,6 +8,7 @@
 #include <regex>
 #include <limits>
 #include <cstring>
+#include <cmath> // added for M_PI, std::sqrt
 #include <iomanip> // added for std::setprecision and std::fixed
 #include <algorithm> // for std::sort, std::max_element, std::min_element
 #include <numeric> // for std::accumulate
@@ -167,14 +168,16 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 10) {
+    if (argc < 6 || argc > 12) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps] [unit_cell_size]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor | pedantic" << std::endl;
-            std::cerr << "  dt,t_end (optional, only for taylor/pedantic): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps] [unit_cell_size] [momentum_points] [polarization]" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | pedantic | global" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor/pedantic/global): e.g. 0.01,50.0" << std::endl;
             std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
             std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
             std::cerr << "  unit_cell_size (optional, for pedantic mode): number of sublattices (default: 4)" << std::endl;
+            std::cerr << "  momentum_points (optional): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\" (default: (0,0,0);(0,0,2π))" << std::endl;
+            std::cerr << "  polarization (optional, for global mode): \"px,py,pz\" normalized polarization vector (default: (1/√2,1/√2,0))" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -209,8 +212,87 @@ int main(int argc, char* argv[]) {
     }
     
     int unit_cell_size = 4; // Default for pyrochlore
-    if (argc == 10) {
+    if (argc >= 10) {
         try { unit_cell_size = std::stoi(argv[9]); } catch (...) { unit_cell_size = 4; }
+    }
+
+    // Parse momentum points
+    std::vector<std::vector<double>> momentum_points;
+    if (argc >= 11) {
+        std::string momentum_str = argv[10];
+        std::stringstream mom_ss(momentum_str);
+        std::string point_str;
+        
+        while (std::getline(mom_ss, point_str, ';')) {
+            std::stringstream point_ss(point_str);
+            std::string coord_str;
+            std::vector<double> point;
+            
+            while (std::getline(point_ss, coord_str, ',')) {
+                try {
+                    double coord = std::stod(coord_str);
+                    coord *= M_PI;  // Scale to π
+                    point.push_back(coord);
+                } catch (...) {
+                    if (rank == 0) {
+                        std::cerr << "Warning: Failed to parse momentum coordinate: " << coord_str << std::endl;
+                    }
+                }
+            }
+            
+            if (point.size() == 3) {
+                momentum_points.push_back(point);
+            } else if (rank == 0) {
+                std::cerr << "Warning: Momentum point must have 3 coordinates, got " << point.size() << std::endl;
+            }
+        }
+    }
+    
+    // Use default momentum points if none provided or parsing failed
+    if (momentum_points.empty()) {
+        momentum_points = {
+            {0.0, 0.0, 0.0},
+            {0.0, 0.0, 2.0 * M_PI}
+        };
+        if (rank == 0) {
+            std::cout << "Using default momentum points: (0,0,0) and (0,0,2π)" << std::endl;
+        }
+    }
+
+    // Parse polarization vector for global mode
+    std::vector<double> polarization = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+    if (argc >= 12) {
+        std::string pol_str = argv[11];
+        std::stringstream pol_ss(pol_str);
+        std::string coord_str;
+        std::vector<double> pol_temp;
+        
+        while (std::getline(pol_ss, coord_str, ',')) {
+            try {
+                double coord = std::stod(coord_str);
+                pol_temp.push_back(coord);
+            } catch (...) {
+                if (rank == 0) {
+                    std::cerr << "Warning: Failed to parse polarization coordinate: " << coord_str << std::endl;
+                }
+            }
+        }
+        
+        if (pol_temp.size() == 3) {
+            // Normalize the polarization vector
+            double norm = std::sqrt(pol_temp[0]*pol_temp[0] + pol_temp[1]*pol_temp[1] + pol_temp[2]*pol_temp[2]);
+            if (norm > 1e-10) {
+                polarization = {pol_temp[0]/norm, pol_temp[1]/norm, pol_temp[2]/norm};
+                if (rank == 0) {
+                    std::cout << "Using custom polarization: (" << polarization[0] << "," 
+                              << polarization[1] << "," << polarization[2] << ")" << std::endl;
+                }
+            } else if (rank == 0) {
+                std::cerr << "Warning: Polarization vector has zero norm, using default" << std::endl;
+            }
+        } else if (rank == 0) {
+            std::cerr << "Warning: Polarization must have 3 coordinates, got " << pol_temp.size() << std::endl;
+        }
     }
 
     // Parse spin combinations
@@ -316,24 +398,36 @@ int main(int argc, char* argv[]) {
     }
     int N = static_cast<int>(N64);
     
-    // Define momentum points
-    // const std::vector<std::vector<double>> momentum_points = {
-    //     {0.0, 0.0, 0.0},
-    //     {0, 0, 2*M_PI},
-    //     {4*M_PI, 4*M_PI, 0}
-    // };
-    // Define momentum points
-    const std::vector<std::vector<double>> momentum_points = {
-        {0.0, 0.0, 0.0},
-        {0, 0, 2*M_PI}
+    // Helper function for cross product
+    auto cross_product = [](const std::vector<double>& a, const std::vector<double>& b) -> std::array<double, 3> {
+        return {
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]
+        };
     };
-    // const std::vector<std::vector<double>> momentum_points = {
-    //     // {0.0, 0.0, 0.0},
-    //     // {0, 0, 2*M_PI},
-    //     {0, 0, 4*M_PI}
-    // };
     
-    // Create output directory (only rank 0)
+    // Helper function to normalize a vector
+    auto normalize = [](const std::array<double, 3>& v) -> std::array<double, 3> {
+        double norm = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
+        if (norm < 1e-10) {
+            return {0.0, 0.0, 0.0};
+        }
+        return {v[0]/norm, v[1]/norm, v[2]/norm};
+    };
+    
+    if (rank == 0) {
+        std::cout << "\nMomentum points:" << std::endl;
+        for (size_t i = 0; i < momentum_points.size(); i++) {
+            std::cout << "  Q[" << i << "] = (" << momentum_points[i][0] << ", " 
+                      << momentum_points[i][1] << ", " << momentum_points[i][2] << ")" << std::endl;
+        }
+        std::cout << "\nPolarization vector (transverse_basis_1): (" 
+                  << polarization[0] << ", " << polarization[1] << ", " 
+                  << polarization[2] << ")" << std::endl;
+    }
+    
+    // Pre-compute time evolution operator and transverse bases if needed
     std::string output_base_dir = directory + "/structure_factor_results";
     if (rank == 0) {
         ensureDirectoryExists(output_base_dir);
@@ -558,17 +652,41 @@ int main(int argc, char* argv[]) {
     }
     
     if (method == "global") {
+        int num_momentum = momentum_points.size();
         transverse_basis_1.resize(num_momentum);
         transverse_basis_2.resize(num_momentum);
-        transverse_basis_1[0] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_2[0] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_1[1] = {1.0/std::sqrt(2.0), 1.0/std::sqrt(2.0), 0.0};
-        transverse_basis_2[1] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
-        // transverse_basis_1[2] = {0.0, 0.0, 1.0};
-        // transverse_basis_2[2] = {1.0/std::sqrt(2.0), -1.0/std::sqrt(2.0), 0.0};
+        
+        // transverse_basis_1 is the same for all momentum points (the polarization vector)
+        std::array<double, 3> pol_array = {polarization[0], polarization[1], polarization[2]};
+        
+        for (int qi = 0; qi < num_momentum; ++qi) {
+            transverse_basis_1[qi] = pol_array;
+            
+            // transverse_basis_2 is Q × polarization (cross product)
+            auto cross = cross_product(momentum_points[qi], polarization);
+            transverse_basis_2[qi] = normalize(cross);
+            
+            // Handle special case: if Q is parallel to polarization, cross product is zero
+            double cross_norm = std::sqrt(cross[0]*cross[0] + cross[1]*cross[1] + cross[2]*cross[2]);
+            if (cross_norm < 1e-10) {
+                // Find an orthogonal vector to polarization
+                if (std::abs(pol_array[0]) > 0.5) {
+                    // polarization has significant x component, use y-axis as reference
+                    auto alt_cross = cross_product({0.0, 1.0, 0.0}, polarization);
+                    transverse_basis_2[qi] = normalize(alt_cross);
+                } else {
+                    // use x-axis as reference
+                    auto alt_cross = cross_product({1.0, 0.0, 0.0}, polarization);
+                    transverse_basis_2[qi] = normalize(alt_cross);
+                }
+                if (rank == 0) {
+                    std::cout << "Warning: Q[" << qi << "] parallel to polarization, using alternative basis" << std::endl;
+                }
+            }
+        }
         
         if (rank == 0) {
-            std::cout << "Transverse bases for momentum points:" << std::endl;
+            std::cout << "\nTransverse bases for momentum points:" << std::endl;
             for (int qi = 0; qi < num_momentum; ++qi) {
                 const auto &Q = momentum_points[qi];
                 const auto &b1 = transverse_basis_1[qi];
@@ -680,12 +798,12 @@ int main(int argc, char* argv[]) {
             try {
                 // SF component names
                 std::stringstream name_sf;
-                name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
+                name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
                 obs_names.push_back(name_sf.str());
                 
                 // NSF component names
                 std::stringstream name_nsf;
-                name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
+                name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
                 obs_names.push_back(name_nsf.str());
                 
                 // Create operators with explicit lifetime management
