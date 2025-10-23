@@ -2236,67 +2236,11 @@ public:
 
 
 /**
- * SumOperator class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
+ * BasePositionOperator class - intermediate class that provides common functionality
+ * for operators that use position-dependent phases
  */
-class SumOperator : public Operator {
-public:
-    /**
-     * Constructor for sum operator with momentum-dependent phases
-     * @param num_site Total number of sites/qubits
-     * @param spin_l Spin quantum number
-     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
-     * @param Q_vector Momentum vector [Qx, Qy, Qz]
-     * @param positions_file Path to file containing site positions
-     */
-    SumOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
-        : Operator(num_site, spin_l) {
-        
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        // Read positions from file
-        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        // Calculate phase factors for each site
-        std::vector<Complex> phase_factors(num_site);
-        for (int i = 0; i < num_site; ++i) {
-            if (positions[i].size() < 3) {
-                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
-            }
-            
-            double phase = Q_vector[0] * positions[i][0] + 
-                          Q_vector[1] * positions[i][1] + 
-                          Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
-        }
-
-        // Add transforms for each site with appropriate phase factor
-        for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
-            
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (op == 2) {
-                    // Sz operator
-                    int bit = (basis >> site) & 1;
-                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
-                } else {
-                    // S+ or S- operator
-                    if (((basis >> site) & 1) != op) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * double(spin_l * 2)};
-                    }
-                }
-                return {basis, Complex(0.0, 0.0)};
-            });
-        }
-    }
-
+class BasePositionOperator : public Operator {
+protected:
     /**
      * Read site positions from file
      * Expected format: Each line contains x y z coordinates for one site
@@ -2346,43 +2290,18 @@ public:
         return positions;
     }
 
-};
-
-
-/**
- * SumOperator class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
- */
-class SublatticeOperator : public SumOperator {
-public:
     /**
-     * Constructor for sum operator with momentum-dependent phases
-     * @param i Sublattice site index 1
-     * @param unit_cel_size Size of the unit cell (number of sublattices)
-     * @param num_site Total number of sites/qubits
-     * @param spin_l Spin quantum number
-     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * Calculate phase factors for all sites based on Q vector and positions
      * @param Q_vector Momentum vector [Qx, Qy, Qz]
-     * @param positions_file Path to file containing site positions
+     * @param positions Site positions
+     * @param normalization Normalization factor (typically 1/√N)
+     * @return Vector of complex phase factors
      */
-    SublatticeOperator(int i, int unit_cel_size, int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
-        : SumOperator(num_site, spin_l, op, Q_vector, positions_file) {
-
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        // Read positions from file
-        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        // Calculate phase factors for each site
-        std::vector<Complex> phase_factors(num_site);
-        
-        for (int i = 0; i < num_site; ++i) {
+    std::vector<Complex> calculatePhaseFactors(const std::vector<double>& Q_vector,
+                                               const std::vector<std::vector<double>>& positions,
+                                               double normalization) {
+        std::vector<Complex> phase_factors(positions.size());
+        for (size_t i = 0; i < positions.size(); ++i) {
             if (positions[i].size() < 3) {
                 throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
             }
@@ -2390,61 +2309,23 @@ public:
             double phase = Q_vector[0] * positions[i][0] + 
                           Q_vector[1] * positions[i][1] + 
                           Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site), std::sin(phase)/std::sqrt(num_site));
+            phase_factors[i] = Complex(std::cos(phase) * normalization, std::sin(phase) * normalization);
         }
-        // Add transforms for each site with appropriate phase factor
-        for (int site = i; site < num_site; site+=unit_cel_size) {
-            Complex phase_factor = phase_factors[site];
-            
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (op == 2) {
-                    // Sz operator
-                    int bit = (basis >> site) & 1;
-                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
-                } else {
-                    // S+ or S- operator
-                    if (((basis >> site) & 1) != op) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * double(spin_l * 2)};
-                    }
-                }
-                return {basis, Complex(0.0, 0.0)};
-            });
-        }
+        return phase_factors;
     }
-};
 
-
-/**
- * SumOperator class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
- */
-class TransverseOperator : public Operator {
-public:
     /**
-     * Constructor for sum operator with momentum-dependent phases
-     * @param num_site Total number of sites/qubits
-     * @param spin_l Spin quantum number
-     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz
+     * Calculate phase factors with sublattice-dependent weighting
      * @param Q_vector Momentum vector [Qx, Qy, Qz]
-     * @param positions_file Path to file containing site positions
+     * @param v Direction vector [vx, vy, vz]
+     * @param positions Site positions
+     * @param normalization Normalization factor
+     * @return Vector of complex phase factors
      */
-    TransverseOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::vector<double>& v, const std::string& positions_file) 
-        : Operator(num_site, spin_l) {
-        
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        // Read positions from file
-        std::vector<std::vector<double>> positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        // Calculate phase factors for each site
-        std::vector<Complex> phase_factors(num_site);
+    std::vector<Complex> calculateTransversePhaseFactors(const std::vector<double>& Q_vector,
+                                                         const std::vector<double>& v,
+                                                         const std::vector<std::vector<double>>& positions,
+                                                         double normalization) {
         const std::vector<std::vector<double>> z_mu = {
             {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
             {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
@@ -2452,7 +2333,8 @@ public:
             {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
         };
 
-        for (int i = 0; i < num_site; ++i) {
+        std::vector<Complex> phase_factors(positions.size());
+        for (size_t i = 0; i < positions.size(); ++i) {
             if (positions[i].size() < 3) {
                 throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
             }
@@ -2461,10 +2343,16 @@ public:
             double phase = Q_vector[0] * positions[i][0] + 
                           Q_vector[1] * positions[i][1] + 
                           Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase)/std::sqrt(num_site)*factor, std::sin(phase)/std::sqrt(num_site)*factor);
+            phase_factors[i] = Complex(std::cos(phase) * normalization * factor, 
+                                      std::sin(phase) * normalization * factor);
         }
+        return phase_factors;
+    }
 
-        // Add transforms for each site with appropriate phase factor
+    /**
+     * Add transforms for Pauli basis operators (S+, S-, Sz)
+     */
+    void addPauliTransforms(int num_site, float spin_l, int op, const std::vector<Complex>& phase_factors) {
         for (int site = 0; site < num_site; ++site) {
             Complex phase_factor = phase_factors[site];
             
@@ -2486,55 +2374,345 @@ public:
     }
 
     /**
-     * Read site positions from file
-     * Expected format: Each line contains x y z coordinates for one site
-     * @param filename Path to positions file
-     * @param expected_sites Expected number of sites
-     * @return Vector of position vectors
+     * Add transforms for Cartesian basis operators (Sx, Sy, Sz)
      */
-    std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, int expected_sites) {
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open positions file: " + filename);
-        }
-        
-        std::vector<std::vector<double>> positions(expected_sites);
-        std::string line;
-        
-        // Skip the header lines (comments starting with #)
-        while (std::getline(file, line) && line[0] == '#') {
-            // Skip header lines
-        }
-        
-        // Process the first non-header line (if we stopped at one)
-        bool process_current_line = !line.empty() && line[0] != '#';
-        
-        do {
-            if (process_current_line) {
-                std::istringstream iss(line);
-                int site_id, matrix_index, sublattice_index;
-                double x, y, z;
+    void addCartesianTransforms(int num_site, float spin_l, int op, const std::vector<Complex>& phase_factors) {
+        if (op == 0) {
+            // Sx = (S+ + S-) / 2
+            for (int site = 0; site < num_site; ++site) {
+                Complex phase_factor = phase_factors[site];
                 
-                if (iss >> site_id >> matrix_index >> sublattice_index >> x >> y >> z) {
-                    if (site_id >= 0 && site_id < expected_sites) {
-                        positions[site_id] = {x, y, z};
+                // S+ contribution
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    if (((basis >> site) & 1) != 0) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * Complex(0.5, 0) * double(spin_l * 2)};
                     }
-                }
+                    return {basis, Complex(0.0, 0.0)};
+                });
+                
+                // S- contribution
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    if (((basis >> site) & 1) != 1) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * Complex(0.5, 0) * double(spin_l * 2)};
+                    }
+                    return {basis, Complex(0.0, 0.0)};
+                });
             }
-            process_current_line = true;
-        } while (std::getline(file, line));
-        
-        // Verify all positions were loaded
-        for (int i = 0; i < expected_sites; ++i) {
-            if (positions[i].empty()) {
-                throw std::runtime_error("Missing position data for site " + std::to_string(i));
+        } else if (op == 1) {
+            // Sy = (S+ - S-) / 2i
+            for (int site = 0; site < num_site; ++site) {
+                Complex phase_factor = phase_factors[site];
+                
+                // S+ contribution
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    if (((basis >> site) & 1) != 0) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * Complex(0, -0.5) * double(spin_l * 2)};
+                    }
+                    return {basis, Complex(0.0, 0.0)};
+                });
+                
+                // S- contribution
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    if (((basis >> site) & 1) != 1) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * Complex(0, 0.5) * double(spin_l * 2)};
+                    }
+                    return {basis, Complex(0.0, 0.0)};
+                });
+            }
+        } else {
+            // Sz operator
+            for (int site = 0; site < num_site; ++site) {
+                Complex phase_factor = phase_factors[site];
+                
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    int bit = (basis >> site) & 1;
+                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
+                });
             }
         }
-        
-        return positions;
     }
 
+public:
+    BasePositionOperator(int num_site, float spin_l) : Operator(num_site, spin_l) {}
 };
 
+
+/**
+ * SumOperator class represents a sum of single-site operators with position-dependent phases
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
+ */
+class SumOperator : public BasePositionOperator {
+public:
+    SumOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
+        addPauliTransforms(num_site, spin_l, op, phase_factors);
+    }
+};
+
+
+/**
+ * SumOperatorXYZ class represents a sum of single-site operators with position-dependent phases
+ * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {x,y,z}, Q is momentum vector, Rᵢ are site positions
+ */
+class SumOperatorXYZ : public BasePositionOperator {
+public:
+    SumOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for Sx, 1 for Sy, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
+        addCartesianTransforms(num_site, spin_l, op, phase_factors);
+    }
+};
+
+
+/**
+ * SublatticeOperator class represents a sum over specific sublattice sites
+ */
+class SublatticeOperator : public BasePositionOperator {
+public:
+    SublatticeOperator(int i, int unit_cel_size, int num_site, float spin_l, int op, 
+                      const std::vector<double>& Q_vector, const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
+        
+        // Only add transforms for sublattice sites
+        for (int site = i; site < num_site; site += unit_cel_size) {
+            Complex phase_factor = phase_factors[site];
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    int bit = (basis >> site) & 1;
+                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        int flipped_basis = basis ^ (1 << site);
+                        return {flipped_basis, phase_factor * double(spin_l * 2)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+
+/**
+ * TransverseOperator class with sublattice-dependent transverse weighting
+ */
+class TransverseOperator : public BasePositionOperator {
+public:
+    TransverseOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, 
+                      const std::vector<double>& v, const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        if (v.size() != 3) {
+            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
+        addPauliTransforms(num_site, spin_l, op, phase_factors);
+    }
+};
+
+
+/**
+ * TransverseOperatorXYZ class with Cartesian basis and sublattice weighting
+ */
+class TransverseOperatorXYZ : public BasePositionOperator {
+public:
+    TransverseOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, 
+                         const std::vector<double>& v, const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (op < 0 || op > 2) {
+            throw std::invalid_argument("Invalid operator type. Use 0 for Sx, 1 for Sy, 2 for Sz");
+        }
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        if (v.size() != 3) {
+            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
+        addCartesianTransforms(num_site, spin_l, op, phase_factors);
+    }
+};
+
+/**
+ * ExperimentalOperator class for sum of cos(θ)Sz + sin(θ)Sx operators
+ */
+class ExperimentalOperator : public BasePositionOperator {
+public:
+    ExperimentalOperator(int num_site, float spin_l, double theta, 
+                        const std::vector<double>& Q_vector, 
+                        const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
+        
+        double cos_theta = std::cos(theta);
+        double sin_theta = std::sin(theta);
+        
+        // Add Sz contribution (cos(θ) * Sz)
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase_factor = phase_factors[site];
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                int bit = (basis >> site) & 1;
+                return {basis, phase_factor * cos_theta * double(spin_l) * pow(-1, bit)};
+            });
+        }
+        
+        // Add Sx contribution (sin(θ) * Sx = sin(θ) * (S+ + S-) / 2)
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase_factor = phase_factors[site];
+            
+            // S+ contribution
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (((basis >> site) & 1) != 0) {
+                    int flipped_basis = basis ^ (1 << site);
+                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+            
+            // S- contribution
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (((basis >> site) & 1) != 1) {
+                    int flipped_basis = basis ^ (1 << site);
+                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+
+/**
+ * TransverseExperimentalOperator class with sublattice-dependent weighting
+ */
+class TransverseExperimentalOperator : public BasePositionOperator {
+public:
+    TransverseExperimentalOperator(int num_site, float spin_l, double theta,
+                                  const std::vector<double>& Q_vector, 
+                                  const std::vector<double>& v,
+                                  const std::string& positions_file) 
+        : BasePositionOperator(num_site, spin_l) {
+        
+        if (Q_vector.size() != 3) {
+            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
+        }
+        
+        if (v.size() != 3) {
+            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
+        }
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
+        
+        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
+        
+        double cos_theta = std::cos(theta);
+        double sin_theta = std::sin(theta);
+        
+        // Add Sz contribution (cos(θ) * Sz)
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase_factor = phase_factors[site];
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                int bit = (basis >> site) & 1;
+                return {basis, phase_factor * cos_theta * double(spin_l) * pow(-1, bit)};
+            });
+        }
+        
+        // Add Sx contribution (sin(θ) * Sx = sin(θ) * (S+ + S-) / 2)
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase_factor = phase_factors[site];
+            
+            // S+ contribution
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (((basis >> site) & 1) != 0) {
+                    int flipped_basis = basis ^ (1 << site);
+                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+            
+            // S- contribution
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (((basis >> site) & 1) != 1) {
+                    int flipped_basis = basis ^ (1 << site);
+                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
 
 #endif // CONSTRUCT_HAM_H

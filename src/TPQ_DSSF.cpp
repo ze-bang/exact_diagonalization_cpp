@@ -168,16 +168,17 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
-    if (argc < 6 || argc > 12) {
+    if (argc < 6 || argc > 13) {
         if (rank == 0) {
-            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps] [unit_cell_size] [momentum_points] [polarization]" << std::endl;
-            std::cerr << "  method (optional): krylov (default) | taylor | pedantic | global" << std::endl;
-            std::cerr << "  dt,t_end (optional, only for taylor/pedantic/global): e.g. 0.01,50.0" << std::endl;
-            std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp), 1(Sm), or 2(Sz)" << std::endl;
-            std::cerr << "  Example: \"0,1;2,2\" for SpSm, SzSz combinations" << std::endl;
+            std::cerr << "Usage: " << argv[0] << " <directory> <num_sites> <spin_length> <krylov_dim_or_nmax> <spin_combinations> [method] [dt,t_end] [steps] [unit_cell_size] [momentum_points] [polarization] [theta]" << std::endl;
+            std::cerr << "  method (optional): krylov (default) | taylor | pedantic | global | taylorXYZ | globalXYZ | experimentalXYZ | experimentalGlobalXYZ" << std::endl;
+            std::cerr << "  dt,t_end (optional, only for taylor/pedantic/global/taylorXYZ/globalXYZ/experimentalXYZ/experimentalGlobalXYZ): e.g. 0.01,50.0" << std::endl;
+            std::cerr << "  spin_combinations format: \"op1,op2;op3,op4;...\" where op is 0(Sp/Sx), 1(Sm/Sy), or 2(Sz)" << std::endl;
+            std::cerr << "  Example: \"0,1;2,2\" for SpSm/SxSy, SzSz combinations" << std::endl;
             std::cerr << "  unit_cell_size (optional, for pedantic mode): number of sublattices (default: 4)" << std::endl;
             std::cerr << "  momentum_points (optional): \"Qx1,Qy1,Qz1;Qx2,Qy2,Qz2;...\" (default: (0,0,0);(0,0,2π))" << std::endl;
             std::cerr << "  polarization (optional, for global mode): \"px,py,pz\" normalized polarization vector (default: (1/√2,1/√2,0))" << std::endl;
+            std::cerr << "  theta (optional, for experimental modes): angle in radians (default: 0.0)" << std::endl;
         }
         MPI_Finalize();
         return 1;
@@ -295,6 +296,22 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Parse theta for experimental modes
+    double theta = 0.0;  // Default to 0
+    if (argc >= 13) {
+        try {
+            theta = std::stod(argv[12]);
+            if (rank == 0) {
+                std::cout << "Using theta = " << theta << " radians" << std::endl;
+            }
+        } catch (...) {
+            if (rank == 0) {
+                std::cerr << "Warning: Failed to parse theta, using default 0.0" << std::endl;
+            }
+            theta = 0.0;
+        }
+    }
+
     // Parse spin combinations
     std::vector<std::pair<int, int>> spin_combinations;
     std::stringstream ss(spin_combinations_str);
@@ -332,24 +349,49 @@ int main(int argc, char* argv[]) {
         spin_combinations = {{2, 2}};
     }
 
-    auto spin_combination_name = [](int op) {
-        switch (op) {
-            case 2:
-                return "Sz";
-            case 0:
-                return "Sp";
-            case 1:
-                return "Sm";
-            default:
-                return "Unknown";
+    // Determine if using XYZ mode
+    bool is_xyz_mode = (method == "taylorXYZ" || method == "globalXYZ" || 
+                        method == "experimentalXYZ" || method == "experimentalGlobalXYZ");
+
+    auto spin_combination_name = [is_xyz_mode](int op) {
+        if (is_xyz_mode) {
+            // XYZ modes use Sx, Sy, Sz
+            switch (op) {
+                case 0:
+                    return "Sx";
+                case 1:
+                    return "Sy";
+                case 2:
+                    return "Sz";
+                default:
+                    return "Unknown";
+            }
+        } else {
+            // Non-XYZ modes use Sp, Sm, Sz
+            switch (op) {
+                case 2:
+                    return "Sz";
+                case 0:
+                    return "Sp";
+                case 1:
+                    return "Sm";
+                default:
+                    return "Unknown";
+            }
         }
     };
 
     std::vector<const char*> spin_combination_names;
     for (const auto& pair : spin_combinations) {
         int first = pair.first;
-        first = first == 2 ? 2 : 1 - first; // Convert 0->1(Sp), 1->0(Sm)
-        std::string combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(pair.second));
+        int second = pair.second;
+        
+        if (!is_xyz_mode) {
+            // For non-XYZ modes: Convert 0->1(Sp), 1->0(Sm) for first operator
+            first = first == 2 ? 2 : 1 - first;
+        }
+        // For XYZ modes, use operators as-is (0=Sx, 1=Sy, 2=Sz)
+        std::string combined_name = std::string(spin_combination_name(first)) + std::string(spin_combination_name(second));
         char* name = new char[combined_name.size() + 1];
         std::strcpy(name, combined_name.c_str());
         spin_combination_names.push_back(name);
@@ -642,7 +684,9 @@ int main(int argc, char* argv[]) {
     std::vector<std::array<double,3>> transverse_basis_1, transverse_basis_2;
     bool precomputed_U = false;
     
-    if (method == "taylor" || method == "global" || method == "pedantic") {
+    if (method == "taylor" || method == "global" || method == "pedantic" || 
+        method == "taylorXYZ" || method == "globalXYZ" || 
+        method == "experimentalXYZ" || method == "experimentalGlobalXYZ") {
         if (rank == 0) {
             std::cout << "Pre-computing time evolution operator (n_max=" << krylov_dim_or_nmax
                       << ", dt=" << dt_opt << ", t_end=" << t_end_opt << ")" << std::endl;
@@ -651,7 +695,7 @@ int main(int argc, char* argv[]) {
         precomputed_U = true;
     }
     
-    if (method == "global") {
+    if (method == "global" || method == "globalXYZ" || method == "experimentalGlobalXYZ") {
         int num_momentum = momentum_points.size();
         transverse_basis_1.resize(num_momentum);
         transverse_basis_2.resize(num_momentum);
@@ -882,6 +926,204 @@ int main(int argc, char* argv[]) {
             } catch (const std::exception &e) {
                 std::cerr << "Rank " << rank << " failed sublattice operator construction for " 
                           << obs_name << ": " << e.what() << std::endl;
+                return false;
+            }
+        } else if (method == "taylorXYZ") {
+            // Process single (momentum, combo) pair using SumOperatorXYZ
+            const auto &Q = momentum_points[momentum_idx];
+            int op_type_1 = spin_combinations[combo_idx].first;
+            int op_type_2 = spin_combinations[combo_idx].second;
+            
+            std::stringstream name_ss;
+            name_ss << spin_combination_names[combo_idx] << "_q_Qx" << Q[0] 
+                    << "_Qy" << Q[1] << "_Qz" << Q[2];
+            std::string obs_name = name_ss.str();
+            
+            try {
+                SumOperatorXYZ sum_op_1(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], positions_file);
+                SumOperatorXYZ sum_op_2(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], positions_file);
+                
+                // Use copy assignment to avoid move issues
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(1);
+                obs_2.reserve(1);
+                
+                Operator op1 = sum_op_1;
+                Operator op2 = sum_op_2;
+                obs_1.push_back(op1);
+                obs_2.push_back(op2);
+                
+                std::vector<std::string> obs_names = {obs_name};
+                
+                std::string taylorXYZ_dir = output_dir + "/taylorXYZ";
+                ensureDirectoryExists(taylorXYZ_dir);
+                
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                    taylorXYZ_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            } catch (const std::exception &e) {
+                std::cerr << "Rank " << rank << " failed operator construction for " 
+                          << obs_name << ": " << e.what() << std::endl;
+                return false;
+            }
+        } else if (method == "globalXYZ") {
+            // Process single (momentum, combo) pair with both transverse components using TransverseOperatorXYZ
+            const auto &Q = momentum_points[momentum_idx];
+            const auto &b1 = transverse_basis_1[momentum_idx];
+            const auto &b2 = transverse_basis_2[momentum_idx];
+            std::vector<double> e1_vec = {b1[0], b1[1], b1[2]};
+            std::vector<double> e2_vec = {b2[0], b2[1], b2[2]};
+            
+            int op_type_1 = spin_combinations[combo_idx].first;
+            int op_type_2 = spin_combinations[combo_idx].second;
+            std::string base_name = std::string(spin_combination_names[combo_idx]);
+            
+            std::vector<std::string> obs_names;
+            
+            try {
+                // SF component names
+                std::stringstream name_sf;
+                name_sf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_NSF";
+                obs_names.push_back(name_sf.str());
+                
+                // NSF component names
+                std::stringstream name_nsf;
+                name_nsf << base_name << "_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_SF";
+                obs_names.push_back(name_nsf.str());
+                
+                // Create operators with explicit lifetime management
+                TransverseOperatorXYZ op1_sf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseOperatorXYZ op2_sf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseOperatorXYZ op1_nsf(num_sites, spin_length, op_type_1, momentum_points[momentum_idx], e2_vec, positions_file);
+                TransverseOperatorXYZ op2_nsf(num_sites, spin_length, op_type_2, momentum_points[momentum_idx], e2_vec, positions_file);
+                
+                // Build vectors by copying (avoids move issues)
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(2);
+                obs_2.reserve(2);
+                
+                // Use copy assignment which is properly defined in Operator class
+                Operator obs_1_sf = op1_sf;
+                Operator obs_2_sf = op2_sf;
+                Operator obs_1_nsf = op1_nsf;
+                Operator obs_2_nsf = op2_nsf;
+                
+                obs_1.push_back(obs_1_sf);
+                obs_2.push_back(obs_2_sf);
+                obs_1.push_back(obs_1_nsf);
+                obs_2.push_back(obs_2_nsf);
+                
+                std::string globalXYZ_dir = output_dir + "/globalXYZ";
+                ensureDirectoryExists(globalXYZ_dir);
+                
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                    globalXYZ_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            } catch (const std::exception &e) {
+                std::cerr << "Rank " << rank << " failed transverse operator construction: " 
+                          << e.what() << std::endl;
+                return false;
+            }
+        } else if (method == "experimentalXYZ") {
+            // Process single (momentum, combo) pair using ExperimentalOperator
+            // Note: ExperimentalOperator creates cos(θ)Sz + sin(θ)Sx combination
+            // combo_idx is ignored for experimental mode as it's a fixed combination
+            const auto &Q = momentum_points[momentum_idx];
+            
+            std::stringstream name_ss;
+            name_ss << "Experimental_q_Qx" << Q[0] 
+                    << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta;
+            std::string obs_name = name_ss.str();
+            
+            try {
+                ExperimentalOperator exp_op_1(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
+                ExperimentalOperator exp_op_2(num_sites, spin_length, theta, momentum_points[momentum_idx], positions_file);
+                
+                // Use copy assignment to avoid move issues
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(1);
+                obs_2.reserve(1);
+                
+                Operator op1 = exp_op_1;
+                Operator op2 = exp_op_2;
+                obs_1.push_back(op1);
+                obs_2.push_back(op2);
+                
+                std::vector<std::string> obs_names = {obs_name};
+                
+                std::string experimentalXYZ_dir = output_dir + "/experimentalXYZ";
+                ensureDirectoryExists(experimentalXYZ_dir);
+                
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                    experimentalXYZ_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            } catch (const std::exception &e) {
+                std::cerr << "Rank " << rank << " failed experimental operator construction for " 
+                          << obs_name << ": " << e.what() << std::endl;
+                return false;
+            }
+        } else if (method == "experimentalGlobalXYZ") {
+            // Process single (momentum, combo) pair with both transverse components using TransverseExperimentalOperator
+            // Note: TransverseExperimentalOperator creates cos(θ)Sz + sin(θ)Sx combination with transverse weighting
+            // combo_idx is ignored for experimental mode as it's a fixed combination
+            const auto &Q = momentum_points[momentum_idx];
+            const auto &b1 = transverse_basis_1[momentum_idx];
+            const auto &b2 = transverse_basis_2[momentum_idx];
+            std::vector<double> e1_vec = {b1[0], b1[1], b1[2]};
+            std::vector<double> e2_vec = {b2[0], b2[1], b2[2]};
+            
+            std::vector<std::string> obs_names;
+            
+            try {
+                // SF component names
+                std::stringstream name_sf;
+                name_sf << "Experimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta << "_NSF";
+                obs_names.push_back(name_sf.str());
+                
+                // NSF component names
+                std::stringstream name_nsf;
+                name_nsf << "Experimental_q_Qx" << Q[0] << "_Qy" << Q[1] << "_Qz" << Q[2] << "_theta" << theta << "_SF";
+                obs_names.push_back(name_nsf.str());
+                
+                // Create operators with explicit lifetime management
+                TransverseExperimentalOperator op1_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseExperimentalOperator op2_sf(num_sites, spin_length, theta, momentum_points[momentum_idx], e1_vec, positions_file);
+                TransverseExperimentalOperator op1_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                TransverseExperimentalOperator op2_nsf(num_sites, spin_length, theta, momentum_points[momentum_idx], e2_vec, positions_file);
+                
+                // Build vectors by copying (avoids move issues)
+                std::vector<Operator> obs_1;
+                std::vector<Operator> obs_2;
+                obs_1.reserve(2);
+                obs_2.reserve(2);
+                
+                // Use copy assignment which is properly defined in Operator class
+                Operator obs_1_sf = op1_sf;
+                Operator obs_2_sf = op2_sf;
+                Operator obs_1_nsf = op1_nsf;
+                Operator obs_2_nsf = op2_nsf;
+                
+                obs_1.push_back(obs_1_sf);
+                obs_2.push_back(obs_2_sf);
+                obs_1.push_back(obs_1_nsf);
+                obs_2.push_back(obs_2_nsf);
+                
+                std::string experimentalGlobalXYZ_dir = output_dir + "/experimentalGlobalXYZ";
+                ensureDirectoryExists(experimentalGlobalXYZ_dir);
+                
+                computeObservableDynamics_U_t(
+                    U_t, tpq_state, obs_1, obs_2, obs_names, N,
+                    experimentalGlobalXYZ_dir, sample_index, beta, t_end_opt, dt_opt
+                );
+            } catch (const std::exception &e) {
+                std::cerr << "Rank " << rank << " failed transverse experimental operator construction: " 
+                          << e.what() << std::endl;
                 return false;
             }
         }

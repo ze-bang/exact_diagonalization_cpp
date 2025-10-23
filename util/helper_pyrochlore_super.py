@@ -582,6 +582,7 @@ def main():
     use_pbc = bool(int(sys.argv[12]))
     non_kramer = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
     theta = float(sys.argv[14]) if len(sys.argv) > 14 else 0.0  # Default theta=0.0 if not provided
+    theta = theta * np.pi
     # Ensure output directory exists
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)

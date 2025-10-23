@@ -273,7 +273,7 @@ def _process_species_data(species, beta_groups, beta_bin_values,
                 print(f"    No valid data for beta={beta}")
                 continue
             
-            mean_spectrum, omega, time_arrays = result
+            mean_spectrum, mean_spectrum_imag, omega, time_arrays = result
             
             # Extract positive frequencies and compensate
             omega_pos, s_omega_compensated = _extract_positive_frequencies(mean_spectrum, omega)
@@ -288,6 +288,7 @@ def _process_species_data(species, beta_groups, beta_bin_values,
             results = {
                 'omega': omega,
                 'S_omega_real': mean_spectrum,
+                'S_omega_imag': mean_spectrum_imag,
                 'omega_pos': omega_pos,
                 's_omega_compensated': s_omega_compensated,
                 'qfi': qfi,
@@ -380,6 +381,7 @@ def _load_and_average_data(file_list, average_after_fft=True):
             print(f"    [DEBUG] Time array lengths: {time_lengths}")
         
         all_spectra = []
+        all_spectra_imag = []
         all_omegas = []
         
         for idx, (time, correlation) in enumerate(all_data):
@@ -391,9 +393,10 @@ def _load_and_average_data(file_list, average_after_fft=True):
             
             # Apply broadening and compute FFT
             gamma = 0.15
-            S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
+            S_omega_real, S_omega_imag, omega = _compute_spectral_function(t_full, C_full, gamma)
             
             all_spectra.append(S_omega_real)
+            all_spectra_imag.append(S_omega_imag)
             all_omegas.append(omega)
             
             if idx == 0:
@@ -406,33 +409,44 @@ def _load_and_average_data(file_list, average_after_fft=True):
         
         # Interpolate all spectra onto common grid if needed
         interpolated_spectra = []
-        for i, (S_omega, omega) in enumerate(zip(all_spectra, all_omegas)):
+        interpolated_spectra_imag = []
+        for i, (S_omega, S_omega_imag, omega) in enumerate(zip(all_spectra, all_spectra_imag, all_omegas)):
             if len(omega) != len(omega_ref):
                 # Need to interpolate due to different lengths
                 print(f"      Sample {i}: interpolating from {len(omega)} to {len(omega_ref)} points")
                 from scipy.interpolate import interp1d
-                f_interp = interp1d(omega, S_omega, kind='linear', 
+                f_interp_real = interp1d(omega, S_omega, kind='linear', 
                                    bounds_error=False, fill_value=0.0)
-                S_interpolated = f_interp(omega_ref)
+                f_interp_imag = interp1d(omega, S_omega_imag, kind='linear', 
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp_real(omega_ref)
+                S_interpolated_imag = f_interp_imag(omega_ref)
                 interpolated_spectra.append(S_interpolated)
+                interpolated_spectra_imag.append(S_interpolated_imag)
             elif not np.allclose(omega, omega_ref, rtol=1e-9, atol=1e-12):
                 # Lengths match but values differ - still need interpolation
                 print(f"      Sample {i}: interpolating due to frequency grid mismatch")
                 from scipy.interpolate import interp1d
-                f_interp = interp1d(omega, S_omega, kind='linear',
+                f_interp_real = interp1d(omega, S_omega, kind='linear',
                                    bounds_error=False, fill_value=0.0)
-                S_interpolated = f_interp(omega_ref)
+                f_interp_imag = interp1d(omega, S_omega_imag, kind='linear',
+                                   bounds_error=False, fill_value=0.0)
+                S_interpolated = f_interp_real(omega_ref)
+                S_interpolated_imag = f_interp_imag(omega_ref)
                 interpolated_spectra.append(S_interpolated)
+                interpolated_spectra_imag.append(S_interpolated_imag)
             else:
                 # Grids match perfectly
                 interpolated_spectra.append(S_omega)
+                interpolated_spectra_imag.append(S_omega_imag)
         
         # Average spectra
         mean_spectrum = np.mean(interpolated_spectra, axis=0)
+        mean_spectrum_imag = np.mean(interpolated_spectra_imag, axis=0)
         print(f"    Averaged {len(interpolated_spectra)} spectra in frequency domain")
         print(f"    [DEBUG] Mean spectrum shape: {mean_spectrum.shape}, min: {mean_spectrum.min():.6e}, max: {mean_spectrum.max():.6e}")
         
-        return mean_spectrum, omega_ref, [d[0] for d in all_data]
+        return mean_spectrum, mean_spectrum_imag, omega_ref, [d[0] for d in all_data]
 
 
 def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
@@ -477,7 +491,7 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
 
     # Apply broadening and compute FFT
     gamma = 0.15
-    S_omega_real, omega = _compute_spectral_function(t_full, C_full, gamma)
+    S_omega_real, S_omega_imag, omega = _compute_spectral_function(t_full, C_full, gamma)
     
     # Extract positive frequencies and compensate
     omega_pos, s_omega_compensated = _extract_positive_frequencies(S_omega_real, omega)
@@ -492,6 +506,7 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
     return {
         'omega': omega,
         'S_omega_real': S_omega_real,
+        'S_omega_imag': S_omega_imag,
         'omega_pos': omega_pos,
         's_omega_compensated': s_omega_compensated,
         'qfi': qfi,
@@ -547,7 +562,7 @@ def _compute_spectral_function(t_full, C_full, gamma):
     # Frequency axis
     omega = np.fft.fftshift(np.fft.fftfreq(len(C_broadened), d=dt)) * 2 * np.pi
     
-    return S_w.real, omega
+    return S_w.real, S_w.imag, omega
 
 
 def _extract_positive_frequencies(S_omega_real, omega):
@@ -594,9 +609,9 @@ def _save_species_results(species, beta, results, structure_factor_dir):
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
     
     # Save spectral data
-    data_out = np.column_stack((results['omega'], results['S_omega_real']))
+    data_out = np.column_stack((results['omega'], results['S_omega_real'], results['S_omega_imag']))
     data_filename = os.path.join(outdir, f'spectral_beta_{beta_label}.dat')
-    np.savetxt(data_filename, data_out, header='freq spectral_function')
+    np.savetxt(data_filename, data_out, header='freq spectral_function_real spectral_function_imag')
     
     # Save peak information
     if results['peak_positions']:
@@ -621,11 +636,15 @@ def _plot_spectral_function(species, beta, results, outdir):
     
     beta_label = 'inf' if np.isinf(beta) else f'{beta:.6g}'
     
-    # Plot spectral function
+    # Plot real and imaginary parts of spectral function
     plt.scatter(results['omega'], results['S_omega_real'], 
-                label=f'Beta≈{beta_label} QFI={results["qfi"]:.4f}')
+                label=f'Real part (Beta≈{beta_label}, QFI={results["qfi"]:.4f})', 
+                alpha=0.7, s=20)
+    plt.scatter(results['omega'], results['S_omega_imag'], 
+                label=f'Imaginary part (Beta≈{beta_label})', 
+                alpha=0.7, s=20, marker='^')
     
-    # Mark peaks
+    # Mark peaks on the real part
     if results['peak_positions']:
         plt.scatter(results['peak_positions'], results['peak_heights'], 
                     color='red', s=80, marker='x', zorder=5,
