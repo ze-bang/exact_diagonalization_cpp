@@ -927,17 +927,23 @@ int applyPermutation(int basis, const std::vector<int>& perm) {
  */
 class Operator {
 public:
-    // Function type for transforming basis states
+    // ============================================================================
+    // Type Definitions
+    // ============================================================================
     using TransformFunction = std::function<std::pair<int, Complex>(int)>;
 
+    // ============================================================================
+    // Public Member Variables
+    // ============================================================================
     std::vector<int> symmetrized_block_ham_sizes;
-    // Constructor
-    
+
+    // ============================================================================
+    // Constructors and Assignment
+    // ============================================================================
     Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {}
 
-    // Copy assignment operator
     Operator& operator=(const Operator& other) {
-        if (this != &other) {  // Check for self-assignment
+        if (this != &other) {
             n_bits_ = other.n_bits_;
             transforms_ = other.transforms_;
             sparseMatrix_ = other.sparseMatrix_;
@@ -947,13 +953,15 @@ public:
         return *this;
     }
 
-    // Mark matrix as needing rebuild when new transform is added
+    // ============================================================================
+    // Core Operator Functions
+    // ============================================================================
+    
     void addTransform(TransformFunction transform) {
         transforms_.push_back(transform);
         matrixBuilt_ = false;  // Matrix needs to be rebuilt
     }
 
-    // Apply the operator to a complex vector using Eigen sparse matrix operations
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
         int dim = 1 << n_bits_;
         
@@ -961,19 +969,17 @@ public:
             throw std::invalid_argument("Input vector dimension does not match operator dimension");
         }
         
-        // Build the sparse matrix if not already built
         buildSparseMatrix();
         
-        // Convert input vector to Eigen vector
+        // Convert to Eigen and multiply
         Eigen::VectorXcd eigenVec(dim);
         for (int i = 0; i < dim; ++i) {
             eigenVec(i) = vec[i];
         }
         
-        // Perform sparse matrix-vector multiplication
         Eigen::VectorXcd result = sparseMatrix_ * eigenVec;
         
-        // Convert back to std::vector
+        // Convert back
         std::vector<Complex> resultVec(dim);
         for (int i = 0; i < dim; ++i) {
             resultVec[i] = result(i);
@@ -982,7 +988,6 @@ public:
         return resultVec;
     }
 
-    // Apply the operator to a raw pointer using Eigen sparse matrix operations
     void apply(const Complex* in, Complex* out, size_t size) const {
         int dim = 1 << n_bits_;
         
@@ -990,26 +995,24 @@ public:
             throw std::invalid_argument("Input/output vector size does not match operator dimension");
         }
         
-        // Build the sparse matrix if not already built
         buildSparseMatrix();
         
-        // Map the raw pointers to Eigen vectors to avoid copying
+        // Use Eigen maps to avoid copying
         Eigen::Map<const Eigen::VectorXcd> eigenIn(in, dim);
         Eigen::Map<Eigen::VectorXcd> eigenOut(out, dim);
         
-        // Perform sparse matrix-vector multiplication
         eigenOut = sparseMatrix_ * eigenIn;
     }
 
-    // Print the operator as a matrix - optimized for memory
-    Matrix returnSymmetrizedMatrix(const std::string& dir){
+    // ============================================================================
+    // Matrix Generation Functions
+    // ============================================================================
+    
+    Matrix returnSymmetrizedMatrix(const std::string& dir) {
         int dim = 1 << n_bits_;
         Matrix matrix(dim, std::vector<Complex>(dim, 0.0));
         
-        // Process one basis vector at a time to reduce memory footprint
-        std::vector<Complex> temp_vec_i;
-        std::vector<Complex> temp_vec_j;
-        std::vector<Complex> temp_vec_i_F;
+        std::vector<Complex> temp_vec_i, temp_vec_j, temp_vec_i_F;
         
         for (int i = 0; i < dim; ++i) {
             temp_vec_i = read_sym_basis(i, dir);
@@ -1024,12 +1027,10 @@ public:
                 }
                 matrix[i][j] = res;
                 
-                // Clear temp_vec_j after use
                 temp_vec_j.clear();
                 temp_vec_j.shrink_to_fit();
             }
             
-            // Clear vectors after processing each row
             temp_vec_i.clear();
             temp_vec_i.shrink_to_fit();
             temp_vec_i_F.clear();
@@ -1038,9 +1039,10 @@ public:
         return matrix;
     }
 
-    Matrix returnMatrix(){
+    Matrix returnMatrix() {
         int dim = 1 << n_bits_;
         Matrix matrix(dim, std::vector<Complex>(dim, 0.0));
+        
         for (int i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
@@ -1051,6 +1053,228 @@ public:
         }
         return matrix;
     }
+
+    void buildSparseMatrix() const {
+        if (matrixBuilt_) return;
+        
+        int dim = 1 << n_bits_;
+        sparseMatrix_.resize(dim, dim);
+        
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        
+        for (int i = 0; i < dim; ++i) {
+            for (const auto& transform : transforms_) {
+                auto [j, scalar] = transform(i);
+                if (j >= 0 && j < dim) {
+                    triplets.emplace_back(j, i, scalar);
+                }
+            }
+        }
+        
+        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
+        matrixBuilt_ = true;
+    }
+
+    Eigen::SparseMatrix<Complex> getSparseMatrix() const {
+        buildSparseMatrix();
+        return sparseMatrix_;
+    }
+
+    // ============================================================================
+    // File I/O Functions for Loading Operators
+    // ============================================================================
+    
+    void loadFromFile(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + filename);
+        }
+        
+        std::cout << "Reading file: " << filename << std::endl;
+        
+        // Parse header
+        std::string line;
+        std::getline(file, line); // Skip header
+        
+        std::getline(file, line);
+        std::istringstream iss(line);
+        int numLines;
+        std::string m;
+        iss >> m >> numLines;
+        
+        // Skip separator lines
+        for (int i = 0; i < 3; ++i) {
+            std::getline(file, line);
+        }
+        
+        // Process transform data
+        int lineCount = 0;
+        while (std::getline(file, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            int Op, indx;
+            double E, F;
+            
+            if (!(lineStream >> Op >> indx >> E >> F)) {
+                continue;
+            }
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (Op == 2) {
+                    return {basis, Complex(E,F) * double(spin_l_) * pow(-1,(basis >> indx) & 1)};
+                } else {
+                    if (((basis >> indx) & 1) != Op) {
+                        int flipped_basis = basis ^ (1 << indx);
+                        return {flipped_basis, Complex(E, F)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+            
+            lineCount++;
+        }
+        
+        std::cout << "File read complete." << std::endl;
+    }
+
+    void loadFromInterAllFile(const std::string& filename) {
+        std::ifstream file(filename);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + filename);
+        }
+        
+        std::cout << "Reading file: " << filename << std::endl;
+        
+        // Parse header
+        std::string line;
+        std::getline(file, line);
+        
+        std::getline(file, line);
+        std::istringstream iss(line);
+        int numLines;
+        std::string m;
+        iss >> m >> numLines;
+        
+        // Skip separator lines
+        for (int i = 0; i < 3; ++i) {
+            std::getline(file, line);
+        }
+        
+        // Process two-site transform data
+        int lineCount = 0;
+        while (std::getline(file, line) && lineCount < numLines) {
+            std::istringstream lineStream(line);
+            int Op1, indx1, Op2, indx2;
+            double E, F;
+            
+            if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
+                continue;
+            }
+            
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (Op1 == 2 && Op2 == 2) {
+                    // Both are Z operators
+                    int bit1 = (basis >> indx1) & 1;
+                    int bit2 = (basis >> indx2) & 1;
+                    return {basis, Complex(E, F) * double(spin_l_ * spin_l_) * 
+                            pow(-1, bit1) * pow(-1, bit2)};
+                } 
+                else if (Op1 == 2) {
+                    // First is Z, second is ladder
+                    int bit1 = (basis >> indx1) & 1;
+                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                    
+                    if (bit2_matches) {
+                        int flipped_basis = basis ^ (1 << indx2);
+                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit1)};
+                    }
+                } 
+                else if (Op2 == 2) {
+                    // First is ladder, second is Z
+                    int bit2 = (basis >> indx2) & 1;
+                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                    
+                    if (bit1_matches) {
+                        int flipped_basis = basis ^ (1 << indx1);
+                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit2)};
+                    }
+                } 
+                else {
+                    // Both are ladder operators
+                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                    
+                    if (bit1_matches && bit2_matches) {
+                        int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
+                        return {flipped_basis, Complex(E, F)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+            
+            lineCount++;
+        }
+        
+        std::cout << "File read complete." << std::endl;
+    }
+
+    void loadonebodycorrelation(const int Op, const int indx) {
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            if (Op == 2) {
+                return {basis, Complex(1.0,0.0) * double(spin_l_) * pow(-1,(basis >> indx) & 1)};
+            } else {
+                if (((basis >> indx) & 1) != Op) {
+                    int flipped_basis = basis ^ (1 << indx);
+                    return {flipped_basis, Complex(1.0 * double(spin_l_ * 2), 0.0)};
+                }
+            }
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+
+    void loadtwobodycorrelation(const int Op1, const int indx1, const int Op2, const int indx2) {
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            if (Op1 == 2 && Op2 == 2) {
+                int bit1 = (basis >> indx1) & 1;
+                int bit2 = (basis >> indx2) & 1;
+                return {basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_) * 
+                        pow(-1, bit1) * pow(-1, bit2)};
+            } 
+            else if (Op1 == 2) {
+                int bit1 = (basis >> indx1) & 1;
+                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                
+                if (bit2_matches) {
+                    int flipped_basis = basis ^ (1 << indx2);
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_ * 2) * 
+                            pow(-1, bit1)};
+                }
+            } 
+            else if (Op2 == 2) {
+                int bit2 = (basis >> indx2) & 1;
+                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                
+                if (bit1_matches) {
+                    int flipped_basis = basis ^ (1 << indx1);
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_ * 2) * 
+                            pow(-1, bit2)};
+                }
+            } 
+            else {
+                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
+                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
+                
+                if (bit1_matches && bit2_matches) {
+                    int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
+                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * 2 * spin_l_ * 2)};
+                }
+            }
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+
+    // ============================================================================
+    // Symmetrized Basis Generation
+    // ============================================================================
     
     void generateSymmetrizedBasis(const std::string& dir) {
         // Step 1: Load automorphism data
@@ -1077,843 +1301,24 @@ public:
         std::cout << "Symmetrized basis generation complete." << std::endl;
     }
 
-private:
-    std::vector<std::vector<int>> loadMaxClique(const std::string& dir) {
-        const std::string filepath = dir + "/automorphism_results/max_clique.json";
-        std::cout << "Loading max clique from: " << filepath << std::endl;
-        
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open max_clique.json file: " + filepath);
-        }
-        
-        std::string json_content((std::istreambuf_iterator<char>(file)),
-                                 std::istreambuf_iterator<char>());
-        file.close();
-        
-        auto max_clique = parseJsonIntArrays(json_content);
-        if (max_clique.empty()) {
-            throw std::runtime_error("Invalid or empty max_clique.json");
-        }
-        
-        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
-        return max_clique;
-    }
+    // ============================================================================
+    // Symmetrized Block Matrix Operations
+    // ============================================================================
     
-    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
-        std::vector<std::vector<int>> result;
-        size_t pos = json.find('[');
-        if (pos == std::string::npos) return result;
-        ++pos;
-        
-        while (pos < json.size()) {
-            // Skip whitespace
-            while (pos < json.size() && std::isspace(json[pos])) ++pos;
-            if (pos >= json.size() || json[pos] == ']') break;
-            if (json[pos] != '[') { ++pos; continue; }
-            
-            // Parse inner array
-            ++pos;
-            std::vector<int> array;
-            std::string number;
-            
-            while (pos < json.size() && json[pos] != ']') {
-                char c = json[pos++];
-                if (std::isdigit(c)) {
-                    number += c;
-                } else if (!number.empty() && (c == ',' || std::isspace(c))) {
-                    array.push_back(std::stoi(number));
-                    number.clear();
-                }
-            }
-            
-            if (!number.empty()) array.push_back(std::stoi(number));
-            if (pos < json.size() && json[pos] == ']') ++pos;
-            if (!array.empty()) result.push_back(std::move(array));
-        }
-        
-        return result;
-    }
-    
-    std::pair<std::vector<std::vector<int>>, std::vector<int>> 
-    findGenerators(const std::vector<std::vector<int>>& max_clique) {
-        MinimalGeneratorFinder gen_finder;
-        auto [generators, orders] = gen_finder.findMinimalGenerators(max_clique);
-        
-        std::cout << "Found " << generators.size() << " minimal generators:\n";
-        for (size_t i = 0; i < generators.size(); ++i) {
-            std::cout << "  Generator " << i << " (order " << orders[i] << "): ";
-            for (int v : generators[i]) std::cout << v << " ";
-            std::cout << "\n";
-        }
-        
-        return {generators, orders};
-    }
-    
-    std::vector<std::vector<int>> 
-    computePowerRepresentation(const std::vector<std::vector<int>>& generators,
-                               const std::vector<std::vector<int>>& max_clique) {
-        auto power_repr = AutomorphismPowerRepresentation::representAllAsGeneratorPowers(
-            generators, max_clique);
-        std::cout << "Power representation computed for all automorphisms.\n";
-        return power_repr;
-    }
-    
-    std::vector<std::vector<int>> 
-    enumerateQuantumNumbers(const std::vector<std::vector<int>>& generators,
-                            const std::vector<int>& orders) {
-        std::vector<std::vector<int>> quantum_numbers;
-        std::vector<int> current(generators.size(), 0);
-        
-        std::function<void(size_t)> enumerate = [&](size_t pos) {
-            if (pos == generators.size()) {
-                quantum_numbers.push_back(current);
-                return;
-            }
-            for (int k = 0; k < orders[pos]; ++k) {
-                current[pos] = k;
-                enumerate(pos + 1);
-            }
-        };
-        
-        enumerate(0);
-        std::cout << "Total symmetry sectors: " << quantum_numbers.size() << std::endl;
-        return quantum_numbers;
-    }
-    
-    void prepareOutputDirectory(const std::string& dir) {
-        const std::string sym_basis_dir = dir + "/sym_basis";
-        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
-        system(mkdir_cmd.c_str());
-    }
-    
-    void generateBasisVectors(const std::string& dir,
-                             const std::vector<std::vector<int>>& max_clique,
-                             const std::vector<std::vector<int>>& power_representation,
-                             const std::vector<int>& orders,
-                             const std::vector<std::vector<int>>& all_quantum_numbers) {
-        const size_t dim = 1ULL << n_bits_;
-        size_t total_written = 0;
-        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
-        
-        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
-            size_t sector_size = processSector(dir, sector_idx, all_quantum_numbers[sector_idx],
-                                              max_clique, power_representation, orders,
-                                              dim, total_written);
-            symmetrized_block_ham_sizes[sector_idx] = sector_size;
-            
-            std::cout << "Sector " << (sector_idx + 1) << "/" << all_quantum_numbers.size() 
-                     << ": " << sector_size << " basis vectors\n";
-        }
-        
-        std::cout << "\nTotal unique symmetrized basis vectors: " << total_written << std::endl;
-    }
-    
-    size_t processSector(const std::string& dir, size_t sector_idx,
-                        const std::vector<int>& quantum_nums,
-                        const std::vector<std::vector<int>>& max_clique,
-                        const std::vector<std::vector<int>>& power_representation,
-                        const std::vector<int>& orders,
-                        size_t dim, size_t& total_written) {
-        std::set<size_t> processed_states;
-        std::set<std::string> unique_vectors;
-        size_t sector_basis_count = 0;
-        
-        for (size_t basis = 0; basis < dim; ++basis) {
-            if (basis % std::max<size_t>(1, dim / 100) == 0) {
-                showProgress(basis, dim, sector_idx);
-            }
-            
-            if (processed_states.count(basis)) continue;
-            
-            // Mark all states in the orbit as processed
-            auto orbit = computeOrbit(basis, max_clique);
-            processed_states.insert(orbit.begin(), orbit.end());
-            
-            // Generate and validate symmetrized vector
-            auto vec = createSymmetrizedVector(basis, max_clique, power_representation, 
-                                              orders, quantum_nums);
-            if (!isValidVector(vec)) continue;
-            
-            // Normalize phase and check uniqueness
-            normalizePhase(vec);
-            std::string hash = computeVectorHash(vec);
-            if (unique_vectors.count(hash)) continue;
-            unique_vectors.insert(hash);
-            
-            // Save to file
-            saveVector(dir, vec, total_written);
-            ++sector_basis_count;
-            ++total_written;
-        }
-        
-        std::cout << std::endl;
-        return sector_basis_count;
-    }
-    
-    std::set<size_t> computeOrbit(size_t basis, const std::vector<std::vector<int>>& max_clique) {
-        std::set<size_t> orbit;
-        for (const auto& perm : max_clique) {
-            orbit.insert(applyPermutation(static_cast<int>(basis), perm));
-        }
-        return orbit;
-    }
-    
-    std::vector<Complex> createSymmetrizedVector(int basis,
-                                                 const std::vector<std::vector<int>>& max_clique,
-                                                 const std::vector<std::vector<int>>& power_repr,
-                                                 const std::vector<int>& orders,
-                                                 const std::vector<int>& quantum_nums) {
-        return sym_basis_e_(basis, max_clique, power_repr, orders, quantum_nums);
-    }
-    
-    bool isValidVector(const std::vector<Complex>& vec) {
-        double norm_squared = 0.0;
-        for (const auto& v : vec) {
-            norm_squared += std::norm(v);
-        }
-        return norm_squared > 1e-10;
-    }
-    
-    void normalizePhase(std::vector<Complex>& vec) {
-        // Find first non-zero entry
-        size_t first_nonzero = 0;
-        while (first_nonzero < vec.size() && std::abs(vec[first_nonzero]) < 1e-10) {
-            ++first_nonzero;
-        }
-        
-        if (first_nonzero >= vec.size()) return;
-        
-        // Normalize by phase of first non-zero entry
-        Complex phase = vec[first_nonzero] / std::abs(vec[first_nonzero]);
-        for (auto& v : vec) {
-            v /= phase;
-        }
-    }
-    
-    std::string computeVectorHash(const std::vector<Complex>& vec) {
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(12);
-        
-        for (size_t i = 0; i < vec.size(); ++i) {
-            if (std::abs(vec[i]) > 1e-10) {
-                ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
-            }
-        }
-        
-        return ss.str();
-    }
-    
-    void saveVector(const std::string& dir, const std::vector<Complex>& vec, size_t index) {
-        const std::string filepath = dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat";
-        std::ofstream file(filepath);
-        
-        for (size_t i = 0; i < vec.size(); ++i) {
-            if (std::abs(vec[i]) > 1e-10) {
-                file << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
-            }
-        }
-    }
-    
-    void showProgress(size_t current, size_t total, size_t sector_idx) {
-        double percent = (static_cast<double>(current) / total) * 100.0;
-        int bar_width = 40;
-        int pos = static_cast<int>(bar_width * percent / 100.0);
-        
-        std::cout << "\rSector " << (sector_idx + 1) << " [";
-        for (int i = 0; i < bar_width; ++i) {
-            if (i < pos) std::cout << "=";
-            else if (i == pos) std::cout << ">";
-            else std::cout << " ";
-        }
-        std::cout << "] " << std::fixed << std::setprecision(1) << percent << "%" << std::flush;
-    }
-    
-    void saveBlockSizes(const std::string& dir) {
-        std::cout << "Block sizes: ";
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
-            std::cout << symmetrized_block_ham_sizes[i];
-            if (i < symmetrized_block_ham_sizes.size() - 1) std::cout << " ";
-        }
-        std::cout << std::endl;
-        
-        std::ofstream file(dir + "/sym_basis/sym_block_sizes.txt");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not save block sizes file");
-        }
-        
-        for (int size : symmetrized_block_ham_sizes) {
-            file << size << "\n";
-        }
-    }
-
-public:
-    std::vector<Complex> read_sym_basis(int index, const std::string& dir){
-        std::ifstream file(dir+"/sym_basis/sym_basis"+std::to_string(index)+".dat");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir +"/sym_basis/sym_basis"+std::to_string(index)+".dat");
-        }
-        std::vector<Complex> sym_basis((1ULL<<n_bits_), 0.0);
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            int index;
-            double real, imag;
-            if (iss >> index >> real >> imag) {
-                sym_basis[index] = Complex(real, imag);
-            }
-        }
-        return sym_basis;
-    }
-
-    // Optimized read function for sparse basis vectors
-    void read_sym_basis_sparse(int index, const std::string& dir, 
-                              std::map<int, Complex>& sparse_vec) {
-        sparse_vec.clear();
-        std::ifstream file(dir+"/sym_basis/sym_basis"+std::to_string(index)+".dat");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir +"/sym_basis/sym_basis"+std::to_string(index)+".dat");
-        }
-        
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            int idx;
-            double real, imag;
-            if (iss >> idx >> real >> imag) {
-                Complex val(real, imag);
-                if (std::abs(val) > 1e-10) {
-                    sparse_vec[idx] = val;
-                }
-            }
-        }
-    }
-
-    std::vector<Complex> sym_basis_e_(int basis, std::vector<std::vector<int>> max_clique, std::vector<std::vector<int>> power_representation, std::vector<int> minimal_generators, std::vector<int> e_i){
-        
-        std::vector<Complex> sym_basis(1 << n_bits_, 0.0);
-
-        // Pre-compute phase factors for all permutations
-        std::vector<Complex> phase_factors(max_clique.size(), Complex(1.0, 0.0));
-        for(size_t i=0; i<max_clique.size(); i++) {
-            double phase = 0.0;
-            for(size_t j=0; j<power_representation[i].size(); j++) {
-                phase += 2.0*M_PI*power_representation[i][j]*e_i[j]/minimal_generators[j];
-            }
-            phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
-        }
-
-        // Apply permutations and add with phase factors
-        for(size_t i=0; i<max_clique.size(); i++) {
-            int permuted_state = applyPermutation(basis, max_clique[i]);
-            sym_basis[permuted_state] += phase_factors[i];
-        }
-
-        // Normalize the sym_basis
-        double norm = 0.0;
-        for (const auto& val : sym_basis) {
-            norm += std::norm(val);
-        }
-        if (norm < 1e-8) {
-            return sym_basis; // Return unnormalized basis
-        }
-        norm = std::sqrt(norm);
-        for (auto& val : sym_basis) {
-            val /= norm;
-        }
-        return sym_basis;
-    }
-
-    // Load operator definition from a file
-    void loadFromFile(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + filename);
-        }
-        std::cout << "Reading file: " << filename << std::endl;
-        std::string line;
-        
-        // Skip the first line (header)
-        std::getline(file, line);
-        
-        // Read the number of lines
-        std::getline(file, line);
-        std::istringstream iss(line);
-        int numLines;
-        std::string m;
-        iss >> m >> numLines;
-        // std::cout << "Number of lines: " << numLines << std::endl;
-        // Skip the next 3 lines (separators/headers)
-        for (int i = 0; i < 3; ++i) {
-            std::getline(file, line);
-        }
-        
-        // Process transform data
-        int lineCount = 0;
-        while (std::getline(file, line) && lineCount < numLines) {
-            std::istringstream lineStream(line);
-            int Op, indx;
-            double E, F;
-            // std::cout << "Reading line: " << line << std::endl;
-            if (!(lineStream >> Op >> indx >> E >> F)) {
-                continue; // Skip invalid lines
-            }
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                // Check if all bits match their expected values
-                if (Op == 2){
-                    return {basis, Complex(E,F)*double(spin_l_)*pow(-1,(basis >> indx) & 1)};
-                }
-                else{
-                    if (((basis >> indx) & 1) != Op) {
-                        // Flip the A bit
-                        int flipped_basis = basis ^ (1 << indx);
-                        return {flipped_basis, Complex(E, F)};                    
-                    }
-                }
-                // Default case: no transformation applies
-                return {basis, Complex(0.0, 0.0)};
-            });
-            lineCount++;
-        }
-        std::cout << "File read complete." << std::endl;
-    }
-    void loadFromInterAllFile(const std::string& filename) {
-        std::ifstream file(filename);
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + filename);
-        }
-        std::cout << "Reading file: " << filename << std::endl;
-        std::string line;
-        
-        // Skip the first line (header)
-        std::getline(file, line);
-        
-        // Read the number of lines
-
-        std::getline(file, line);
-        std::istringstream iss(line);
-        int numLines;
-        std::string m;
-        iss >> m >> numLines;
-        // std::cout << "Number of lines: " << numLines << std::endl;
-        
-        // Skip the next 3 lines (separators/headers)
-        for (int i = 0; i < 3; ++i) {
-            std::getline(file, line);
-        }
-        
-        // Process transform data
-        int lineCount = 0;
-        while (std::getline(file, line) && lineCount < numLines) {
-            std::istringstream lineStream(line);
-            int Op1, indx1, Op2, indx2;
-            double E, F;
-            // std::cout << "Reading line: " << line << std::endl;
-            if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
-                continue; // Skip invalid lines
-            }
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                // Check what type of operators we're dealing with
-                if (Op1 == 2 && Op2 == 2) {
-                    // Both are identity operators with phase factors
-                    int bit1 = (basis >> indx1) & 1;
-                    int bit2 = (basis >> indx2) & 1;
-                    return {basis, Complex(E, F)* double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
-                } 
-                else if (Op1 == 2) {
-                    // Op1 is identity with phase, Op2 is bit flip
-                    int bit1 = (basis >> indx1) & 1;
-                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                    
-                    if (bit2_matches) {
-                        int flipped_basis = basis ^ (1 << indx2);
-                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit1)};
-                    }
-                } 
-                else if (Op2 == 2) {
-                    // Op2 is identity with phase, Op1 is bit flip
-                    int bit2 = (basis >> indx2) & 1;
-                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                    
-                    if (bit1_matches) {
-                        // Flip the first bit
-                        int flipped_basis = basis ^ (1 << indx1);
-                        return {flipped_basis, Complex(E, F)* double(spin_l_) * pow(-1, bit2)};
-                    }
-                } 
-                else {
-                    // Both are bit flip operators
-                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                    
-                    if (bit1_matches && bit2_matches) {
-                        // Flip both bits
-                        int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
-                        return {flipped_basis, Complex(E, F)};
-                    }
-                }
-                // Default case: no transformation applies
-                return {basis, Complex(0.0, 0.0)};
-            });
-            lineCount++;
-        }
-        std::cout << "File read complete." << std::endl;    
-    }
-
-    void loadonebodycorrelation(const int Op, const int indx) { 
-        addTransform([=](int basis) -> std::pair<int, Complex> {
-            // Check if all bits match their expected values
-            if (Op == 2){
-                return {basis, Complex(1.0,0.0)*double(spin_l_)*pow(-1,(basis >> indx) & 1)};
-            }
-            else{
-                if (((basis >> indx) & 1) != Op) {
-                    // Flip the A bit
-                    int flipped_basis = basis ^ (1 << indx);
-                    return {flipped_basis, Complex(1.0 * double(spin_l_*2), 0.0)};                    
-                }
-            }
-            // Default case: no transformation applies
-            return {basis, Complex(0.0, 0.0)};
-        });
-    }
-
-    void loadtwobodycorrelation(const int Op1, const int indx1, const int Op2, const int indx2){
-        addTransform([=](int basis) -> std::pair<int, Complex> {
-            // Check what type of operators we're dealing with
-            if (Op1 == 2 && Op2 == 2) {
-                // Both are identity operators with phase factors
-                int bit1 = (basis >> indx1) & 1;
-                int bit2 = (basis >> indx2) & 1;
-                return {basis, Complex(1.0, 0.0)* double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
-            } 
-            else if (Op1 == 2) {
-                // Op1 is identity with phase, Op2 is bit flip
-                int bit1 = (basis >> indx1) & 1;
-                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                
-                if (bit2_matches) {
-                    int flipped_basis = basis ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * double(spin_l_*2) * pow(-1, bit1)};
-                }
-            } 
-            else if (Op2 == 2) {
-                // Op2 is identity with phase, Op1 is bit flip
-                int bit2 = (basis >> indx2) & 1;
-                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                
-                if (bit1_matches) {
-                    // Flip the first bit
-                    int flipped_basis = basis ^ (1 << indx1);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_) * double(spin_l_*2) * pow(-1, bit2)};
-                }
-            } 
-            else {
-                // Both are bit flip operators
-                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                
-                if (bit1_matches && bit2_matches) {
-                    // Flip both bits
-                    int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_*2) * double(spin_l_*2)};
-                }
-            }
-            // Default case: no transformation applies
-            return {basis, Complex(0.0, 0.0)};
-        });
-    }
-    // Build symmetrized sparse matrices for each block and save them to files
     void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
-        // Step 1: Load block sizes if not already loaded
         loadBlockSizesIfNeeded(dir);
         
         std::cout << "Building and saving symmetrized Hamiltonian blocks..." << std::endl;
         
-        // Step 2: Create output directory
         std::string block_dir = createBlockDirectory(dir);
-        
-        // Step 3: Pre-build the sparse matrix representation once
         buildSparseMatrix();
-        
-        // Step 4: Process each symmetry block
         processAllSymmetryBlocks(dir, block_dir);
         
         std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
     }
 
-private:
-    void loadBlockSizesIfNeeded(const std::string& dir) {
-        if (!symmetrized_block_ham_sizes.empty()) {
-            return;
-        }
-        
-        std::string filepath = dir + "/sym_basis/sym_block_sizes.txt";
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            throw std::runtime_error(
-                "Symmetrized basis must be generated first with generateSymmetrizedBasis()"
-            );
-        }
-        
-        symmetrized_block_ham_sizes.clear();
-        int block_size;
-        while (file >> block_size) {
-            symmetrized_block_ham_sizes.push_back(block_size);
-        }
-        
-        std::cout << "Loaded " << symmetrized_block_ham_sizes.size() 
-                  << " symmetrized block sizes." << std::endl;
-    }
-    
-    std::string createBlockDirectory(const std::string& dir) {
-        std::string block_dir = dir + "/sym_blocks";
-        std::string mkdir_command = "mkdir -p " + block_dir;
-        system(mkdir_command.c_str());
-        return block_dir;
-    }
-    
-    void processAllSymmetryBlocks(const std::string& dir, const std::string& block_dir) {
-        int block_start = 0;
-        
-        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); block_idx++) {
-            int block_size = symmetrized_block_ham_sizes[block_idx];
-            
-            if (block_size == 0) {
-                continue;
-            }
-            
-            std::cout << "Processing block " << block_idx 
-                     << " (size: " << block_size << ")" << std::endl;
-            
-            processSingleBlockOptimized(dir, block_dir, block_idx, block_start, block_size);
-            block_start += block_size;
-        }
-    }
-    
-    void processSingleBlockOptimized(const std::string& dir, 
-                                    const std::string& block_dir,
-                                    size_t block_idx,
-                                    int block_start, 
-                                    int block_size) {
-        // Use column-wise processing for better cache locality
-        std::vector<std::vector<std::pair<int, Complex>>> columns(block_size);
-        
-        // Process columns in parallel
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (int col = 0; col < block_size; col++) {
-            processColumn(dir, block_start, col, block_size, columns[col]);
-        }
-        
-        // Convert to sparse matrix and save
-        saveBlockMatrixOptimized(block_dir, block_idx, block_size, columns);
-    }
-    
-    void processColumn(const std::string& dir,
-                      int block_start,
-                      int col,
-                      int block_size,
-                      std::vector<std::pair<int, Complex>>& column) {
-        // Load basis vector for this column
-        std::map<int, Complex> basis_col;
-        read_sym_basis_sparse(block_start + col, dir, basis_col);
-        
-        if (basis_col.empty()) {
-            return;
-        }
-        
-        // Apply Hamiltonian using pre-built sparse matrix
-        std::map<int, Complex> h_basis_col = applyHamiltonianOptimized(basis_col);
-        
-        // Pre-allocate space for column
-        column.reserve(block_size / 10);  // Estimate sparsity
-        
-        // Compute matrix elements for this column
-        for (int row = 0; row < block_size; row++) {
-            Complex element = computeMatrixElementOptimized(dir, block_start + row, h_basis_col);
-            
-            if (std::abs(element) > 1e-10) {
-                column.emplace_back(row, element);
-            }
-        }
-    }
-    
-    std::map<int, Complex> applyHamiltonianOptimized(const std::map<int, Complex>& basis_vec) {
-        std::map<int, Complex> result;
-        int dim = 1 << n_bits_;
-        
-        // Use the pre-built sparse matrix for efficient application
-        for (const auto& [idx, val] : basis_vec) {
-            if (idx >= dim) continue;
-            
-            // Apply transforms more efficiently
-            for (const auto& transform : transforms_) {
-                auto [new_idx, scalar] = transform(idx);
-                
-                if (new_idx >= 0 && new_idx < dim) {
-                    Complex contribution = val * scalar;
-                    if (std::abs(contribution) > 1e-10) {
-                        result[new_idx] += contribution;
-                    }
-                }
-            }
-        }
-        
-        return result;
-    }
-    
-    Complex computeMatrixElementOptimized(const std::string& dir,
-                                         int row_idx,
-                                         const std::map<int, Complex>& h_basis_col) {
-        // Use static thread-local cache for basis vectors
-        static thread_local std::unordered_map<int, std::map<int, Complex>> basis_cache;
-        static thread_local int cache_counter = 0;
-        
-        // Periodically clear cache to prevent memory bloat
-        if (++cache_counter > 1000) {
-            basis_cache.clear();
-            cache_counter = 0;
-        }
-        
-        // Check cache first
-        auto cache_it = basis_cache.find(row_idx);
-        if (cache_it == basis_cache.end()) {
-            // Load and cache basis vector
-            std::map<int, Complex> basis_row;
-            read_sym_basis_sparse(row_idx, dir, basis_row);
-            cache_it = basis_cache.emplace(row_idx, std::move(basis_row)).first;
-        }
-        
-        // Compute inner product
-        return computeInnerProductOptimized(cache_it->second, h_basis_col);
-    }
-    
-    Complex computeInnerProductOptimized(const std::map<int, Complex>& basis_row,
-                                        const std::map<int, Complex>& h_basis_col) {
-        Complex result(0.0, 0.0);
-        
-        // Use the smaller map for iteration
-        if (basis_row.size() < h_basis_col.size()) {
-            for (const auto& [idx, val] : basis_row) {
-                auto it = h_basis_col.find(idx);
-                if (it != h_basis_col.end()) {
-                    result += std::conj(val) * it->second;
-                }
-            }
-        } else {
-            for (const auto& [idx, val] : h_basis_col) {
-                auto it = basis_row.find(idx);
-                if (it != basis_row.end()) {
-                    result += std::conj(it->second) * val;
-                }
-            }
-        }
-        
-        return result;
-    }
-    
-    void saveBlockMatrixOptimized(const std::string& block_dir,
-                                 size_t block_idx,
-                                 int block_size,
-                                 const std::vector<std::vector<std::pair<int, Complex>>>& columns) {
-        // Count total non-zeros
-        size_t nnz = 0;
-        for (const auto& col : columns) {
-            nnz += col.size();
-        }
-        
-        // Build sparse matrix efficiently
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        triplets.reserve(nnz);
-        
-        for (int col = 0; col < block_size; col++) {
-            for (const auto& [row, val] : columns[col]) {
-                triplets.emplace_back(row, col, val);
-            }
-        }
-        
-        Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
-        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
-        blockMatrix.makeCompressed();
-        
-        // Save in compressed format
-        std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
-        std::ofstream file(filename, std::ios::binary);
-        
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file for writing: " + filename);
-        }
-        
-        // Write header
-        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
-        
-        // Write non-zero elements in CSC format for better performance
-        for (int k = 0; k < blockMatrix.outerSize(); ++k) {
-            for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
-                int row = it.row();
-                int col = it.col();
-                double real = it.value().real();
-                double imag = it.value().imag();
-                
-                file.write(reinterpret_cast<const char*>(&row), sizeof(int));
-                file.write(reinterpret_cast<const char*>(&col), sizeof(int));
-                file.write(reinterpret_cast<const char*>(&real), sizeof(double));
-                file.write(reinterpret_cast<const char*>(&imag), sizeof(double));
-            }
-        }
-        
-        file.close();
-        
-        std::cout << "  Block " << block_idx << " saved: " 
-                  << block_size << "x" << block_size 
-                  << " with " << nnz << " non-zeros ("
-                  << std::fixed << std::setprecision(2) 
-                  << (100.0 * nnz / (block_size * block_size)) << "% fill)"
-                  << std::endl;
-    }
-
-public:
-
-    // Build the sparse matrix from transforms if needed
-    void buildSparseMatrix() const {
-        if (matrixBuilt_) return;
-        
-        int dim = 1 << n_bits_;
-        sparseMatrix_.resize(dim, dim);
-        
-        // Use triplets to efficiently build the sparse matrix
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        
-        for (int i = 0; i < dim; ++i) {
-            for (const auto& transform : transforms_) {
-                auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {
-                    triplets.emplace_back(j, i, scalar);
-                }
-            }
-        }
-        
-        sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
-        matrixBuilt_ = true;
-    }
-
-    Eigen::SparseMatrix<Complex> getSparseMatrix() const {
-        buildSparseMatrix();
-        return sparseMatrix_;
-    }
-
-    // Load a symmetrized block matrix from file
-    // Supports two formats:
-    // 1) ASCII text:
-    //      first line: `<rows> <cols>`
-    //      subsequent lines: `row col real imag`
-    // 2) Binary (written by saveBlockMatrixOptimized):
-    //      int rows, int cols, size_t nnz, followed by nnz entries of
-    //      {int row, int col, double real, double imag}
     Eigen::SparseMatrix<Complex> loadSymmetrizedBlock(const std::string& filepath) {
-        // First, try ASCII text parsing
+        // Try ASCII format first
         {
             std::ifstream tf(filepath);
             if (!tf.is_open()) {
@@ -1925,15 +1330,14 @@ public:
                 std::istringstream hdr(firstLine);
                 int rows = 0, cols = 0;
                 if (hdr >> rows >> cols) {
-                    // Looks like ASCII format. Parse the remaining lines.
+                    // ASCII format detected
                     std::vector<Eigen::Triplet<Complex>> triplets;
-                    triplets.reserve(1024); // start with a modest reservation
+                    triplets.reserve(1024);
 
                     int r, c;
                     double real, imag;
                     size_t count = 0;
                     while (tf >> r >> c >> real >> imag) {
-                        // Basic sanity: skip out-of-bounds entries if present in file
                         if (r >= 0 && r < rows && c >= 0 && c < cols) {
                             triplets.emplace_back(r, c, Complex(real, imag));
                             ++count;
@@ -1952,10 +1356,9 @@ public:
                     return blockMatrix;
                 }
             }
-            // If first line didn't parse as two ints, fall through to binary path
         }
 
-        // Binary fallback
+        // Binary format fallback
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open block file: " + filepath);
@@ -1971,11 +1374,13 @@ public:
             throw std::runtime_error("Failed to read header from: " + filepath);
         }
 
-        // Sanity checks to avoid pathological reserves from corrupted headers
+        // Validate header
         if (rows < 0 || cols < 0) {
             throw std::runtime_error("Invalid header (negative dims) in: " + filepath);
         }
-        const unsigned long long maxEntries = static_cast<unsigned long long>(rows) * static_cast<unsigned long long>(cols);
+        
+        const unsigned long long maxEntries = 
+            static_cast<unsigned long long>(rows) * static_cast<unsigned long long>(cols);
         if (nnz > maxEntries) {
             throw std::runtime_error("Invalid header (nnz > rows*cols) in: " + filepath);
         }
@@ -2014,12 +1419,9 @@ public:
 
         return blockMatrix;
     }
-    
-    // Load all symmetrized blocks from a directory
+
     std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocks(const std::string& dir) {
         std::string block_dir = dir + "/sym_blocks";
-        
-        // First, determine how many blocks exist
         loadBlockSizesIfNeeded(dir);
         
         std::vector<Eigen::SparseMatrix<Complex>> blocks;
@@ -2029,7 +1431,6 @@ public:
         
         for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
             if (symmetrized_block_ham_sizes[block_idx] == 0) {
-                // Empty block - add an empty matrix
                 blocks.emplace_back(0, 0);
                 continue;
             }
@@ -2042,7 +1443,6 @@ public:
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Could not load block " << block_idx 
                          << ": " << e.what() << std::endl;
-                // Add empty matrix for missing block
                 blocks.emplace_back(symmetrized_block_ham_sizes[block_idx], 
                                   symmetrized_block_ham_sizes[block_idx]);
             }
@@ -2051,8 +1451,7 @@ public:
         std::cout << "Successfully loaded " << blocks.size() << " blocks" << std::endl;
         return blocks;
     }
-    
-    // Load a specific symmetrized block by index
+
     Eigen::SparseMatrix<Complex> loadSymmetrizedBlockByIndex(const std::string& dir, size_t block_idx) {
         loadBlockSizesIfNeeded(dir);
         
@@ -2070,20 +1469,593 @@ public:
         return loadSymmetrizedBlock(filepath);
     }
 
+    // ============================================================================
+    // Symmetrized Basis I/O
+    // ============================================================================
+    
+    std::vector<Complex> read_sym_basis(int index, const std::string& dir) {
+        std::ifstream file(dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + dir + 
+                                   "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
+        }
+        
+        std::vector<Complex> sym_basis((1ULL << n_bits_), 0.0);
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            int index;
+            double real, imag;
+            if (iss >> index >> real >> imag) {
+                sym_basis[index] = Complex(real, imag);
+            }
+        }
+        return sym_basis;
+    }
+
+    void read_sym_basis_sparse(int index, const std::string& dir, 
+                              std::map<int, Complex>& sparse_vec) {
+        sparse_vec.clear();
+        std::ifstream file(dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file: " + dir + 
+                                   "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
+        }
+        
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            int idx;
+            double real, imag;
+            if (iss >> idx >> real >> imag) {
+                Complex val(real, imag);
+                if (std::abs(val) > 1e-10) {
+                    sparse_vec[idx] = val;
+                }
+            }
+        }
+    }
+
+    std::vector<Complex> sym_basis_e_(int basis, 
+                                      std::vector<std::vector<int>> max_clique,
+                                      std::vector<std::vector<int>> power_representation,
+                                      std::vector<int> minimal_generators,
+                                      std::vector<int> e_i) {
+        
+        std::vector<Complex> sym_basis(1 << n_bits_, 0.0);
+
+        // Pre-compute phase factors
+        std::vector<Complex> phase_factors(max_clique.size(), Complex(1.0, 0.0));
+        for(size_t i = 0; i < max_clique.size(); i++) {
+            double phase = 0.0;
+            for(size_t j = 0; j < power_representation[i].size(); j++) {
+                phase += 2.0 * M_PI * power_representation[i][j] * e_i[j] / minimal_generators[j];
+            }
+            phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
+        }
+
+        // Apply permutations with phase factors
+        for(size_t i = 0; i < max_clique.size(); i++) {
+            int permuted_state = applyPermutation(basis, max_clique[i]);
+            sym_basis[permuted_state] += phase_factors[i];
+        }
+
+        // Normalize
+        double norm = 0.0;
+        for (const auto& val : sym_basis) {
+            norm += std::norm(val);
+        }
+        if (norm < 1e-8) {
+            return sym_basis;
+        }
+        norm = std::sqrt(norm);
+        for (auto& val : sym_basis) {
+            val /= norm;
+        }
+        return sym_basis;
+    }
+
 private:
+    // ============================================================================
+    // Private Member Variables
+    // ============================================================================
     std::vector<TransformFunction> transforms_;
-    int n_bits_; // Number of bits in the basis representation
+    int n_bits_;
     float spin_l_;
+    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
+    mutable bool matrixBuilt_ = false;
+
     const std::array<std::array<double, 4>, 3> operators = {
-        {{0, 1, 0, 0}, {0, 0, 1, 0},{1, 0, 0, -1}}
+        {{0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, -1}}
     };
 
     const std::array<std::array<double, 2>, 2> basis = {
         {{1, 0}, {0, 1}}
     };
 
-    mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
-    mutable bool matrixBuilt_ = false;
+    // ============================================================================
+    // Private Helper Functions - Symmetrized Basis Generation
+    // ============================================================================
+    
+    std::vector<std::vector<int>> loadMaxClique(const std::string& dir) {
+        const std::string filepath = dir + "/automorphism_results/max_clique.json";
+        std::cout << "Loading max clique from: " << filepath << std::endl;
+        
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Cannot open max_clique.json file: " + filepath);
+        }
+        
+        std::string json_content((std::istreambuf_iterator<char>(file)),
+                                 std::istreambuf_iterator<char>());
+        file.close();
+        
+        auto max_clique = parseJsonIntArrays(json_content);
+        if (max_clique.empty()) {
+            throw std::runtime_error("Invalid or empty max_clique.json");
+        }
+        
+        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
+        return max_clique;
+    }
+
+    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
+        std::vector<std::vector<int>> result;
+        size_t pos = json.find('[');
+        if (pos == std::string::npos) return result;
+        ++pos;
+        
+        while (pos < json.size()) {
+            while (pos < json.size() && std::isspace(json[pos])) ++pos;
+            if (pos >= json.size() || json[pos] == ']') break;
+            if (json[pos] != '[') { ++pos; continue; }
+            
+            ++pos;
+            std::vector<int> array;
+            std::string number;
+            
+            while (pos < json.size() && json[pos] != ']') {
+                char c = json[pos++];
+                if (std::isdigit(c)) {
+                    number += c;
+                } else if (!number.empty() && (c == ',' || std::isspace(c))) {
+                    array.push_back(std::stoi(number));
+                    number.clear();
+                }
+            }
+            
+            if (!number.empty()) array.push_back(std::stoi(number));
+            if (pos < json.size() && json[pos] == ']') ++pos;
+            if (!array.empty()) result.push_back(std::move(array));
+        }
+        
+        return result;
+    }
+
+    std::pair<std::vector<std::vector<int>>, std::vector<int>> 
+    findGenerators(const std::vector<std::vector<int>>& max_clique) {
+        MinimalGeneratorFinder gen_finder;
+        auto [generators, orders] = gen_finder.findMinimalGenerators(max_clique);
+        
+        std::cout << "Found " << generators.size() << " minimal generators:\n";
+        for (size_t i = 0; i < generators.size(); ++i) {
+            std::cout << "  Generator " << i << " (order " << orders[i] << "): ";
+            for (int v : generators[i]) std::cout << v << " ";
+            std::cout << "\n";
+        }
+        
+        return {generators, orders};
+    }
+
+    std::vector<std::vector<int>> 
+    computePowerRepresentation(const std::vector<std::vector<int>>& generators,
+                               const std::vector<std::vector<int>>& max_clique) {
+        auto power_repr = AutomorphismPowerRepresentation::representAllAsGeneratorPowers(
+            generators, max_clique);
+        std::cout << "Power representation computed for all automorphisms.\n";
+        return power_repr;
+    }
+
+    std::vector<std::vector<int>> 
+    enumerateQuantumNumbers(const std::vector<std::vector<int>>& generators,
+                            const std::vector<int>& orders) {
+        std::vector<std::vector<int>> quantum_numbers;
+        std::vector<int> current(generators.size(), 0);
+        
+        std::function<void(size_t)> enumerate = [&](size_t pos) {
+            if (pos == generators.size()) {
+                quantum_numbers.push_back(current);
+                return;
+            }
+            for (int k = 0; k < orders[pos]; ++k) {
+                current[pos] = k;
+                enumerate(pos + 1);
+            }
+        };
+        
+        enumerate(0);
+        std::cout << "Total symmetry sectors: " << quantum_numbers.size() << std::endl;
+        return quantum_numbers;
+    }
+
+    void prepareOutputDirectory(const std::string& dir) {
+        const std::string sym_basis_dir = dir + "/sym_basis";
+        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
+        system(mkdir_cmd.c_str());
+    }
+
+    void generateBasisVectors(const std::string& dir,
+                             const std::vector<std::vector<int>>& max_clique,
+                             const std::vector<std::vector<int>>& power_representation,
+                             const std::vector<int>& orders,
+                             const std::vector<std::vector<int>>& all_quantum_numbers) {
+        const size_t dim = 1ULL << n_bits_;
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
+        
+        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
+            size_t sector_size = processSector(dir, sector_idx, all_quantum_numbers[sector_idx],
+                                              max_clique, power_representation, orders,
+                                              dim, total_written);
+            symmetrized_block_ham_sizes[sector_idx] = sector_size;
+            
+            std::cout << "Sector " << (sector_idx + 1) << "/" << all_quantum_numbers.size() 
+                     << ": " << sector_size << " basis vectors\n";
+        }
+        
+        std::cout << "\nTotal unique symmetrized basis vectors: " << total_written << std::endl;
+    }
+
+    size_t processSector(const std::string& dir, size_t sector_idx,
+                        const std::vector<int>& quantum_nums,
+                        const std::vector<std::vector<int>>& max_clique,
+                        const std::vector<std::vector<int>>& power_representation,
+                        const std::vector<int>& orders,
+                        size_t dim, size_t& total_written) {
+        std::set<size_t> processed_states;
+        std::set<std::string> unique_vectors;
+        size_t sector_basis_count = 0;
+        
+        for (size_t basis = 0; basis < dim; ++basis) {
+            if (basis % std::max<size_t>(1, dim / 100) == 0) {
+                showProgress(basis, dim, sector_idx);
+            }
+            
+            if (processed_states.count(basis)) continue;
+            
+            auto orbit = computeOrbit(basis, max_clique);
+            processed_states.insert(orbit.begin(), orbit.end());
+            
+            auto vec = createSymmetrizedVector(basis, max_clique, power_representation, 
+                                              orders, quantum_nums);
+            if (!isValidVector(vec)) continue;
+            
+            normalizePhase(vec);
+            std::string hash = computeVectorHash(vec);
+            if (unique_vectors.count(hash)) continue;
+            unique_vectors.insert(hash);
+            
+            saveVector(dir, vec, total_written);
+            ++sector_basis_count;
+            ++total_written;
+        }
+        
+        std::cout << std::endl;
+        return sector_basis_count;
+    }
+
+    // ============================================================================
+    // Private Helper Functions - Vector Operations
+    // ============================================================================
+    
+    std::set<size_t> computeOrbit(size_t basis, const std::vector<std::vector<int>>& max_clique) {
+        std::set<size_t> orbit;
+        for (const auto& perm : max_clique) {
+            orbit.insert(applyPermutation(static_cast<int>(basis), perm));
+        }
+        return orbit;
+    }
+
+    std::vector<Complex> createSymmetrizedVector(int basis,
+                                                 const std::vector<std::vector<int>>& max_clique,
+                                                 const std::vector<std::vector<int>>& power_repr,
+                                                 const std::vector<int>& orders,
+                                                 const std::vector<int>& quantum_nums) {
+        return sym_basis_e_(basis, max_clique, power_repr, orders, quantum_nums);
+    }
+
+    bool isValidVector(const std::vector<Complex>& vec) {
+        double norm_squared = 0.0;
+        for (const auto& v : vec) {
+            norm_squared += std::norm(v);
+        }
+        return norm_squared > 1e-10;
+    }
+
+    void normalizePhase(std::vector<Complex>& vec) {
+        size_t first_nonzero = 0;
+        while (first_nonzero < vec.size() && std::abs(vec[first_nonzero]) < 1e-10) {
+            ++first_nonzero;
+        }
+        
+        if (first_nonzero >= vec.size()) return;
+        
+        Complex phase = vec[first_nonzero] / std::abs(vec[first_nonzero]);
+        for (auto& v : vec) {
+            v /= phase;
+        }
+    }
+
+    std::string computeVectorHash(const std::vector<Complex>& vec) {
+        std::stringstream ss;
+        ss << std::fixed << std::setprecision(12);
+        
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (std::abs(vec[i]) > 1e-10) {
+                ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
+            }
+        }
+        
+        return ss.str();
+    }
+
+    void saveVector(const std::string& dir, const std::vector<Complex>& vec, size_t index) {
+        const std::string filepath = dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat";
+        std::ofstream file(filepath);
+        
+        for (size_t i = 0; i < vec.size(); ++i) {
+            if (std::abs(vec[i]) > 1e-10) {
+                file << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
+            }
+        }
+    }
+
+    void showProgress(size_t current, size_t total, size_t sector_idx) {
+        double percent = (static_cast<double>(current) / total) * 100.0;
+        int bar_width = 40;
+        int pos = static_cast<int>(bar_width * percent / 100.0);
+        
+        std::cout << "\rSector " << (sector_idx + 1) << " [";
+        for (int i = 0; i < bar_width; ++i) {
+            if (i < pos) std::cout << "=";
+            else if (i == pos) std::cout << ">";
+            else std::cout << " ";
+        }
+        std::cout << "] " << std::fixed << std::setprecision(1) << percent << "%" << std::flush;
+    }
+
+    void saveBlockSizes(const std::string& dir) {
+        std::cout << "Block sizes: ";
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            std::cout << symmetrized_block_ham_sizes[i];
+            if (i < symmetrized_block_ham_sizes.size() - 1) std::cout << " ";
+        }
+        std::cout << std::endl;
+        
+        std::ofstream file(dir + "/sym_basis/sym_block_sizes.txt");
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not save block sizes file");
+        }
+        
+        for (int size : symmetrized_block_ham_sizes) {
+            file << size << "\n";
+        }
+    }
+
+    // ============================================================================
+    // Private Helper Functions - Block Matrix Processing
+    // ============================================================================
+    
+    void loadBlockSizesIfNeeded(const std::string& dir) {
+        if (!symmetrized_block_ham_sizes.empty()) {
+            return;
+        }
+        
+        std::string filepath = dir + "/sym_basis/sym_block_sizes.txt";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error(
+                "Symmetrized basis must be generated first with generateSymmetrizedBasis()"
+            );
+        }
+        
+        symmetrized_block_ham_sizes.clear();
+        int block_size;
+        while (file >> block_size) {
+            symmetrized_block_ham_sizes.push_back(block_size);
+        }
+        
+        std::cout << "Loaded " << symmetrized_block_ham_sizes.size() 
+                  << " symmetrized block sizes." << std::endl;
+    }
+
+    std::string createBlockDirectory(const std::string& dir) {
+        std::string block_dir = dir + "/sym_blocks";
+        std::string mkdir_command = "mkdir -p " + block_dir;
+        system(mkdir_command.c_str());
+        return block_dir;
+    }
+
+    void processAllSymmetryBlocks(const std::string& dir, const std::string& block_dir) {
+        int block_start = 0;
+        
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); block_idx++) {
+            int block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                continue;
+            }
+            
+            std::cout << "Processing block " << block_idx 
+                     << " (size: " << block_size << ")" << std::endl;
+            
+            processSingleBlockOptimized(dir, block_dir, block_idx, block_start, block_size);
+            block_start += block_size;
+        }
+    }
+
+    void processSingleBlockOptimized(const std::string& dir, 
+                                    const std::string& block_dir,
+                                    size_t block_idx,
+                                    int block_start, 
+                                    int block_size) {
+        std::vector<std::vector<std::pair<int, Complex>>> columns(block_size);
+        
+        #pragma omp parallel for schedule(dynamic, 1)
+        for (int col = 0; col < block_size; col++) {
+            processColumn(dir, block_start, col, block_size, columns[col]);
+        }
+        
+        saveBlockMatrixOptimized(block_dir, block_idx, block_size, columns);
+    }
+
+    void processColumn(const std::string& dir,
+                      int block_start,
+                      int col,
+                      int block_size,
+                      std::vector<std::pair<int, Complex>>& column) {
+        std::map<int, Complex> basis_col;
+        read_sym_basis_sparse(block_start + col, dir, basis_col);
+        
+        if (basis_col.empty()) {
+            return;
+        }
+        
+        std::map<int, Complex> h_basis_col = applyHamiltonianOptimized(basis_col);
+        
+        column.reserve(block_size / 10);
+        
+        for (int row = 0; row < block_size; row++) {
+            Complex element = computeMatrixElementOptimized(dir, block_start + row, h_basis_col);
+            
+            if (std::abs(element) > 1e-10) {
+                column.emplace_back(row, element);
+            }
+        }
+    }
+
+    std::map<int, Complex> applyHamiltonianOptimized(const std::map<int, Complex>& basis_vec) {
+        std::map<int, Complex> result;
+        int dim = 1 << n_bits_;
+        
+        for (const auto& [idx, val] : basis_vec) {
+            if (idx >= dim) continue;
+            
+            for (const auto& transform : transforms_) {
+                auto [new_idx, scalar] = transform(idx);
+                
+                if (new_idx >= 0 && new_idx < dim) {
+                    Complex contribution = val * scalar;
+                    if (std::abs(contribution) > 1e-10) {
+                        result[new_idx] += contribution;
+                    }
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    Complex computeMatrixElementOptimized(const std::string& dir,
+                                         int row_idx,
+                                         const std::map<int, Complex>& h_basis_col) {
+        static thread_local std::unordered_map<int, std::map<int, Complex>> basis_cache;
+        static thread_local int cache_counter = 0;
+        
+        if (++cache_counter > 1000) {
+            basis_cache.clear();
+            cache_counter = 0;
+        }
+        
+        auto cache_it = basis_cache.find(row_idx);
+        if (cache_it == basis_cache.end()) {
+            std::map<int, Complex> basis_row;
+            read_sym_basis_sparse(row_idx, dir, basis_row);
+            cache_it = basis_cache.emplace(row_idx, std::move(basis_row)).first;
+        }
+        
+        return computeInnerProductOptimized(cache_it->second, h_basis_col);
+    }
+
+    Complex computeInnerProductOptimized(const std::map<int, Complex>& basis_row,
+                                        const std::map<int, Complex>& h_basis_col) {
+        Complex result(0.0, 0.0);
+        
+        if (basis_row.size() < h_basis_col.size()) {
+            for (const auto& [idx, val] : basis_row) {
+                auto it = h_basis_col.find(idx);
+                if (it != h_basis_col.end()) {
+                    result += std::conj(val) * it->second;
+                }
+            }
+        } else {
+            for (const auto& [idx, val] : h_basis_col) {
+                auto it = basis_row.find(idx);
+                if (it != basis_row.end()) {
+                    result += std::conj(it->second) * val;
+                }
+            }
+        }
+        
+        return result;
+    }
+
+    void saveBlockMatrixOptimized(const std::string& block_dir,
+                                 size_t block_idx,
+                                 int block_size,
+                                 const std::vector<std::vector<std::pair<int, Complex>>>& columns) {
+        size_t nnz = 0;
+        for (const auto& col : columns) {
+            nnz += col.size();
+        }
+        
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        triplets.reserve(nnz);
+        
+        for (int col = 0; col < block_size; col++) {
+            for (const auto& [row, val] : columns[col]) {
+                triplets.emplace_back(row, col, val);
+            }
+        }
+        
+        Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
+        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
+        blockMatrix.makeCompressed();
+        
+        std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
+        std::ofstream file(filename, std::ios::binary);
+        
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open file for writing: " + filename);
+        }
+        
+        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
+        
+        for (int k = 0; k < blockMatrix.outerSize(); ++k) {
+            for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
+                int row = it.row();
+                int col = it.col();
+                double real = it.value().real();
+                double imag = it.value().imag();
+                
+                file.write(reinterpret_cast<const char*>(&row), sizeof(int));
+                file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+                file.write(reinterpret_cast<const char*>(&real), sizeof(double));
+                file.write(reinterpret_cast<const char*>(&imag), sizeof(double));
+            }
+        }
+        
+        file.close();
+        
+        std::cout << "  Block " << block_idx << " saved: " 
+                  << block_size << "x" << block_size 
+                  << " with " << nnz << " non-zeros ("
+                  << std::fixed << std::setprecision(2) 
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill)"
+                  << std::endl;
+    }
 };
 
 
