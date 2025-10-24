@@ -21,6 +21,9 @@
 #include <set>
 #include <thread>
 #include <chrono>
+#include <mutex>
+#include <numeric>
+#include <map>
 
 // Type definition for complex vector and matrix operations
 using Complex = std::complex<double>;
@@ -254,7 +257,7 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
     ComplexVector vec(N);
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ifstream infile(filename);
+    std::ifstream infile(filename, std::ios::binary);
     if (!infile) {
         std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
         return vec;
@@ -266,7 +269,7 @@ ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
 // Helper function to write a basis vector to file
 bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
-    std::ofstream outfile(filename);
+    std::ofstream outfile(filename, std::ios::binary);
     if (!outfile) {
         std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
         return false;
@@ -457,14 +460,8 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
-        double real = dist(gen);
-        double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
+        v_current[i] = Complex(dist(gen), dist(gen));
     }
 
     std::cout << "Lanczos: Initial vector generated" << std::endl;
@@ -525,6 +522,13 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
         
+        // Check for breakdown
+        if (norm < tol) {
+            std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
+            max_iter = j + 1;
+            break;
+        }
+        
         // v_{j+1} = w / beta_{j+1}
         for (int i = 0; i < N; i++) {
             v_next[i] = w[i] / norm;
@@ -549,7 +553,7 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -577,14 +581,8 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
-        double real = dist(gen);
-        double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
+        v_current[i] = Complex(dist(gen), dist(gen));
     }
 
     std::cout << "Lanczos: Initial vector generated" << std::endl;
@@ -749,6 +747,13 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
         
+        // Check for breakdown
+        if (norm < tol) {
+            std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
+            max_iter = j + 1;
+            break;
+        }
+        
         // v_{j+1} = w / beta_{j+1}
         for (int i = 0; i < N; i++) {
             v_next[i] = w[i] / norm;
@@ -760,7 +765,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
                 return;
             }
         }
-        
+
         // Update for next iteration
         v_prev = v_current;
         v_current = v_next;
@@ -779,7 +784,7 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -807,14 +812,8 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
-        double real = dist(gen);
-        double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
+        v_current[i] = Complex(dist(gen), dist(gen));
     }
 
     std::cout << "Lanczos: Initial vector generated" << std::endl;
@@ -887,6 +886,13 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
         norm = cblas_dznrm2(N, w.data(), 1);
         beta.push_back(norm);
         
+        // Check for breakdown
+        if (norm < tol) {
+            std::cout << "Lanczos breakdown at iteration " << j + 1 << " (norm = " << norm << ")" << std::endl;
+            max_iter = j + 1;
+            break;
+        }
+        
         // v_{j+1} = w / beta_{j+1}
         for (int i = 0; i < N; i++) {
             v_next[i] = w[i] / norm;
@@ -911,7 +917,7 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     std::cout << "Lanczos: Solving tridiagonal matrix" << std::endl;
     
     // Write eigenvalues and eigenvectors to files
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     std::string cmd_mkdir = "mkdir -p " + evec_dir;
     system(cmd_mkdir.c_str());
 
@@ -937,8 +943,8 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     std::cout << "Starting Block Lanczos with block size " << block_size << std::endl;
     
     // Create directories for output
-    std::string temp_dir = dir + "/block_lanczos_temp";
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string temp_dir = (dir.empty() ? "./block_lanczos_temp" : dir + "/block_lanczos_temp");
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -1106,37 +1112,42 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     int total_dim = current_dim;
     std::cout << "Building block tridiagonal matrix of dimension " << total_dim << std::endl;
     
-    // Convert block tridiagonal to full tridiagonal
-    std::vector<double> full_diag(total_dim);
-    std::vector<double> full_offdiag(total_dim - 1);
+    // Build full dense matrix from block tridiagonal structure
+    // For Hermitian case, we need to construct the full symmetric matrix
+    std::vector<double> full_matrix(total_dim * total_dim, 0.0);
     
     // Fill the full matrix from blocks
-    int idx = 0;
+    int row_offset = 0;
     for (size_t b = 0; b < T_diag.size(); b++) {
         int this_block_size = (b == T_diag.size() - 1 && breakdown) ? 
                              (total_dim - b * block_size) : block_size;
         
-        // Copy diagonal block
+        // Copy diagonal block T_b into full matrix
         for (int i = 0; i < this_block_size; i++) {
             for (int j = 0; j < this_block_size; j++) {
-                if (i == j) {
-                    full_diag[idx + i] = T_diag[b][i][j];
-                } else if (j == i + 1 && idx + j < total_dim) {
-                    full_offdiag[idx + i] = T_diag[b][i][j];
+                full_matrix[(row_offset + i) * total_dim + (row_offset + j)] = T_diag[b][i][j];
+            }
+        }
+        
+        // Copy off-diagonal block B_b (coupling to next block)
+        if (b < T_offdiag.size() && row_offset + this_block_size < total_dim) {
+            int next_block_size = (b + 1 == T_diag.size() - 1 && breakdown) ?
+                                 (total_dim - (b + 1) * block_size) : block_size;
+            
+            for (int i = 0; i < this_block_size; i++) {
+                for (int j = 0; j < next_block_size; j++) {
+                    // B_b in lower triangle
+                    full_matrix[(row_offset + this_block_size + j) * total_dim + (row_offset + i)] = T_offdiag[b][i][j];
+                    // B_b^T in upper triangle (symmetric)
+                    full_matrix[(row_offset + i) * total_dim + (row_offset + this_block_size + j)] = T_offdiag[b][i][j];
                 }
             }
         }
         
-        // Copy off-diagonal block (if exists)
-        if (b < T_offdiag.size() && idx + this_block_size < total_dim) {
-            // Only copy the (block_size-1, 0) element for tridiagonal structure
-            full_offdiag[idx + this_block_size - 1] = T_offdiag[b][this_block_size-1][0];
-        }
-        
-        idx += this_block_size;
+        row_offset += this_block_size;
     }
     
-    // Solve the eigenvalue problem
+    // Solve the eigenvalue problem using full symmetric solver
     std::cout << "Solving eigenvalue problem..." << std::endl;
     
     int n_eigs_to_find = std::min(num_eigs, total_dim);
@@ -1146,17 +1157,18 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     int info;
     if (compute_eigenvectors) {
         evecs.resize(total_dim * total_dim);
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'V', total_dim, 
-                             full_diag.data(), full_offdiag.data(), 
-                             evecs.data(), total_dim);
+        // Copy full_matrix to evecs (dsyev overwrites input)
+        std::copy(full_matrix.begin(), full_matrix.end(), evecs.begin());
+        
+        info = LAPACKE_dsyev(LAPACK_COL_MAJOR, 'V', 'U', total_dim, 
+                            evecs.data(), total_dim, evals.data());
     } else {
-        info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', total_dim, 
-                             full_diag.data(), full_offdiag.data(), 
-                             nullptr, total_dim);
+        info = LAPACKE_dsyev(LAPACK_COL_MAJOR, 'N', 'U', total_dim, 
+                            full_matrix.data(), total_dim, evals.data());
     }
     
     if (info != 0) {
-        std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+        std::cerr << "LAPACKE_dsyev failed with error code " << info << std::endl;
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1164,7 +1176,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     // Extract desired eigenvalues
     eigenvalues.resize(n_eigs_to_find);
     for (int i = 0; i < n_eigs_to_find; i++) {
-        eigenvalues[i] = full_diag[i];  // dstevd sorts eigenvalues
+        eigenvalues[i] = evals[i];  // dsyev sorts eigenvalues
     }
     
     // Compute eigenvectors if requested
@@ -1222,8 +1234,8 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     std::cout << "Starting Chebyshev Filtered Lanczos algorithm" << std::endl;
     
     // Create directories for output
-    std::string temp_dir = dir + "/chebyshev_lanczos_temp";
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string temp_dir = (dir.empty() ? "./chebyshev_lanczos_temp" : dir + "/chebyshev_lanczos_temp");
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -1386,7 +1398,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
                 H(t1.data(), temp.data(), size);
                 
                 for (int i = 0; i < size; i++) {
-                    double x_times_t1 = std::real((temp[i] - Complex(a, 0.0) * t1[i]) / Complex(b, 0.0));
+                    Complex x_times_t1 = (temp[i] - Complex(a, 0.0) * t1[i]) / Complex(b, 0.0);
                     t2[i] = 2.0 * x_times_t1 - t0[i];
                 }
                 
@@ -1410,7 +1422,6 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         v_current[i] = Complex(dist(gen), dist(gen));
     }
@@ -1633,7 +1644,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     // Create directories for output
     std::string temp_dir = (dir.empty() ? "./lanczos_basis_vectors" : dir+"/lanczos_basis_vectors");
-    std::string result_dir = dir + "/eigenvectors";
+    std::string result_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     system(("mkdir -p " + temp_dir).c_str());
     system(("mkdir -p " + result_dir).c_str());
@@ -1647,7 +1658,6 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         v_current[i] = Complex(dist(gen), dist(gen));
     }
@@ -2023,7 +2033,10 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
     std::cout << "Starting full diagonalization for matrix of dimension " << N << std::endl;
     
     // Create output directory if needed
-    if (!dir.empty() && compute_eigenvectors) {
+    if (dir.empty()) {
+        dir = ".";
+    }
+    if (compute_eigenvectors) {
         system(("mkdir -p " + dir).c_str());
     }
 
@@ -2306,8 +2319,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     std::cout << "Starting Krylov-Schur algorithm for " << num_eigs << " eigenvalues" << std::endl;
     
     // Create directories for temporary files and output
-    std::string temp_dir = dir + "/krylov_schur_temp";
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string temp_dir = (dir.empty() ? "./krylov_schur_temp" : dir + "/krylov_schur_temp");
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -2319,14 +2332,10 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         double real = dist(gen);
         double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
+        v_current[i] = Complex(real, imag);
     }
     
     // Normalize
@@ -2598,8 +2607,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     std::cout << "IRL parameters: k=" << k << ", p=" << p << ", m=" << m << std::endl;
     
     // Create directories for output
-    std::string temp_dir = dir + "/irl_temp";
-    std::string evec_dir = dir + "/eigenvectors";
+    std::string temp_dir = (dir.empty() ? "./irl_temp" : dir + "/irl_temp");
+    std::string evec_dir = (dir.empty() ? "./eigenvectors" : dir + "/eigenvectors");
     
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
@@ -2611,14 +2620,10 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     ComplexVector v_current(N);
     
-    #pragma omp parallel for
     for (int i = 0; i < N; i++) {
         double real = dist(gen);
         double imag = dist(gen);
-        #pragma omp critical
-        {
-            v_current[i] = Complex(real, imag);
-        }
+        v_current[i] = Complex(real, imag);
     }
     
     // Normalize starting vector
@@ -2925,6 +2930,28 @@ int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)>
     std::mt19937 gen(std::random_device{}());
     std::uniform_real_distribution<double> dist(-1.0, 1.0);
     
+    // First estimate spectral bounds
+    std::vector<double> bounds_estimate;
+    lanczos_no_ortho(H, N, std::min(50, N/20), 10, 1e-6, bounds_estimate, "", false);
+    
+    double lambda_min, lambda_max;
+    if (bounds_estimate.size() >= 2) {
+        lambda_min = bounds_estimate.front();
+        lambda_max = bounds_estimate.back();
+    } else {
+        // Fallback to approximate bounds
+        lambda_min = lower_bound - std::abs(lower_bound);
+        lambda_max = upper_bound + std::abs(upper_bound);
+    }
+    
+    // Map spectral range to [-1, 1]
+    double a = (lambda_max + lambda_min) / 2.0;
+    double b = (lambda_max - lambda_min) / 2.0;
+    
+    // Map target interval to normalized coordinates
+    double target_lower_normalized = (lower_bound - a) / b;
+    double target_upper_normalized = (upper_bound - a) / b;
+    
     double count_estimate = 0.0;
     
     for (int sample = 0; sample < num_samples; sample++) {
@@ -2939,11 +2966,70 @@ int estimate_eigenvalue_count(std::function<void(const Complex*, Complex*, int)>
         Complex scale(1.0/norm, 0.0);
         cblas_zscal(N, &scale, z.data(), 1);
         
-        // Apply spectral projector for [lower_bound, upper_bound]
+        // Apply spectral projector for [lower_bound, upper_bound] using Chebyshev expansion
         ComplexVector result(N, Complex(0.0, 0.0));
+        ComplexVector t0(N), t1(N), t2(N), temp(N);
         
-        // Use Chebyshev expansion of characteristic function
-        // ... (implementation similar to Chebyshev filter above)
+        // Jackson damping coefficients
+        std::vector<double> jackson_coeff(chebyshev_degree + 1);
+        for (int k = 0; k <= chebyshev_degree; k++) {
+            double theta = M_PI * k / (chebyshev_degree + 1);
+            jackson_coeff[k] = ((chebyshev_degree - k + 1) * cos(theta) + 
+                               sin(theta) / tan(M_PI / (chebyshev_degree + 1))) / (chebyshev_degree + 1);
+        }
+        
+        // Chebyshev coefficients for characteristic function
+        std::vector<double> cheb_coeff(chebyshev_degree + 1);
+        const int quad_points = 100;
+        for (int k = 0; k <= chebyshev_degree; k++) {
+            cheb_coeff[k] = 0.0;
+            for (int j = 0; j < quad_points; j++) {
+                double theta_j = M_PI * (j + 0.5) / quad_points;
+                double x = cos(theta_j);
+                
+                double f_x = (x >= target_lower_normalized && x <= target_upper_normalized) ? 1.0 : 0.0;
+                cheb_coeff[k] += f_x * cos(k * theta_j);
+            }
+            cheb_coeff[k] *= 2.0 / quad_points;
+            if (k == 0) cheb_coeff[k] /= 2.0;
+            cheb_coeff[k] *= jackson_coeff[k];
+        }
+        
+        // Initialize Chebyshev recursion
+        std::copy(z.begin(), z.end(), t0.begin());
+        
+        // Add T_0 contribution
+        for (int i = 0; i < N; i++) {
+            result[i] += cheb_coeff[0] * t0[i];
+        }
+        
+        if (chebyshev_degree > 0) {
+            // T_1(x) = x = (H - aI) / b
+            H(z.data(), temp.data(), N);
+            for (int i = 0; i < N; i++) {
+                t1[i] = (temp[i] - Complex(a, 0.0) * z[i]) / Complex(b, 0.0);
+            }
+            
+            for (int i = 0; i < N; i++) {
+                result[i] += cheb_coeff[1] * t1[i];
+            }
+            
+            // Higher order terms
+            for (int k = 2; k <= chebyshev_degree; k++) {
+                H(t1.data(), temp.data(), N);
+                for (int i = 0; i < N; i++) {
+                    Complex x_times_t1 = (temp[i] - Complex(a, 0.0) * t1[i]) / Complex(b, 0.0);
+                    t2[i] = 2.0 * x_times_t1 - t0[i];
+                }
+                
+                for (int i = 0; i < N; i++) {
+                    result[i] += cheb_coeff[k] * t2[i];
+                }
+                
+                t0 = t1;
+                t1 = t2;
+            }
+        }
         
         // Estimate contribution
         Complex dot;
@@ -3017,6 +3103,9 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     std::cout << "This algorithm preserves all degenerate eigenvalues with high numerical accuracy" << std::endl;
     
     // Create output directory
+    if (dir.empty()) {
+        dir = ".";
+    }
     std::string evec_dir = dir + "/eigenvectors";
     if (compute_eigenvectors) {
         system(("mkdir -p " + evec_dir).c_str());
