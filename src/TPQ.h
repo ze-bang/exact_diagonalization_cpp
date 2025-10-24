@@ -9,7 +9,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <mkl.h>
+#include "blas_lapack_wrapper.h"
 #include <fstream>
 #include <iomanip>
 #include <algorithm>

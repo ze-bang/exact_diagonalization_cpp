@@ -7,7 +7,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <mkl.h>
+#include "blas_lapack_wrapper.h"
 #include "construct_ham.h"
 #include <iomanip>
 #include <algorithm>

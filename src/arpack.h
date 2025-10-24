@@ -2,7 +2,9 @@
 // Provides drop-in style routines similar to lanczos.h plus wrappers
 #ifndef ARPACK_WRAPPER_H
 #define ARPACK_WRAPPER_H
+#if defined(WITH_MKL)
 #define EIGEN_USE_MKL_ALL
+#endif
 
 #include <complex>
 #include <vector>
@@ -16,7 +18,7 @@
 #include <cassert>
 #include <cstring>
 #include <cmath>
-#include <mkl.h>
+#include "blas_lapack_wrapper.h"
 #include <numeric>
 #include <cctype>
 

@@ -2,7 +2,9 @@
 // filepath: /home/pc_linux/exact_diagonalization_cpp/src/lanczos.h
 #ifndef LANCZOS_H
 #define LANCZOS_H
+#if defined(WITH_MKL)
 #define EIGEN_USE_MKL_ALL
+#endif
 
 // Define M_PI if not already defined (non-standard but commonly needed)
 #ifndef M_PI
@@ -15,7 +17,7 @@
 #include <functional>
 #include <random>
 #include <cmath>
-#include <mkl.h>
+#include "blas_lapack_wrapper.h"
 #include "construct_ham.h"
 #include <iomanip>
 #include <algorithm>
