@@ -8,7 +8,6 @@
 #include "lanczos.h"
 #include "construct_ham.h"
 #include "observables.h"
-#include "finite_temperature_lanczos.h"
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>

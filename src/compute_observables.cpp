@@ -1,4 +1,3 @@
-#include "observables.h"
 #include <iostream>
 #include <string>
 #include <fstream>
