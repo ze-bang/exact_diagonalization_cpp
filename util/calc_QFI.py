@@ -203,9 +203,46 @@ def _collect_data_files(structure_factor_dir, species_data, species_names,
                 species_names.add(species_with_momentum)
                 species_data[species_with_momentum][bin_idx].append(file_path)
 
+        # Find correlation files in pedantic directory
         pedantic_dir = os.path.join(beta_dir, 'pedantic')
         pedantic_files = glob.glob(os.path.join(pedantic_dir, 'time_corr_rand*.dat'))
         for file_path in pedantic_files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+        
+        # Find correlation files in taylorXYZ directory
+        taylorXYZ_dir = os.path.join(beta_dir, 'taylorXYZ')
+        taylorXYZ_files = glob.glob(os.path.join(taylorXYZ_dir, 'time_corr_rand*.dat'))
+        for file_path in taylorXYZ_files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+        
+        # Find correlation files in globalXYZ directory
+        globalXYZ_dir = os.path.join(beta_dir, 'globalXYZ')
+        globalXYZ_files = glob.glob(os.path.join(globalXYZ_dir, 'time_corr_rand*.dat'))
+        for file_path in globalXYZ_files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+        
+        # Find correlation files in experimentalXYZ directory
+        experimentalXYZ_dir = os.path.join(beta_dir, 'experimentalXYZ')
+        experimentalXYZ_files = glob.glob(os.path.join(experimentalXYZ_dir, 'time_corr_rand*.dat'))
+        for file_path in experimentalXYZ_files:
+            species_with_momentum, _, _ = parse_filename_new(file_path)
+            if species_with_momentum:
+                species_names.add(species_with_momentum)
+                species_data[species_with_momentum][bin_idx].append(file_path)
+        
+        # Find correlation files in experimentalGlobalXYZ directory
+        experimentalGlobalXYZ_dir = os.path.join(beta_dir, 'experimentalGlobalXYZ')
+        experimentalGlobalXYZ_files = glob.glob(os.path.join(experimentalGlobalXYZ_dir, 'time_corr_rand*.dat'))
+        for file_path in experimentalGlobalXYZ_files:
             species_with_momentum, _, _ = parse_filename_new(file_path)
             if species_with_momentum:
                 species_names.add(species_with_momentum)
@@ -517,39 +554,19 @@ def _compute_spectral_and_qfi(mean_correlation, reference_time, beta):
 
 
 def _prepare_time_data(mean_correlation, reference_time):
-    """Prepare time-ordered correlation data for FFT."""
-    
-    if reference_time[0] < 0 and reference_time[-1] > 0:
-        # Data already time-ordered
-        t_full = reference_time
-        C_full = mean_correlation
-        print(f"    Using pre-ordered time data: [{t_full.min():.2f}, {t_full.max():.2f}]")
-    else:
-        # Construct negative times using C(-t) = C(t)*
-        t_pos = reference_time
-        C_pos = mean_correlation
-        
-        t_neg = -t_pos[1:][::-1]
-        C_neg = np.conj(C_pos[1:][::-1])
-        
-        t_full = np.concatenate((t_neg, t_pos))
-        C_full = np.concatenate((C_neg, C_pos))
-        
-        print(f"    Constructed full time range: [{t_full.min():.2f}, {t_full.max():.2f}]")
-    
-    return t_full, C_full
+    """Prepare correlation data for FFT (data starts from t=0)."""
+    # Raw data already starts from t=0 with positive times only
+    # No need to construct negative times or reorder
+    print(f"    Using time data as-is: [{reference_time.min():.2f}, {reference_time.max():.2f}]")
+    return reference_time, mean_correlation
 
 
 def _compute_spectral_function(t_full, C_full, gamma):
     """Compute spectral function via FFT with broadening."""
     
-    # Reorder for FFT
-    C_fft_input = np.fft.ifftshift(C_full)
-    t_fft_ordered = np.fft.ifftshift(t_full)
-    
-    # Apply broadening
+    # Apply broadening directly (no need to reorder since data starts from t=0)
     C_broadened, _ = apply_time_broadening(
-        t_fft_ordered, C_fft_input, 'lorentzian', gamma=gamma)
+        t_full, C_full, 'lorentzian', gamma=gamma)
     
     # FFT convention
     C_broadened = np.conj(C_broadened)
@@ -569,7 +586,7 @@ def _extract_positive_frequencies(S_omega_real, omega):
     """Extract positive frequencies and apply compensation."""
     
     # Calculate integral before truncation
-    integral_before = np_trapz(S_omega_real, omega)
+    # integral_before = np_trapz(S_omega_real, omega)
     
     # Extract positive frequencies
     positive_mask = omega > 0
@@ -577,7 +594,7 @@ def _extract_positive_frequencies(S_omega_real, omega):
     s_omega_pos = S_omega_real[positive_mask]
     
     # Calculate compensation factor
-    integral_after = np_trapz(s_omega_pos, omega_pos)
+    # integral_after = np_trapz(s_omega_pos, omega_pos)
     # compensation_factor = integral_before / integral_after if integral_after != 0 else 1.0
     compensation_factor = 1
     s_omega_compensated = s_omega_pos * compensation_factor

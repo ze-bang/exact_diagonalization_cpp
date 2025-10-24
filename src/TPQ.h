@@ -1543,8 +1543,12 @@ void time_evolve_tpq_krylov(
     int krylov_dim = 30,
     bool normalize = true
 ) {
+    if (N <= 0) {
+        return;
+    }
+
     // Ensure Krylov dimension doesn't exceed system size
-    krylov_dim = std::min(krylov_dim, N);
+    krylov_dim = std::max(1, std::min(krylov_dim, N));
     
     // Pre-allocate all memory to avoid repeated allocations
     static thread_local std::vector<ComplexVector> krylov_vectors;
@@ -1561,7 +1565,7 @@ void time_evolve_tpq_krylov(
             vec.resize(N);
         }
         alpha.resize(krylov_dim);
-        beta.resize(krylov_dim - 1);
+        beta.resize(krylov_dim > 1 ? krylov_dim - 1 : 0);
         w.resize(N);
         last_N = N;
         last_krylov_dim = krylov_dim;
@@ -1649,20 +1653,20 @@ void time_evolve_tpq_krylov(
     const auto& eigenvectors = solver.eigenvectors();
     // Apply time evolution using eigendecomposition
     // exp(-i*H*t)|ψ⟩ = V * exp(-i*D*t) * V^† * |e_0⟩
-    Eigen::VectorXcd coeffs(effective_dim);
+    Eigen::VectorXcd phase_factors(effective_dim);
     for (int i = 0; i < effective_dim; i++) {
-        coeffs(i) = std::exp(Complex(0, -eigenvalues(i) * delta_t)) * eigenvectors(i, 0) * norm;
+        phase_factors(i) = std::exp(Complex(0, -eigenvalues(i) * delta_t)) * eigenvectors(0, i);
     }
-    
+
     // Reconstruct state in original basis
     std::fill(tpq_state.begin(), tpq_state.end(), Complex(0, 0));
-    
-    // Use BLAS-3 operation for better cache efficiency
+
     for (int i = 0; i < effective_dim; i++) {
         Complex coeff(0, 0);
         for (int j = 0; j < effective_dim; j++) {
-            coeff += eigenvectors(j, i) * coeffs(j);
+            coeff += eigenvectors(i, j) * phase_factors(j);
         }
+        coeff *= norm;
         cblas_zaxpy(N, &coeff, krylov_vectors[i].data(), 1, tpq_state.data(), 1);
     }
     
@@ -1720,6 +1724,21 @@ void time_evolve_tpq_chebyshev(
     // Scale Hamiltonian to [-1, 1] range for Chebyshev expansion
     double E_center = (E_max + E_min) / 2.0;
     double E_scale = (E_max - E_min) / 2.0;
+
+    constexpr double scale_epsilon = 1e-12;
+    if (std::abs(E_scale) < scale_epsilon) {
+        // Spectrum is effectively flat: evolution is a global phase
+        Complex phase = std::exp(Complex(0, -E_center * delta_t));
+        cblas_zscal(N, &phase, tpq_state.data(), 1);
+        if (normalize) {
+            double norm = cblas_dznrm2(N, tpq_state.data(), 1);
+            if (norm > 1e-14) {
+                Complex scale_factor = Complex(1.0/norm, 0.0);
+                cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
+            }
+        }
+        return;
+    }
     
     // Scaled time parameter
     double tau = delta_t * E_scale;
@@ -1887,69 +1906,59 @@ void time_evolve_tpq_adaptive(
         time_evolve_tpq_state(H, tpq_state, N, delta_t, 50, normalize);
     } else if (accuracy_level == 2) {
         // Balanced: Use Krylov method
-        int krylov_dim = std::min(30, N/2);
+        int krylov_dim = std::max(1, std::min(30, std::max(N / 2, 1)));
         time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
     } else {
         // High accuracy: Use RK4 for small systems, Krylov for large
         if (N < 1000) {
             time_evolve_tpq_rk4(H, tpq_state, N, delta_t, normalize);
         } else {
-            int krylov_dim = std::min(50, N/2);
+            int krylov_dim = std::max(1, std::min(50, std::max(N / 2, 1)));
             time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
         }
     }
 }
 
 /**
- * Compute S(q)S(-q) time evolution using Krylov method with momentum-dependent operators
+ * Compute dynamical correlations using Krylov method with pre-constructed operators
  * 
- * This function creates SumOperators for each momentum vector and spin component,
- * then computes the time correlation function C^α(q,t) = ⟨ψ|S^α(-q,0)S^α(q,t)|ψ⟩
+ * This is the more general version that takes Operator objects directly for maximum versatility.
+ * Computes the time correlation function C(t) = ⟨ψ|O_1†(0)O_2(t)|ψ⟩
  * using the Krylov-based time evolution method for high accuracy.
  * 
  * @param H Hamiltonian operator function
  * @param tpq_state Current TPQ state vector
- * @param momentum_positions List of momentum vectors [Qx, Qy, Qz]
- * @param positions_file Path to file containing site positions
+ * @param operators_1 Vector of first Operator objects in correlation (applied at t=0)
+ * @param operators_2 Vector of second Operator objects in correlation (applied at time t)
+ * @param operator_names Names corresponding to each operator pair
  * @param N Dimension of the Hilbert space
- * @param num_sites Number of lattice sites
- * @param spin_length Spin quantum number
  * @param dir Output directory
  * @param sample Current sample index
  * @param inv_temp Inverse temperature
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_points Number of frequency points
  * @param t_end Maximum evolution time
  * @param dt Time step
  * @param krylov_dim Dimension of Krylov subspace for time evolution
  */
-void computeSpinStructureFactorKrylov(
+void computeDynamicCorrelationsKrylov(
     std::function<void(const Complex*, Complex*, int)> H,
     const ComplexVector& tpq_state,
-    const std::vector<std::vector<double>>& momentum_positions,
-    const std::string& positions_file,
+    const std::vector<Operator>& operators_1,
+    const std::vector<Operator>& operators_2,
+    const std::vector<std::string>& operator_names,
     int N,
-    int num_sites,
-    float spin_length,
     const std::string& dir,
     int sample,
     double inv_temp,
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
     double t_end = 100.0,
     double dt = 0.01,
-    int krylov_dim = 30,
-    std::vector<std::pair<int, int>> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
-    std::vector<const char*> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
+    int krylov_dim = 30
 ) {
     // Save the current TPQ state for later analysis
     std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
     save_tpq_state(tpq_state, state_file);
 
-    std::cout << "Computing spin structure factor S(q)S(-q) using Krylov method for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << momentum_positions.size() << " momentum points" << std::endl;
+    std::cout << "Computing dynamical correlations using Krylov method for sample " << sample 
+              << ", beta = " << inv_temp << ", for " << operators_1.size() << " operators" << std::endl;
     
     // Ensure Krylov dimension doesn't exceed system size
     krylov_dim = std::min(krylov_dim, N/2);
@@ -1958,184 +1967,97 @@ void computeSpinStructureFactorKrylov(
     
     // Pre-allocate reusable buffers to avoid repeated allocations
     ComplexVector evolved_psi(N);
-    ComplexVector evolved_S_minus_q_psi(N);
-    ComplexVector S_q_psi(N);
-    ComplexVector S_minus_q_psi(N);
-    ComplexVector S_q_evolved_psi(N);
+    ComplexVector evolved_O1_psi(N);
+    ComplexVector O2_psi(N);
+    ComplexVector O1_psi(N);
+    ComplexVector O2_evolved_psi(N);
     std::vector<Complex> time_correlation(num_steps);
     
-    // Process each momentum point
-    for (size_t q_idx = 0; q_idx < momentum_positions.size(); q_idx++) {
-        const auto& Q_vector = momentum_positions[q_idx];
+    // Process each operator pair
+    for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
+        std::string op_name = operator_names[op_idx];
         
-        // Create momentum label for filenames
-        std::stringstream q_label_ss;
-        q_label_ss << "q_" << q_idx 
-                   << "_Qx" << Q_vector[0] 
-                   << "_Qy" << Q_vector[1] 
-                   << "_Qz" << Q_vector[2];
-        std::string q_label = q_label_ss.str();
-        
-        std::cout << "Processing momentum point " << (q_idx + 1) << "/" << momentum_positions.size() 
-                  << ": Q = [" << Q_vector[0] << ", " << Q_vector[1] << ", " << Q_vector[2] << "]" << std::endl;
-        
-        // Pre-compute negative Q vector
-        const std::vector<double> neg_Q_vector = {Q_vector[0], Q_vector[1], Q_vector[2]};
-        
-        
-        for (size_t combo_idx = 0; combo_idx < spin_combinations.size(); combo_idx++) {
-            int op_type_1 = spin_combinations[combo_idx].first;   // First operator type
-            int op_type_2 = spin_combinations[combo_idx].second;  // Second operator type
-            std::string op_name = std::string(combination_names[combo_idx]) + "_" + q_label;
-            
-            std::cout << "  Computing " << op_name << " correlations..." << std::endl;
+        std::cout << "  Computing " << op_name << " correlations..." << std::endl;
 
-            SumOperator S_q_op(num_sites, spin_length, op_type_1, Q_vector, positions_file);
-            SumOperator S_minus_q_op(num_sites, spin_length, op_type_2, neg_Q_vector, positions_file);
+        // Apply O_1 to initial state: |φ⟩ = O_1|ψ⟩
+        operators_1[op_idx].apply(tpq_state.data(), O1_psi.data(), N);
+        
+        // Calculate initial correlation: C(0) = ⟨ψ|O_2†O_1|ψ⟩
+        operators_2[op_idx].apply(tpq_state.data(), O2_psi.data(), N);
+        
+        // Use BLAS for dot product
+        Complex initial_corr;
+        cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
+        time_correlation[0] = initial_corr;
 
-            // Apply S^α(-q) to initial state: |φ⟩ = S^α(-q)|ψ⟩
-            S_minus_q_op.apply(tpq_state.data(), S_minus_q_psi.data(), N);
+        std::cout << "    Initial correlation C(0) = " 
+                  << initial_corr.real() << " + i*" 
+                  << initial_corr.imag() << std::endl;
+        
+        // Initialize evolution states
+        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
+        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
+        
+        // Open file for writing time correlation data
+        std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
+                   "_beta" + std::to_string(inv_temp);
+        std::string time_corr_file = base_name + "_time_correlation.dat";
+        
+        std::ofstream time_corr_out(time_corr_file);
+        if (time_corr_out.is_open()) {
+            time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
+            time_corr_out << std::setprecision(16);
             
-            // Calculate initial correlation: C(0) = ⟨ψ|S^β(q)S^α(-q)|ψ⟩
-            S_q_op.apply(tpq_state.data(), S_q_psi.data(), N);
+            // Write initial time point
+            time_corr_out << 0.0 << " " 
+                << time_correlation[0].real() << " " 
+                << time_correlation[0].imag() << std::endl;
+            time_corr_out.flush(); // Ensure data is written to disk
+        }
+        
+        // Time evolution loop using Krylov method
+        for (int step = 1; step < num_steps; step++) {
+            // Evolve states using Krylov method
+            time_evolve_tpq_krylov(H, evolved_psi, N, dt, krylov_dim, true);
+            time_evolve_tpq_krylov(H, evolved_O1_psi, N, dt, krylov_dim, true);
             
-            // Use BLAS for dot product
-            Complex initial_corr;
-            cblas_zdotc_sub(N, S_q_psi.data(), 1, S_minus_q_psi.data(), 1, &initial_corr);
-            time_correlation[0] = initial_corr;
-
-            std::cout << "    Initial correlation C(0) = " 
-                      << initial_corr.real() << " + i*" 
-                      << initial_corr.imag() << std::endl;
+            // Apply O_2 to evolved state
+            operators_2[op_idx].apply(evolved_psi.data(), O2_evolved_psi.data(), N);
             
-            // Initialize evolution states
-            std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
-            std::copy(S_minus_q_psi.begin(), S_minus_q_psi.end(), evolved_S_minus_q_psi.begin());
+            // Calculate correlation using BLAS
+            Complex corr_t;
+            cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
+            time_correlation[step] = corr_t;
             
-            // Open file for writing time correlation data
-            std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
-                       "_beta" + std::to_string(inv_temp);
-            std::string time_corr_file = base_name + "_time_correlation.dat";
-            
-            std::ofstream time_corr_out(time_corr_file);
+            // Write current time point to file
             if (time_corr_out.is_open()) {
-                time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
-                time_corr_out << std::setprecision(16);
+                double t = step * dt;
+                time_corr_out << t << " " 
+                    << time_correlation[step].real() << " " 
+                    << time_correlation[step].imag() << std::endl;
                 
-                // Write initial time point
-                time_corr_out << 0.0 << " " 
-                    << time_correlation[0].real() << " " 
-                    << time_correlation[0].imag() << std::endl;
-                time_corr_out.flush(); // Ensure data is written to disk
-            }
-            
-            // Time evolution loop using Krylov method
-            for (int step = 1; step < num_steps; step++) {
-                // Evolve states using Krylov method
-                time_evolve_tpq_krylov(H, evolved_psi, N, dt, krylov_dim, true);
-                time_evolve_tpq_krylov(H, evolved_S_minus_q_psi, N, dt, krylov_dim, true);
-                
-                // Apply S^β(q) to evolved state
-                S_q_op.apply(evolved_psi.data(), S_q_evolved_psi.data(), N);
-                
-                // Calculate correlation using BLAS
-                Complex corr_t;
-                cblas_zdotc_sub(N, S_q_evolved_psi.data(), 1, evolved_S_minus_q_psi.data(), 1, &corr_t);
-                time_correlation[step] = corr_t;
-                
-                // Write current time point to file
-                if (time_corr_out.is_open()) {
-                    double t = step * dt;
-                    time_corr_out << t << " " 
-                        << time_correlation[step].real() << " " 
-                        << time_correlation[step].imag() << std::endl;
-                    
-                    // Flush every 100 steps to ensure data is written
-                    if (step % 100 == 0) {
-                        time_corr_out.flush();
-                    }
-                }
-                
+                // Flush every 100 steps to ensure data is written
                 if (step % 100 == 0) {
-                    std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
-                    std::cout << "    Current correlation: " 
-                              << time_correlation[step].real() << " + i*" 
-                              << time_correlation[step].imag() << " at t = " << step * dt << std::endl;
+                    time_corr_out.flush();
                 }
             }
             
-            // Close the file
-            if (time_corr_out.is_open()) {
-                time_corr_out.close();
-                std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+            if (step % 100 == 0) {
+                std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
+                std::cout << "    Current correlation: " 
+                          << time_correlation[step].real() << " + i*" 
+                          << time_correlation[step].imag() << " at t = " << step * dt << std::endl;
             }
         }
-        std::cout << "Completed momentum point " << (q_idx + 1) << " of " << momentum_positions.size() << std::endl;
+        
+        // Close the file
+        if (time_corr_out.is_open()) {
+            time_corr_out.close();
+            std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
+        }
     }
     
-    std::cout << "Spin structure factor calculation using Krylov method complete for sample " << sample << std::endl;
-}
-
-/**
- * Wrapper function to compute spin structure factor using Krylov method during TPQ calculation
- * 
- * This function provides an easy interface to compute S(q)S(-q) correlations with the
- * high-accuracy Krylov time evolution method.
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state
- * @param positions_file Path to lattice positions file
- * @param lattice_type Type of lattice for momentum point generation
- * @param N Dimension of Hilbert space
- * @param num_sites Number of lattice sites
- * @param spin_length Spin quantum number
- * @param dir Output directory
- * @param sample Sample index
- * @param inv_temp Current inverse temperature
- * @param custom_momentum_points Optional custom momentum vectors
- * @param krylov_dim Dimension of Krylov subspace (default: 30)
- */
-void computeTPQSpinStructureFactorKrylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::string& positions_file,
-    int N,
-    int num_sites, 
-    float spin_length,
-    const std::string& dir,
-    int sample,
-    double inv_temp,
-    const std::vector<std::vector<double>>& custom_momentum_points = {},
-    int krylov_dim = 30,
-    std::vector<std::pair<int, int>> spin_combinations = {{ {0, 0}, {2, 2}, {0, 1}, {0, 2}, {2, 1} }},
-    std::vector<const char*> combination_names = { "SpSm", "SzSz", "SpSp", "SpSz", "SzSp" }
-) {
-    // Use custom momentum points if provided, otherwise generate standard ones
-    std::vector<std::vector<double>> momentum_points;
-    if (!custom_momentum_points.empty()) {
-        momentum_points = custom_momentum_points;
-        std::cout << "Using " << momentum_points.size() << " custom momentum points" << std::endl;
-    } else {
-        momentum_points = {{0.0, 0.0, 0.0}}; // Default to zero momentum if none provided
-    }
-    
-    // Compute the spin structure factor using Krylov method
-    computeSpinStructureFactorKrylov(
-        H,
-        tpq_state,
-        momentum_points,
-        positions_file,
-        N, num_sites, spin_length,
-        dir, sample, inv_temp,
-        -10.0,      // omega_min
-        10.0,       // omega_max
-        2000,       // num_points  
-        50.0,       // t_end
-        0.01,       // dt
-        krylov_dim,  // Krylov dimension
-        spin_combinations, // spin combinations
-        combination_names // combination names
-    );
+    std::cout << "Dynamical correlation calculation using Krylov method complete for sample " << sample << std::endl;
 }
 
 
@@ -2357,7 +2279,7 @@ inline void imaginary_time_evolve_tpq_taylor(
         H(term.data(), Hterm.data(), N);
         std::swap(term, Hterm);
 
-        coef_real *= (-delta_beta) / double(order) / 2;
+        coef_real *= (-delta_beta) / double(order);
         Complex coef(coef_real, 0.0);
 
         for (int i = 0; i < N; ++i) {

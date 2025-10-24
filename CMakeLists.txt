@@ -181,9 +181,6 @@ endif()
 # Define executable
 add_executable(ED ${SOURCES})
 
-# Add test executable
-add_executable(TEST ${SRC_DIR}/test_observables.cpp)
-
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
 
@@ -225,14 +222,6 @@ target_link_libraries(ED
     ${ARPACK_LIBRARY}
 )
 
-# Link libraries for TEST executable
-target_link_libraries(TEST
-    ${BLAS_LIBRARIES}
-    ${LAPACK_LIBRARIES}
-    ${LAPACKE_LIBRARIES}
-    ${ARPACK_LIBRARY}
-)
-
 # Link libraries for TPQ_DSSF executable (only if it exists)
 if(TARGET TPQ_DSSF)
     target_link_libraries(TPQ_DSSF
@@ -268,7 +257,6 @@ if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
         target_link_libraries(ED MKL::MKL)
-        target_link_libraries(TEST MKL::MKL)
         
         if(TARGET TPQ_DSSF)
             target_link_libraries(TPQ_DSSF MKL::MKL)
@@ -298,13 +286,6 @@ if(WITH_CUDA)
         CUDA::curand
     )
     
-    # Add CUDA libraries to other executables as well
-    target_link_libraries(TEST
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-    )
     
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF
@@ -339,7 +320,6 @@ endif()
 # Add MPI if enabled
 if(WITH_MPI)
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
-    target_link_libraries(TEST ${MPI_CXX_LIBRARIES})
     
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
@@ -413,16 +393,6 @@ if(WITH_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
     )
     
-    # Set CUDA compile options for other targets if they have CUDA sources
-    if(TARGET TEST)
-        set_property(TARGET TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(TEST PRIVATE 
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        )
-    endif()
-    
     if(TARGET TPQ_DSSF)
         set_property(TARGET TPQ_DSSF PROPERTY CUDA_SEPARABLE_COMPILATION ON)
         target_compile_options(TPQ_DSSF PRIVATE 
@@ -457,9 +427,6 @@ endif()
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(ED OpenMP::OpenMP_CXX)
-    if(TARGET TEST)
-        target_link_libraries(TEST OpenMP::OpenMP_CXX)
-    endif()
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF OpenMP::OpenMP_CXX)
     endif()
