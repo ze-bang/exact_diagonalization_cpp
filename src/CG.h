@@ -11,6 +11,8 @@
 #include <fstream>
 #include <iostream>
 #include <iomanip>
+#include <algorithm>
+#include <cstdlib>
 #include <mkl.h>
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -436,7 +438,14 @@ void block_cg(
     }
     std::cout << std::endl;
     
+    // Store old residuals for beta calculation
+    std::vector<ComplexVector> R_old(block_size, ComplexVector(N));
+    
     for (int iter = 0; iter < max_iter; iter++) {
+        // Save old residuals before updating
+        if (iter > 0) {
+            R_old = R;
+        }
         // Apply H to each search direction
         for (int b = 0; b < block_size; b++) {
             H(P[b].data(), HP[b].data(), N);
@@ -562,16 +571,16 @@ void block_cg(
             
             Complex r_old_dot_r_old;
             if (iter > 0) {
-                ComplexVector r_old(N);
-                for (int i = 0; i < N; i++) {
-                    r_old[i] = HV[b][i] - eigenvalues[b] * eigenvectors[b][i];
-                }
-                cblas_zdotc_sub(N, r_old.data(), 1, r_old.data(), 1, &r_old_dot_r_old);
+                cblas_zdotc_sub(N, R_old[b].data(), 1, R_old[b].data(), 1, &r_old_dot_r_old);
             } else {
                 r_old_dot_r_old = r_new_dot_r_new;
             }
             
-            beta[b] = r_new_dot_r_new / r_old_dot_r_old;
+            if (std::abs(r_old_dot_r_old) > 1e-14) {
+                beta[b] = r_new_dot_r_new / r_old_dot_r_old;
+            } else {
+                beta[b] = Complex(0.0, 0.0);
+            }
         }
         
         // Update search directions: P = R + beta*P
@@ -925,8 +934,10 @@ void bicg_eigenvalues(
         
         // Normalize for the next iteration
         if (std::abs(beta_jp1) > 1e-10) {
-            Complex scale_r = Complex(1.0/std::sqrt(std::abs(beta_jp1)), 0.0);
-            Complex scale_s = std::conj(scale_r);
+            // Proper complex normalization preserving phase
+            Complex sqrt_beta = std::sqrt(beta_jp1);
+            Complex scale_r = Complex(1.0, 0.0) / sqrt_beta;
+            Complex scale_s = Complex(1.0, 0.0) / std::conj(sqrt_beta);
             
             for (int i = 0; i < N; i++) {
                 v[i] = r[i] * scale_r;
@@ -989,8 +1000,19 @@ void bicg_eigenvalues(
         }
     }
     
-    // Calculate eigenvectors if needed
-    if (!eigenvectors.empty() || eigenvectors.size() == 0) {
+    // Calculate eigenvectors if requested (and eigenvectors output vector was provided)
+    // Note: This reconstruction is approximate and should not be relied upon for production use
+    // Better approach: save Krylov vectors during iteration or use a different method
+    bool compute_evecs = !eigenvectors.empty();
+    
+    if (compute_evecs) {
+        std::cout << "Warning: BiCG eigenvector reconstruction is not implemented correctly." << std::endl;
+        std::cout << "The BiCG method is primarily for eigenvalue estimation." << std::endl;
+        std::cout << "For accurate eigenvectors, use Davidson or LOBPCG methods instead." << std::endl;
+    }
+    
+    // Always update eigenvalues from final tridiagonal matrix
+    {
         // Construct the full tridiagonal matrix
         int m = alpha.size();
         std::vector<double> diag(m);
@@ -1013,93 +1035,14 @@ void bicg_eigenvalues(
             // Update eigenvalues
             eigenvalues = diag;
             
-            // Sort indices
-            std::vector<std::pair<double, int>> eig_pairs(m);
-            for (int i = 0; i < m; i++) {
-                eig_pairs[i] = {eigenvalues[i], i};
-            }
-            std::sort(eig_pairs.begin(), eig_pairs.end());
+            // Sort eigenvalues
+            std::sort(eigenvalues.begin(), eigenvalues.end());
             
-            // Determine how many eigenvectors to compute
-            int num_vecs = std::min(10, m);  // Default to 10 or fewer
-            if (!eigenvectors.empty()) {
-                num_vecs = std::min(num_vecs, (int)eigenvectors.size());
-            }
-            
-            // Resize eigenvectors if needed
-            if (eigenvectors.size() < num_vecs) {
-                eigenvectors.resize(num_vecs, ComplexVector(N));
-            }
-            
-            // Compute transformed eigenvectors in original space
-            for (int k = 0; k < num_vecs; k++) {
-                int idx = eig_pairs[k].second;  // Get sorted index
-                
-                // Initialize eigenvector
-                std::fill(eigenvectors[k].begin(), eigenvectors[k].end(), Complex(0.0, 0.0));
-                
-                // Read each BiCG vector from disk or rebuild them
-                ComplexVector v_j(N), v_prev(N, Complex(0.0, 0.0));
-                
-                // Initialize with random vector (same seed as in the iteration)
-                for (int i = 0; i < N; i++) {
-                    v_j[i] = Complex(dist(gen), dist(gen));
-                }
-                
-                double norm = cblas_dznrm2(N, v_j.data(), 1);
-                Complex scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, v_j.data(), 1);
-                
-                // Add contribution from first vector
-                Complex coef = Complex(evecs[idx * m], 0.0);
-                for (int i = 0; i < N; i++) {
-                    eigenvectors[k][i] += coef * v_j[i];
-                }
-                
-                // Rebuild BiCG vectors and accumulate
-                for (int j = 1; j < m; j++) {
-                    ComplexVector v_next(N);
-                    ComplexVector Hv(N);
-                    
-                    // Apply H to v_j
-                    H(v_j.data(), Hv.data(), N);
-                    
-                    // v_next = (Hv - alpha[j]*v_j - beta[j]*v_prev) / beta[j+1]
-                    for (int i = 0; i < N; i++) {
-                        v_next[i] = Hv[i] - alpha[j] * v_j[i];
-                        if (j > 0) {
-                            v_next[i] -= beta[j] * v_prev[i];
-                        }
-                    }
-                    
-                    // Normalize v_next using beta[j+1]
-                    if (std::abs(beta[j+1]) > 1e-10) {
-                        Complex scale_next = Complex(1.0/std::sqrt(std::abs(beta[j+1])), 0.0);
-                        cblas_zscal(N, &scale_next, v_next.data(), 1);
-                    } else {
-                        // Fallback normalization
-                        norm = cblas_dznrm2(N, v_next.data(), 1);
-                        if (norm > 1e-10) {
-                            scale = Complex(1.0/norm, 0.0);
-                            cblas_zscal(N, &scale, v_next.data(), 1);
-                        }
-                    }
-                    
-                    // Add contribution to eigenvector
-                    coef = Complex(evecs[idx * m + j], 0.0);
-                    for (int i = 0; i < N; i++) {
-                        eigenvectors[k][i] += coef * v_next[i];
-                    }
-                    
-                    // Update for next iteration
-                    v_prev = v_j;
-                    v_j = v_next;
-                }
-                
-                // Normalize final eigenvector
-                norm = cblas_dznrm2(N, eigenvectors[k].data(), 1);
-                scale = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale, eigenvectors[k].data(), 1);
+            // Note: BiCG eigenvector reconstruction would require saving all Krylov vectors
+            // during iteration, which is not implemented here. Use Davidson or LOBPCG for eigenvectors.
+            if (compute_evecs) {
+                // Clear the eigenvectors vector since we cannot reliably compute them
+                eigenvectors.clear();
             }
         } else {
             std::cerr << "Warning: Failed to compute eigenvectors. LAPACKE_dstev returned " << info << std::endl;
@@ -1201,14 +1144,49 @@ void cg_diagonalization(
     } 
     else if (exct <= 100) {
         // Use block CG for a moderate number of eigenvalues
-        std::vector<ComplexVector> eigenvectors;
-        int block_size = std::min(exct, 20);  // Limit block size for stability
+        // Run block CG iteratively to get all requested eigenvalues
+        std::vector<ComplexVector> all_eigenvectors;
+        eigenvalues.clear();
         
-        block_cg(H, N, max_iter, block_size, tol, eigenvalues, eigenvectors, dir);
+        int block_size = std::min(exct, 20);  // Limit block size for stability
+        int num_blocks = (exct + block_size - 1) / block_size;  // Ceiling division
+        
+        for (int block_idx = 0; block_idx < num_blocks; block_idx++) {
+            int current_block_size = std::min(block_size, exct - (int)eigenvalues.size());
+            if (current_block_size <= 0) break;
+            
+            std::vector<double> block_eigenvalues;
+            std::vector<ComplexVector> block_eigenvectors;
+            
+            // Define deflated operator
+            auto H_deflated = [&](const Complex* v, Complex* result, int size) {
+                H(v, result, size);
+                // Deflate already found eigenvectors
+                for (size_t i = 0; i < all_eigenvectors.size(); i++) {
+                    Complex projection;
+                    cblas_zdotc_sub(size, all_eigenvectors[i].data(), 1, v, 1, &projection);
+                    Complex scale = -eigenvalues[i] * projection;
+                    cblas_zaxpy(size, &scale, all_eigenvectors[i].data(), 1, result, 1);
+                }
+            };
+            
+            if (block_idx == 0) {
+                // First block uses original operator
+                block_cg(H, N, max_iter, current_block_size, tol, block_eigenvalues, block_eigenvectors, dir);
+            } else {
+                // Subsequent blocks use deflated operator
+                block_cg(H_deflated, N, max_iter, current_block_size, tol, block_eigenvalues, block_eigenvectors, dir);
+            }
+            
+            // Accumulate results
+            eigenvalues.insert(eigenvalues.end(), block_eigenvalues.begin(), block_eigenvalues.end());
+            all_eigenvectors.insert(all_eigenvectors.end(), block_eigenvectors.begin(), block_eigenvectors.end());
+        }
         
         // Limit the number of eigenvalues returned
         if (eigenvalues.size() > exct) {
             eigenvalues.resize(exct);
+            all_eigenvectors.resize(exct);
         }
         
         // Save eigenvectors to files if requested
@@ -1217,12 +1195,12 @@ void cg_diagonalization(
             std::string cmd = "mkdir -p " + evec_dir;
             system(cmd.c_str());
             
-            int num_evecs = std::min(exct, (int)eigenvectors.size());
+            int num_evecs = std::min(exct, (int)all_eigenvectors.size());
             for (int i = 0; i < num_evecs; i++) {
                 std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
                 std::ofstream outfile(evec_file);
                 if (outfile) {
-                    outfile.write(reinterpret_cast<char*>(eigenvectors[i].data()), N * sizeof(Complex));
+                    outfile.write(reinterpret_cast<char*>(all_eigenvectors[i].data()), N * sizeof(Complex));
                     outfile.close();
                 }
             }

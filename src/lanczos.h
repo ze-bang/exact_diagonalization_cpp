@@ -4,6 +4,11 @@
 #define LANCZOS_H
 #define EIGEN_USE_MKL_ALL
 
+// Define M_PI if not already defined (non-standard but commonly needed)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include <iostream>
 #include <complex>
 #include <vector>
@@ -1190,7 +1195,8 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             // Transform from block Lanczos basis to original basis
             for (int j = 0; j < total_dim; j++) {
                 ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                Complex coef(evecs[j * total_dim + i], 0.0);
+                // LAPACK uses column-major: evecs[j + i * total_dim]
+                Complex coef(evecs[j + i * total_dim], 0.0);
                 cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
             }
             
@@ -1201,20 +1207,20 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
             
             // Save eigenvector
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(evec_file);
+            std::ofstream outfile(evec_file, std::ios::binary);
             if (outfile) {
-                outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+                outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
                 outfile.close();
             }
         }
         
         // Save eigenvalues
         std::string eval_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eval_file);
+        std::ofstream eval_outfile(eval_file, std::ios::binary);
         if (eval_outfile) {
             size_t n_evals = eigenvalues.size();
-            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+            eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
             eval_outfile.close();
         }
     }
@@ -1612,17 +1618,17 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
             
             // Save eigenvector
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(idx) + ".dat";
-            std::ofstream evec_outfile(evec_file);
-            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
             evec_outfile.close();
         }
         
         // Save eigenvalues
         std::string eval_file = evec_dir + "/eigenvalues.dat";
-        std::ofstream eval_outfile(eval_file);
+        std::ofstream eval_outfile(eval_file, std::ios::binary);
         size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
         eval_outfile.close();
     }
     
@@ -1989,7 +1995,8 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
             // Transform from Lanczos basis: v = V * y
             for (int j = 0; j < m; j++) {
                 ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                Complex coef(T_eigenvectors[j * m + idx], 0.0);
+                // LAPACK uses column-major: evecs[j + idx * m]
+                Complex coef(T_eigenvectors[j + idx * m], 0.0);
                 cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
             }
             
@@ -2003,19 +2010,19 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Save eigenvector
             std::string evec_file = result_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream evec_outfile(evec_file);
-            evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+            std::ofstream evec_outfile(evec_file, std::ios::binary);
+            evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
             evec_outfile.close();
         }
     }
     
     // Save eigenvalues
     std::string eval_file = result_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file);
+    std::ofstream eval_outfile(eval_file, std::ios::binary);
     if (eval_outfile) {
         size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
         eval_outfile.close();
         std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
     }
@@ -2145,7 +2152,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             for (int i = 0; i < actual_num_eigs; i++) {
                 std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file);
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
                 if (!evec_outfile) {
                     std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
                     continue;
@@ -2161,11 +2168,11 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
             
             // Save eigenvalues to file
             std::string eval_file = dir + "/eigenvalues.dat";
-            std::ofstream eval_outfile(eval_file);
+            std::ofstream eval_outfile(eval_file, std::ios::binary);
             if (eval_outfile) {
                 size_t n_evals = eigenvalues.size();
-                eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-                eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+                eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+                eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
                 eval_outfile.close();
                 std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
             }
@@ -2274,7 +2281,7 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                 #pragma omp parallel for schedule(dynamic)
                 for (int i = 0; i < actual_num_eigs; i++) {
                     std::string evec_file = dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file);
+                    std::ofstream evec_outfile(evec_file, std::ios::binary);
                     
                     if (!evec_outfile) {
                         #pragma omp critical
@@ -2290,17 +2297,17 @@ void full_diagonalization(std::function<void(const Complex*, Complex*, int)> H, 
                         eigenvector[j] = eigensolver.eigenvectors().col(i)(j);
                     }
                     
-                    evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+                    evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
                     evec_outfile.close();
                 }
                 
                 // Save eigenvalues to file
                 std::string eval_file = dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file);
+                std::ofstream eval_outfile(eval_file, std::ios::binary);
                 if (eval_outfile) {
                     size_t n_evals = eigenvalues.size();
-                    eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-                    eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+                    eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+                    eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
                     eval_outfile.close();
                     std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
                 }
@@ -2494,7 +2501,8 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     // Form eigenvector as V_m * y_i
                     for (int j = 0; j < m; j++) {
                         ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                        Complex coef = eigenvectors_m[j*m + i];
+                        // LAPACK uses column-major: evecs[j + i * m]
+                        Complex coef = eigenvectors_m[j + i * m];
                         cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
                     }
                     
@@ -2505,17 +2513,17 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
                     
                     // Save eigenvector
                     std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                    std::ofstream evec_outfile(evec_file);
-                    evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+                    std::ofstream evec_outfile(evec_file, std::ios::binary);
+                    evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
                     evec_outfile.close();
                 }
                 
                 // Save eigenvalues
                 std::string eval_file = evec_dir + "/eigenvalues.dat";
-                std::ofstream eval_outfile(eval_file);
+                std::ofstream eval_outfile(eval_file, std::ios::binary);
                 size_t n_evals = eigenvalues.size();
-                eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-                eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), k * sizeof(double));
+                eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+                eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), k * sizeof(double));
                 eval_outfile.close();
             }
             
@@ -2802,7 +2810,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 
                 for (int j = 0; j < current_m; j++) {
                     ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                    Complex coef = Complex(evecs[j * current_m + i], 0.0);
+                    // LAPACK uses column-major: evecs[j + i * current_m]
+                    Complex coef = Complex(evecs[j + i * current_m], 0.0);
                     cblas_zaxpy(N, &coef, v_j.data(), 1, new_v.data(), 1);
                 }
                 
@@ -2883,7 +2892,8 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 // Form eigenvector as V * y_i
                 for (int j = 0; j < final_m; j++) {
                     ComplexVector v_j = read_basis_vector(temp_dir, j, N);
-                    Complex coef = Complex(final_evecs[j * final_m + i], 0.0);
+                    // LAPACK uses column-major: final_evecs[j + i * final_m]
+                    Complex coef = Complex(final_evecs[j + i * final_m], 0.0);
                     cblas_zaxpy(N, &coef, v_j.data(), 1, eigenvector.data(), 1);
                 }
                 
@@ -2894,17 +2904,17 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
                 
                 // Save eigenvector
                 std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-                std::ofstream evec_outfile(evec_file);
-                evec_outfile.write(reinterpret_cast<char*>(eigenvector.data()), N * sizeof(Complex));
+                std::ofstream evec_outfile(evec_file, std::ios::binary);
+                evec_outfile.write(reinterpret_cast<const char*>(eigenvector.data()), N * sizeof(Complex));
                 evec_outfile.close();
             }
             
             // Save eigenvalues
             std::string eval_file = evec_dir + "/eigenvalues.dat";
-            std::ofstream eval_outfile(eval_file);
+            std::ofstream eval_outfile(eval_file, std::ios::binary);
             size_t n_evals = eigenvalues.size();
-            eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-            eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+            eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+            eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
             eval_outfile.close();
         }
     }
@@ -3347,8 +3357,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
                     for (int j = 0; j < multiplicity; j++) {
                         std::string evec_file = slice_dir + "/eigenvectors/eigenvector_" + 
                                               std::to_string(i + j) + ".dat";
-                        std::ofstream outfile(evec_file);
-                        outfile.write(reinterpret_cast<char*>(degenerate_vectors[j].data()), 
+                        std::ofstream outfile(evec_file, std::ios::binary);
+                        outfile.write(reinterpret_cast<const char*>(degenerate_vectors[j].data()), 
                                     N * sizeof(Complex));
                     }
                 }
@@ -3431,8 +3441,8 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
             
             // Save to final location
             std::string final_evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
-            std::ofstream outfile(final_evec_file);
-            outfile.write(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+            std::ofstream outfile(final_evec_file, std::ios::binary);
+            outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
         }
         
         // Clean up temporary slice directories
@@ -3444,11 +3454,11 @@ void optimal_spectrum_solver(std::function<void(const Complex*, Complex*, int)> 
     
     // Save eigenvalues
     std::string eval_file = evec_dir + "/eigenvalues.dat";
-    std::ofstream eval_outfile(eval_file);
+    std::ofstream eval_outfile(eval_file, std::ios::binary);
     if (eval_outfile) {
         size_t n_evals = eigenvalues.size();
-        eval_outfile.write(reinterpret_cast<char*>(&n_evals), sizeof(size_t));
-        eval_outfile.write(reinterpret_cast<char*>(eigenvalues.data()), n_evals * sizeof(double));
+        eval_outfile.write(reinterpret_cast<const char*>(&n_evals), sizeof(size_t));
+        eval_outfile.write(reinterpret_cast<const char*>(eigenvalues.data()), n_evals * sizeof(double));
         eval_outfile.close();
         std::cout << "Saved " << n_evals << " eigenvalues to " << eval_file << std::endl;
     }
