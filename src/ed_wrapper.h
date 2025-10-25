@@ -2,7 +2,6 @@
 #define ED_WRAPPER_H
 
 #include "TPQ.h"
-#include "TPQ_chunked.h"
 #include "CG.h"
 #include "arpack.h"
 #include "lanczos.h"
@@ -333,24 +332,6 @@ EDResults exact_diagonalization_core(
 
 
         case DiagonalizationMethod::mTPQ_CUDA:
-#if defined(WITH_CUDA)
-            std::cout << "Using microcanonical TPQ method with CUDA acceleration" << std::endl;
-
-            microcanonical_tpq_unified(H, hilbert_space_dim,
-                            params.max_iterations, params.num_samples,
-                            params.num_measure_freq,
-                            results.eigenvalues,
-                            params.output_dir,
-                            params.compute_eigenvectors,
-                            params.large_value,
-                            params.calc_observables, params.observables, params.observable_names,
-                            params.omega_min, params.omega_max,
-                            params.num_points, params.t_end, params.dt, params.spin_length, params.measure_spin, params.sublattice_size,
-                            /*use_cuda=*/true);
-#else
-            std::cerr << "Error: CUDA support not enabled. Please rebuild with WITH_CUDA=ON or use DiagonalizationMethod::mTPQ instead." << std::endl;
-            throw std::runtime_error("CUDA not available");
-#endif
             break;
         
 

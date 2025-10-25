@@ -81,6 +81,7 @@ include_directories(${SRC_DIR})
 set(BLAS_LIBRARIES "")
 set(LAPACK_LIBRARIES "")
 set(LAPACKE_LIBRARIES "")
+set(EXTRA_LINALG_LIBRARIES "")
 
 if(USE_AOCL_BLIS)
     message(STATUS "Configuring AMD AOCL-BLIS libraries")
@@ -92,6 +93,8 @@ if(USE_AOCL_BLIS)
     list(APPEND _AOCL_HINT_DIRS
         /opt/AMD/aocl
         /opt/AMD/aocl/aocl-linux-x86_64
+        /opt/AMD/aocl/aocl-linux-aocc-5.0.0
+        /opt/AMD/aocl/aocl-linux-aocc-5.0.0/aocc
         /opt/aocl
         /usr/lib/aocl
     )
@@ -122,6 +125,16 @@ if(USE_AOCL_BLIS)
         set(LAPACK_LIBRARIES ${AOCL_LAPACK_LIBRARY})
         set(LAPACKE_LIBRARIES ${AOCL_LAPACKE_LIBRARY})
         add_definitions(-DUSE_AOCL_BLIS)
+        find_library(AOCL_OMP_LIBRARY NAMES omp
+            HINTS ${_AOCL_HINT_DIRS}
+            PATH_SUFFIXES "" lib lib64 lib/aocl/lib aocc/lib lib/llvm-18/lib
+        )
+        if(AOCL_OMP_LIBRARY)
+            list(APPEND EXTRA_LINALG_LIBRARIES ${AOCL_OMP_LIBRARY})
+            message(STATUS "  AOCL OpenMP runtime: ${AOCL_OMP_LIBRARY}")
+        else()
+            message(WARNING "AOCL-BLIS OpenMP runtime (libomp) not found; linking may fail. Set AOCL_ROOT if needed.")
+        endif()
         message(STATUS "  AOCL include dir: ${AOCL_INCLUDE_DIR}")
         message(STATUS "  AOCL BLIS library: ${AOCL_BLIS_LIBRARY}")
         message(STATUS "  AOCL LAPACK library: ${AOCL_LAPACK_LIBRARY}")
@@ -238,12 +251,7 @@ set(HEADER_SOURCES
 
 # Add CUDA sources if available and CUDA is enabled
 if(WITH_CUDA)
-    # Explicitly add our CUDA files
-    set(CUDA_SOURCES
-        ${SRC_DIR}/TPQ_cuda.cu
-        ${SRC_DIR}/TPQ_cuda_utils.cu
-    )
-    
+
     # Check if the files exist and add them
     foreach(cuda_file ${CUDA_SOURCES})
         if(EXISTS ${cuda_file})
@@ -279,9 +287,6 @@ add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
 
 # Add CUDA example executable if CUDA is enabled and example exists
 if(WITH_CUDA)
-    set(CUDA_EXAMPLE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/tpq_cuda_example.cpp)
-    set(CUDA_TEST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/cuda_test.cpp)
-    set(GPU_HAM_TEST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/gpu_hamiltonian_test.cpp)
     
     if(EXISTS ${CUDA_EXAMPLE_FILE})
         add_executable(CUDA_EXAMPLE ${CUDA_EXAMPLE_FILE} ${SOURCES})
@@ -294,11 +299,7 @@ if(WITH_CUDA)
         add_executable(CUDA_TEST ${CUDA_TEST_FILE} ${CUDA_ONLY_SOURCES})
         message(STATUS "Adding CUDA test executable")
     endif()
-    
-    if(EXISTS ${GPU_HAM_TEST_FILE})
-        add_executable(GPU_HAM_TEST ${GPU_HAM_TEST_FILE} ${SRC_DIR}/gpu_hamiltonian.cu ${CUDA_ONLY_SOURCES})
-        message(STATUS "Adding GPU Hamiltonian test executable")
-    endif()
+
 endif()
 
 if(WITH_MKL)
@@ -316,6 +317,7 @@ target_link_libraries(ED
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
     ${LAPACKE_LIBRARIES}
+    ${EXTRA_LINALG_LIBRARIES}
     ${ARPACK_LIBRARY}
 )
 
@@ -325,6 +327,7 @@ if(TARGET TPQ_DSSF)
         ${BLAS_LIBRARIES}
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
         ${ARPACK_LIBRARY}
     )
 endif()
@@ -336,6 +339,7 @@ if(TARGET CUDA_EXAMPLE)
         ${BLAS_LIBRARIES}
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
         ${ARPACK_LIBRARY}
     )
 endif()
@@ -346,19 +350,11 @@ if(TARGET CUDA_TEST)
         ${BLAS_LIBRARIES}
         ${LAPACK_LIBRARIES}
         ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
         ${ARPACK_LIBRARY}
     )
 endif()
 
-# Link libraries for GPU Hamiltonian test if it exists
-if(TARGET GPU_HAM_TEST)
-    target_link_libraries(GPU_HAM_TEST
-        ${BLAS_LIBRARIES}
-        ${LAPACK_LIBRARIES}
-        ${LAPACKE_LIBRARIES}
-        ${ARPACK_LIBRARY}
-    )
-endif()
 
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
@@ -379,10 +375,6 @@ if(WITH_MKL)
             target_link_libraries(CUDA_TEST MKL::MKL)
         endif()
         
-        # Link MKL to GPU Hamiltonian test if it exists
-        if(TARGET GPU_HAM_TEST)
-            target_link_libraries(GPU_HAM_TEST MKL::MKL)
-        endif()
     else()
         # Link traditional MKL (already linked via BLAS_LIBRARIES)
         # No additional linking needed since MKL is detected as BLAS/LAPACK
@@ -428,15 +420,6 @@ if(WITH_CUDA)
         )
     endif()
     
-    # Link CUDA libraries to GPU Hamiltonian test if it exists
-    if(TARGET GPU_HAM_TEST)
-        target_link_libraries(GPU_HAM_TEST
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-        )
-    endif()
 endif()
 
 # Add MPI if enabled
@@ -457,10 +440,6 @@ if(WITH_MPI)
         target_link_libraries(CUDA_TEST ${MPI_CXX_LIBRARIES})
     endif()
     
-    # Link MPI to GPU Hamiltonian test if it exists
-    if(TARGET GPU_HAM_TEST)
-        target_link_libraries(GPU_HAM_TEST ${MPI_CXX_LIBRARIES})
-    endif()
 endif()
 
 # Install targets
@@ -549,15 +528,6 @@ if(WITH_CUDA)
         )
     endif()
     
-    # Set CUDA compile options for GPU Hamiltonian test if it exists
-    if(TARGET GPU_HAM_TEST)
-        set_property(TARGET GPU_HAM_TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(GPU_HAM_TEST PRIVATE 
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        )
-    endif()
 endif()
 
 # Add OpenMP support if available
