@@ -1,8 +1,52 @@
 cmake_minimum_required(VERSION 3.18)
 
+# Detect host CPU vendor to pick optimized BLAS/LAPACK defaults
+set(CPU_VENDOR "Unknown")
+if(EXISTS "/proc/cpuinfo")
+    file(READ "/proc/cpuinfo" CPUINFO_RAW)
+    if(CPUINFO_RAW MATCHES "AuthenticAMD")
+        set(CPU_VENDOR "AMD")
+    elseif(CPUINFO_RAW MATCHES "GenuineIntel")
+        set(CPU_VENDOR "Intel")
+    endif()
+endif()
+message(STATUS "Detected CPU vendor: ${CPU_VENDOR}")
+
+set(DEFAULT_WITH_CUDA ON)
+set(DEFAULT_WITH_MPI ON)
+set(DEFAULT_WITH_MKL ON)
+set(DEFAULT_USE_ONEMKL ON)
+set(DEFAULT_USE_AOCL_BLIS OFF)
+
+if(CPU_VENDOR STREQUAL "AMD")
+    set(DEFAULT_WITH_MKL OFF)
+    set(DEFAULT_USE_ONEMKL OFF)
+    set(DEFAULT_USE_AOCL_BLIS ON)
+elseif(CPU_VENDOR STREQUAL "Intel")
+    # keep MKL defaults
+else()
+    # Unknown vendor: keep generic defaults (MKL optional, AOCL disabled)
+endif()
+
 # Options (define before project)
-option(WITH_CUDA "Build with CUDA support" ON)
-option(WITH_MPI "Build with MPI support" ON)
+option(WITH_CUDA "Build with CUDA support" ${DEFAULT_WITH_CUDA})
+option(WITH_MPI "Build with MPI support" ${DEFAULT_WITH_MPI})
+option(WITH_MKL "Build with Intel MKL support" ${DEFAULT_WITH_MKL})
+option(USE_ONEMKL "Use Intel oneMKL instead of traditional MKL" ${DEFAULT_USE_ONEMKL})
+option(USE_AOCL_BLIS "Use AMD AOCL-BLIS optimized BLAS/LAPACK" ${DEFAULT_USE_AOCL_BLIS})
+
+if(USE_AOCL_BLIS AND WITH_MKL)
+    message(STATUS "AOCL-BLIS requested; disabling MKL to avoid conflicting BLAS backends")
+    set(WITH_MKL OFF)
+endif()
+
+if(USE_AOCL_BLIS)
+    set(USE_ONEMKL OFF)
+endif()
+
+if(NOT WITH_MKL)
+    set(USE_ONEMKL OFF)
+endif()
 
 # Set languages based on options
 if(WITH_CUDA)
@@ -33,79 +77,126 @@ endif()
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 include_directories(${SRC_DIR})
 
-# Find required packages
-find_package(BLAS REQUIRED)
-find_package(LAPACK REQUIRED)
-option(WITH_MKL "Build with Intel MKL support" ON)
-option(USE_ONEMKL "Use Intel oneMKL instead of traditional MKL" ON)
+# Configure BLAS/LAPACK backends
+set(BLAS_LIBRARIES "")
+set(LAPACK_LIBRARIES "")
+set(LAPACKE_LIBRARIES "")
 
-if(WITH_MKL)
-    if(USE_ONEMKL)
-        # Use oneMKL from oneAPI
-        find_package(MKL CONFIG QUIET)
-        if(MKL_FOUND)
-            message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
-        else()
-            message(STATUS "Intel oneMKL not found, falling back to traditional MKL detection")
-            set(USE_ONEMKL OFF)
-        endif()
+if(USE_AOCL_BLIS)
+    message(STATUS "Configuring AMD AOCL-BLIS libraries")
+
+    set(_AOCL_HINT_DIRS)
+    if(DEFINED ENV{AOCL_ROOT})
+        list(APPEND _AOCL_HINT_DIRS $ENV{AOCL_ROOT})
     endif()
-    
-    if(NOT USE_ONEMKL)
-        # Use traditional MKL - add include directories
-        find_path(MKL_INCLUDE_DIR mkl.h
-            HINTS
-                /usr/include/mkl
-                /opt/intel/mkl/include
-                /opt/intel/oneapi/mkl/latest/include
-                /opt/intel/compilers_and_libraries/linux/mkl/include
-            PATH_SUFFIXES mkl
-        )
-        
-        if(MKL_INCLUDE_DIR)
-            include_directories(SYSTEM ${MKL_INCLUDE_DIR})
-            message(STATUS "Found MKL headers at: ${MKL_INCLUDE_DIR}")
-        else()
-            message(WARNING "MKL headers not found, disabling MKL support")
-            set(WITH_MKL OFF)
-        endif()
-    endif()
-    
-    if(WITH_MKL)
-        add_definitions(-DWITH_MKL)
-    endif()
-endif()
+    list(APPEND _AOCL_HINT_DIRS
+        /opt/AMD/aocl
+        /opt/AMD/aocl/aocl-linux-x86_64
+        /opt/aocl
+        /usr/lib/aocl
+    )
 
-# Print MKL vendor information
-# message(STATUS "MKL library: ${MKL_LIBRARIES}")
+    find_path(AOCL_INCLUDE_DIR cblas.h
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES include include/aocl include/amd-blis include/blis include/BLIS
+    )
 
-# Print BLAS and LAPACK vendor information
-message(STATUS "BLAS library: ${BLAS_LIBRARIES}")
-message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
+    find_library(AOCL_BLIS_LIBRARY NAMES blis-mt blis
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES lib lib64 lib/aocl/lib
+    )
 
-# Try to detect vendors
-if(BLAS_LIBRARIES MATCHES "mkl")
-    message(STATUS "BLAS/LAPACK vendor: Intel MKL")
-elseif(BLAS_LIBRARIES MATCHES "openblas")
-    message(STATUS "BLAS vendor: OpenBLAS")
-elseif(BLAS_LIBRARIES MATCHES "atlas")
-    message(STATUS "BLAS vendor: ATLAS")
-elseif(BLAS_LIBRARIES MATCHES "Accelerate")
-    message(STATUS "BLAS/LAPACK vendor: Apple Accelerate Framework")
-elseif(BLAS_LIBRARIES MATCHES "FlexiBLAS")
-    message(STATUS "BLAS vendor: FlexiBLAS")
-else()
-    message(STATUS "BLAS/LAPACK vendor: Unknown/Generic")
-endif()
-# Try to find LAPACKE
-find_package(LAPACKE QUIET)
-if(NOT LAPACKE_FOUND)
-    # Try to find it manually
-    find_library(LAPACKE_LIBRARY NAMES lapacke)
-    if(LAPACKE_LIBRARY)
-        set(LAPACKE_LIBRARIES ${LAPACKE_LIBRARY})
+    find_library(AOCL_LAPACK_LIBRARY NAMES aoclflapack flame lapack
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES lib lib64 lib/aocl/lib
+    )
+
+    find_library(AOCL_LAPACKE_LIBRARY NAMES lapacke
+        HINTS ${_AOCL_HINT_DIRS}
+        PATH_SUFFIXES lib lib64 lib/aocl/lib
+    )
+
+    if(AOCL_INCLUDE_DIR AND AOCL_BLIS_LIBRARY AND AOCL_LAPACK_LIBRARY AND AOCL_LAPACKE_LIBRARY)
+        include_directories(SYSTEM ${AOCL_INCLUDE_DIR})
+        set(BLAS_LIBRARIES ${AOCL_BLIS_LIBRARY})
+        set(LAPACK_LIBRARIES ${AOCL_LAPACK_LIBRARY})
+        set(LAPACKE_LIBRARIES ${AOCL_LAPACKE_LIBRARY})
+        add_definitions(-DUSE_AOCL_BLIS)
+        message(STATUS "  AOCL include dir: ${AOCL_INCLUDE_DIR}")
+        message(STATUS "  AOCL BLIS library: ${AOCL_BLIS_LIBRARY}")
+        message(STATUS "  AOCL LAPACK library: ${AOCL_LAPACK_LIBRARY}")
+        message(STATUS "  AOCL LAPACKE library: ${AOCL_LAPACKE_LIBRARY}")
     else()
-        message(FATAL_ERROR "LAPACKE library not found")
+        message(FATAL_ERROR "AOCL-BLIS requested but required components were not found. Set AOCL_ROOT to your AOCL installation path or disable USE_AOCL_BLIS.")
+    endif()
+else()
+    find_package(BLAS REQUIRED)
+    find_package(LAPACK REQUIRED)
+
+    if(WITH_MKL)
+        if(USE_ONEMKL)
+            # Use oneMKL from oneAPI
+            find_package(MKL CONFIG QUIET)
+            if(MKL_FOUND)
+                message(STATUS "Using Intel oneMKL from: ${MKLROOT}")
+            else()
+                message(STATUS "Intel oneMKL not found, falling back to traditional MKL detection")
+                set(USE_ONEMKL OFF)
+            endif()
+        endif()
+
+        if(NOT USE_ONEMKL)
+            # Use traditional MKL - add include directories
+            find_path(MKL_INCLUDE_DIR mkl.h
+                HINTS
+                    /usr/include/mkl
+                    /opt/intel/mkl/include
+                    /opt/intel/oneapi/mkl/latest/include
+                    /opt/intel/compilers_and_libraries/linux/mkl/include
+                PATH_SUFFIXES mkl
+            )
+
+            if(MKL_INCLUDE_DIR)
+                include_directories(SYSTEM ${MKL_INCLUDE_DIR})
+                message(STATUS "Found MKL headers at: ${MKL_INCLUDE_DIR}")
+            else()
+                message(WARNING "MKL headers not found, disabling MKL support")
+                set(WITH_MKL OFF)
+                set(USE_ONEMKL OFF)
+            endif()
+        endif()
+
+        if(WITH_MKL)
+            add_definitions(-DWITH_MKL)
+        endif()
+    endif()
+
+    message(STATUS "BLAS library: ${BLAS_LIBRARIES}")
+    message(STATUS "LAPACK library: ${LAPACK_LIBRARIES}")
+
+    if(BLAS_LIBRARIES MATCHES "mkl")
+        message(STATUS "BLAS/LAPACK vendor: Intel MKL")
+    elseif(BLAS_LIBRARIES MATCHES "openblas")
+        message(STATUS "BLAS vendor: OpenBLAS")
+    elseif(BLAS_LIBRARIES MATCHES "atlas")
+        message(STATUS "BLAS vendor: ATLAS")
+    elseif(BLAS_LIBRARIES MATCHES "Accelerate")
+        message(STATUS "BLAS/LAPACK vendor: Apple Accelerate Framework")
+    elseif(BLAS_LIBRARIES MATCHES "FlexiBLAS")
+        message(STATUS "BLAS vendor: FlexiBLAS")
+    else()
+        message(STATUS "BLAS/LAPACK vendor: Unknown/Generic")
+    endif()
+
+    find_package(LAPACKE QUIET)
+    if(NOT LAPACKE_FOUND)
+        # Try to find it manually
+        find_library(LAPACKE_LIBRARY NAMES lapacke)
+        if(LAPACKE_LIBRARY)
+            set(LAPACKE_LIBRARIES ${LAPACKE_LIBRARY})
+        else()
+            message(FATAL_ERROR "LAPACKE library not found")
+        endif()
     endif()
 endif()
 
@@ -190,6 +281,7 @@ add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
 if(WITH_CUDA)
     set(CUDA_EXAMPLE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/tpq_cuda_example.cpp)
     set(CUDA_TEST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/cuda_test.cpp)
+    set(GPU_HAM_TEST_FILE ${CMAKE_CURRENT_SOURCE_DIR}/examples/gpu_hamiltonian_test.cpp)
     
     if(EXISTS ${CUDA_EXAMPLE_FILE})
         add_executable(CUDA_EXAMPLE ${CUDA_EXAMPLE_FILE} ${SOURCES})
@@ -201,6 +293,11 @@ if(WITH_CUDA)
     if(EXISTS ${CUDA_TEST_FILE})
         add_executable(CUDA_TEST ${CUDA_TEST_FILE} ${CUDA_ONLY_SOURCES})
         message(STATUS "Adding CUDA test executable")
+    endif()
+    
+    if(EXISTS ${GPU_HAM_TEST_FILE})
+        add_executable(GPU_HAM_TEST ${GPU_HAM_TEST_FILE} ${SRC_DIR}/gpu_hamiltonian.cu ${CUDA_ONLY_SOURCES})
+        message(STATUS "Adding GPU Hamiltonian test executable")
     endif()
 endif()
 
@@ -253,6 +350,16 @@ if(TARGET CUDA_TEST)
     )
 endif()
 
+# Link libraries for GPU Hamiltonian test if it exists
+if(TARGET GPU_HAM_TEST)
+    target_link_libraries(GPU_HAM_TEST
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
+
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
@@ -270,6 +377,11 @@ if(WITH_MKL)
         # Link MKL to CUDA test if it exists
         if(TARGET CUDA_TEST)
             target_link_libraries(CUDA_TEST MKL::MKL)
+        endif()
+        
+        # Link MKL to GPU Hamiltonian test if it exists
+        if(TARGET GPU_HAM_TEST)
+            target_link_libraries(GPU_HAM_TEST MKL::MKL)
         endif()
     else()
         # Link traditional MKL (already linked via BLAS_LIBRARIES)
@@ -315,6 +427,16 @@ if(WITH_CUDA)
             CUDA::curand
         )
     endif()
+    
+    # Link CUDA libraries to GPU Hamiltonian test if it exists
+    if(TARGET GPU_HAM_TEST)
+        target_link_libraries(GPU_HAM_TEST
+            CUDA::cudart
+            CUDA::cublas
+            CUDA::cusparse
+            CUDA::curand
+        )
+    endif()
 endif()
 
 # Add MPI if enabled
@@ -333,6 +455,11 @@ if(WITH_MPI)
     # Link MPI to CUDA test if it exists
     if(TARGET CUDA_TEST)
         target_link_libraries(CUDA_TEST ${MPI_CXX_LIBRARIES})
+    endif()
+    
+    # Link MPI to GPU Hamiltonian test if it exists
+    if(TARGET GPU_HAM_TEST)
+        target_link_libraries(GPU_HAM_TEST ${MPI_CXX_LIBRARIES})
     endif()
 endif()
 
@@ -416,6 +543,16 @@ if(WITH_CUDA)
     if(TARGET CUDA_TEST)
         set_property(TARGET CUDA_TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
         target_compile_options(CUDA_TEST PRIVATE 
+            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+        )
+    endif()
+    
+    # Set CUDA compile options for GPU Hamiltonian test if it exists
+    if(TARGET GPU_HAM_TEST)
+        set_property(TARGET GPU_HAM_TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+        target_compile_options(GPU_HAM_TEST PRIVATE 
             $<$<COMPILE_LANGUAGE:CUDA>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
