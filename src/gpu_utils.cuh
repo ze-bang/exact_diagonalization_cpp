@@ -126,9 +126,9 @@ inline dim3 get_optimal_grid_size(size_t problem_size, dim3 block_size) {
  * Device function: Get Sz eigenvalue for a site in a basis state
  */
 __device__ inline double get_sz_eigenvalue(uint64_t state, int site, float spin_length) {
-    // Check if spin at 'site' is up (bit is 1) or down (bit is 0)
-    bool is_up = (state >> site) & 1;
-    return is_up ? spin_length : -spin_length;
+    // Bit value 0 => spin up, bit value 1 => spin down
+    bool is_down = (state >> site) & 1ULL;
+    return is_down ? -spin_length : spin_length;
 }
 
 /**
@@ -138,15 +138,15 @@ __device__ inline double get_sz_eigenvalue(uint64_t state, int site, float spin_
  */
 __device__ inline device_pair<uint64_t, cuDoubleComplex> 
 apply_splus(uint64_t state, int site, float spin_length) {
-    // S+ flips spin from down to up
-    bool is_up = (state >> site) & 1;
-    if (is_up) {
+    // S+ flips spin from down (bit=1) to up (bit=0)
+    bool is_down = (state >> site) & 1ULL;
+    if (!is_down) {
         // Already up, S+|up⟩ = 0
         return make_device_pair(static_cast<uint64_t>(0), make_cuDoubleComplex(0.0, 0.0));
     }
     
-    // Flip the bit: down -> up
-    uint64_t new_state = state | (static_cast<uint64_t>(1) << site);
+    // Flip the bit: down (1) -> up (0)
+    uint64_t new_state = state & ~(static_cast<uint64_t>(1) << site);
     
     // Matrix element for S+ is sqrt(s(s+1) - m(m+1)) = sqrt(2s) for spin-s
     double matrix_elem = sqrt(2.0 * spin_length);
@@ -159,15 +159,15 @@ apply_splus(uint64_t state, int site, float spin_length) {
  */
 __device__ inline device_pair<uint64_t, cuDoubleComplex> 
 apply_sminus(uint64_t state, int site, float spin_length) {
-    // S- flips spin from up to down
-    bool is_up = (state >> site) & 1;
-    if (!is_up) {
+    // S- flips spin from up (bit=0) to down (bit=1)
+    bool is_down = (state >> site) & 1ULL;
+    if (is_down) {
         // Already down, S-|down⟩ = 0
         return make_device_pair(static_cast<uint64_t>(0), make_cuDoubleComplex(0.0, 0.0));
     }
     
-    // Flip the bit: up -> down
-    uint64_t new_state = state & ~(static_cast<uint64_t>(1) << site);
+    // Flip the bit: up (0) -> down (1)
+    uint64_t new_state = state | (static_cast<uint64_t>(1) << site);
     
     // Matrix element for S- is sqrt(s(s+1) - m(m-1)) = sqrt(2s) for spin-s
     double matrix_elem = sqrt(2.0 * spin_length);

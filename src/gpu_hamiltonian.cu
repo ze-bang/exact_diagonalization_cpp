@@ -4,6 +4,9 @@
 #include <thrust/sort.h>
 #include <algorithm>
 #include <cmath>
+#include <complex>
+#include <limits>
+#include <set>
 
 namespace gpu {
 
@@ -91,6 +94,76 @@ __device__ int lookup_state_in_hash_table(
     return -1; // Not found
 }
 
+// Apply a single spin operator to a basis state, updating the matrix element accumulator
+__device__ inline bool apply_single_operator(
+    uint64_t& state,
+    int site,
+    int op,
+    float spin_length,
+    cuDoubleComplex& matrix_elem
+) {
+    switch (op) {
+        case 2: {
+            double sz = get_sz_eigenvalue(state, site, spin_length);
+            matrix_elem = cuCmul(matrix_elem, make_cuDoubleComplex(sz, 0.0));
+            return true;
+        }
+        case 0: {
+            device_pair<uint64_t, cuDoubleComplex> result = apply_splus(state, site, spin_length);
+            if (result.first == 0) {
+                return false;
+            }
+            matrix_elem = cuCmul(matrix_elem, result.second);
+            state = result.first;
+            return true;
+        }
+        case 1: {
+            device_pair<uint64_t, cuDoubleComplex> result = apply_sminus(state, site, spin_length);
+            if (result.first == 0) {
+                return false;
+            }
+            matrix_elem = cuCmul(matrix_elem, result.second);
+            state = result.first;
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+// Evaluate an interaction term for a given basis state
+__device__ inline bool evaluate_interaction(
+    uint64_t state,
+    const SpinInteraction& interaction,
+    float spin_length,
+    uint64_t& target_state,
+    cuDoubleComplex& matrix_elem
+) {
+    target_state = state;
+    matrix_elem = interaction.coupling;
+
+    if (fabs(cuCreal(matrix_elem)) < 1e-30 && fabs(cuCimag(matrix_elem)) < 1e-30) {
+        return false;
+    }
+
+    if (interaction.site2 < 0 || interaction.op2 < 0) {
+        return apply_single_operator(target_state, interaction.site1, interaction.op1,
+                                      spin_length, matrix_elem);
+    }
+
+    if (!apply_single_operator(target_state, interaction.site1, interaction.op1,
+                               spin_length, matrix_elem)) {
+        return false;
+    }
+
+    if (!apply_single_operator(target_state, interaction.site2, interaction.op2,
+                               spin_length, matrix_elem)) {
+        return false;
+    }
+
+    return true;
+}
+
 // ============================================================================
 // CUDA Kernels
 // ============================================================================
@@ -116,56 +189,14 @@ __global__ void hamiltonian_apply_kernel(
     
     // Process each interaction term
     for (int i = 0; i < num_interactions; i++) {
-        const SpinInteraction& inter = interactions[i];
-        int site1 = inter.site1;
-        int site2 = inter.site2;
-        int op1 = inter.op1;
-        int op2 = inter.op2;
-        double coupling = inter.coupling;
-        
-        // Diagonal terms (Sz-Sz)
-        if (op1 == 2 && op2 == 2) {
-            double sz1 = get_sz_eigenvalue(state, site1, spin_length);
-            double sz2 = get_sz_eigenvalue(state, site2, spin_length);
-            cuDoubleComplex contrib = cuCmul(
-                make_cuDoubleComplex(coupling * sz1 * sz2, 0.0),
-                psi_in[idx]
-            );
-            result = cuCadd(result, contrib);
-        }
-        // S+ S- terms
-        else if (op1 == 0 && op2 == 1) {
-            // Apply S- to site2, then S+ to site1
-            device_pair<uint64_t, cuDoubleComplex> result1 = apply_sminus(state, site2, spin_length);
-            if (result1.first != 0) {
-                device_pair<uint64_t, cuDoubleComplex> result2 = apply_splus(result1.first, site1, spin_length);
-                if (result2.first != 0) {
-                    cuDoubleComplex matrix_elem = cuCmul(result1.second, result2.second);
-                    matrix_elem = cuCmul(matrix_elem, make_cuDoubleComplex(coupling, 0.0));
-                    
-                    size_t target_idx = result2.first;
-                    cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_idx]);
-                    result = cuCadd(result, contrib);
-                }
+        uint64_t target_state;
+        cuDoubleComplex matrix_elem;
+        if (evaluate_interaction(state, interactions[i], spin_length, target_state, matrix_elem)) {
+            if (target_state < hilbert_dim) {
+                cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_state]);
+                result = cuCadd(result, contrib);
             }
         }
-        // S- S+ terms
-        else if (op1 == 1 && op2 == 0) {
-            // Apply S+ to site2, then S- to site1
-            device_pair<uint64_t, cuDoubleComplex> result1 = apply_splus(state, site2, spin_length);
-            if (result1.first != 0) {
-                device_pair<uint64_t, cuDoubleComplex> result2 = apply_sminus(result1.first, site1, spin_length);
-                if (result2.first != 0) {
-                    cuDoubleComplex matrix_elem = cuCmul(result1.second, result2.second);
-                    matrix_elem = cuCmul(matrix_elem, make_cuDoubleComplex(coupling, 0.0));
-                    
-                    size_t target_idx = result2.first;
-                    cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_idx]);
-                    result = cuCadd(result, contrib);
-                }
-            }
-        }
-        // Other operator combinations can be added here
     }
     
     psi_out[idx] = result;
@@ -195,60 +226,16 @@ __global__ void hamiltonian_apply_fixed_sz_kernel(
     
     // Process each interaction term
     for (int i = 0; i < num_interactions; i++) {
-        const SpinInteraction& inter = interactions[i];
-        int site1 = inter.site1;
-        int site2 = inter.site2;
-        int op1 = inter.op1;
-        int op2 = inter.op2;
-        double coupling = inter.coupling;
-        
-        // Diagonal terms (Sz-Sz)
-        if (op1 == 2 && op2 == 2) {
-            double sz1 = get_sz_eigenvalue(state, site1, spin_length);
-            double sz2 = get_sz_eigenvalue(state, site2, spin_length);
-            cuDoubleComplex contrib = cuCmul(
-                make_cuDoubleComplex(coupling * sz1 * sz2, 0.0),
-                psi_in[idx]
-            );
-            result = cuCadd(result, contrib);
-        }
-        // S+ S- terms
-        else if (op1 == 0 && op2 == 1) {
-            device_pair<uint64_t, cuDoubleComplex> result1 = apply_sminus(state, site2, spin_length);
-            if (result1.first != 0) {
-                device_pair<uint64_t, cuDoubleComplex> result2 = apply_splus(result1.first, site1, spin_length);
-                if (result2.first != 0) {
-                    // Look up new_state2 in hash table
-                    int target_idx = lookup_state_in_hash_table(
-                        result2.first, hash_keys, hash_values, hash_table_size
-                    );
-                    
-                    if (target_idx >= 0) {
-                        cuDoubleComplex matrix_elem = cuCmul(result1.second, result2.second);
-                        matrix_elem = cuCmul(matrix_elem, make_cuDoubleComplex(coupling, 0.0));
-                        cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_idx]);
-                        result = cuCadd(result, contrib);
-                    }
-                }
-            }
-        }
-        // S- S+ terms
-        else if (op1 == 1 && op2 == 0) {
-            device_pair<uint64_t, cuDoubleComplex> result1 = apply_splus(state, site2, spin_length);
-            if (result1.first != 0) {
-                device_pair<uint64_t, cuDoubleComplex> result2 = apply_sminus(result1.first, site1, spin_length);
-                if (result2.first != 0) {
-                    int target_idx = lookup_state_in_hash_table(
-                        result2.first, hash_keys, hash_values, hash_table_size
-                    );
-                    
-                    if (target_idx >= 0) {
-                        cuDoubleComplex matrix_elem = cuCmul(result1.second, result2.second);
-                        matrix_elem = cuCmul(matrix_elem, make_cuDoubleComplex(coupling, 0.0));
-                        cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_idx]);
-                        result = cuCadd(result, contrib);
-                    }
-                }
+        uint64_t target_state;
+        cuDoubleComplex matrix_elem;
+        if (evaluate_interaction(state, interactions[i], spin_length, target_state, matrix_elem)) {
+            int target_idx = (target_state == state)
+                ? static_cast<int>(idx)
+                : lookup_state_in_hash_table(target_state, hash_keys, hash_values, hash_table_size);
+
+            if (target_idx >= 0) {
+                cuDoubleComplex contrib = cuCmul(matrix_elem, psi_in[target_idx]);
+                result = cuCadd(result, contrib);
             }
         }
     }
@@ -341,27 +328,47 @@ GPUHamiltonianOperator::~GPUHamiltonianOperator() {
 
 SpinInteraction GPUHamiltonianOperator::parse_interaction_line(const std::string& line) {
     std::istringstream iss(line);
-    SpinInteraction inter;
+    SpinInteraction inter{};
     
     // Format: site1 op1 site2 op2 coupling
     std::string op1_str, op2_str;
-    iss >> inter.site1 >> op1_str >> inter.site2 >> op2_str >> inter.coupling;
+    double coupling_real = 0.0;
+    if (!(iss >> inter.site1 >> op1_str >> inter.site2 >> op2_str >> coupling_real)) {
+        throw std::runtime_error("Failed to parse interaction line: " + line);
+    }
     
-    // Map operator strings to integers
-    // 0=S+, 1=S-, 2=Sz, 3=Sx, 4=Sy
     auto map_op = [](const std::string& op) {
         if (op == "S+" || op == "Sp") return 0;
         if (op == "S-" || op == "Sm") return 1;
         if (op == "Sz") return 2;
         if (op == "Sx") return 3;
         if (op == "Sy") return 4;
-        return 2; // Default to Sz
+        return 2;
     };
     
     inter.op1 = map_op(op1_str);
     inter.op2 = map_op(op2_str);
-    
+    inter.coupling = make_cuDoubleComplex(coupling_real, 0.0);
     return inter;
+}
+
+void GPUHamiltonianOperator::upload_interactions_to_device() {
+    num_interactions_ = static_cast<int>(host_interactions_.size());
+
+    if (d_interactions_) {
+        cudaFree(d_interactions_);
+        d_interactions_ = nullptr;
+    }
+
+    if (num_interactions_ == 0) {
+        return;
+    }
+
+    CUDA_CHECK(cudaMalloc(&d_interactions_,
+                          static_cast<size_t>(num_interactions_) * sizeof(SpinInteraction)));
+    CUDA_CHECK(cudaMemcpy(d_interactions_, host_interactions_.data(),
+                         static_cast<size_t>(num_interactions_) * sizeof(SpinInteraction),
+                         cudaMemcpyHostToDevice));
 }
 
 void GPUHamiltonianOperator::load_from_file(const std::string& filename) {
@@ -369,38 +376,121 @@ void GPUHamiltonianOperator::load_from_file(const std::string& filename) {
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open file: " + filename);
     }
-    
-    // Try to auto-detect format by reading first line
-    std::string first_line;
-    std::getline(file, first_line);
-    file.seekg(0); // Reset to beginning
-    
-    // Otherwise, parse as simple format
-    std::vector<SpinInteraction> interactions;
+
+    std::vector<SpinInteraction> new_terms;
     std::string line;
-    
-    while (std::getline(file, line)) {
-        // Skip empty lines and comments
-        if (line.empty() || line[0] == '#') continue;
-        
-        interactions.push_back(parse_interaction_line(line));
+
+    auto parse_single_site_entry = [&](int op, int idx, const std::complex<double>& coupling) {
+        auto append_term = [&](int op_code, const std::complex<double>& coeff) {
+            if (std::abs(coeff) < 1e-14) {
+                return;
+            }
+            SpinInteraction inter{};
+            inter.site1 = idx;
+            inter.site2 = -1;
+            inter.op1 = op_code;
+            inter.op2 = -1;
+            inter.coupling = make_cuDoubleComplex(coeff.real(), coeff.imag());
+            new_terms.push_back(inter);
+        };
+
+        switch (op) {
+            case 0:
+            case 1:
+            case 2:
+                append_term(op, coupling);
+                break;
+            case 3: { // Sx = (S+ + S-) / 2
+                std::complex<double> half = coupling * 0.5;
+                append_term(0, half);
+                append_term(1, half);
+                break;
+            }
+            case 4: { // Sy = (S+ - S-) / (2i)
+                const std::complex<double> coef_plus(0.0, -0.5);
+                const std::complex<double> coef_minus(0.0, 0.5);
+                append_term(0, coupling * coef_plus);
+                append_term(1, coupling * coef_minus);
+                break;
+            }
+            default:
+                std::cerr << "Warning: Unsupported single-site operator " << op
+                          << " in " << filename << std::endl;
+                break;
+        }
+    };
+
+    // Attempt to parse standard Trans.dat format with header
+    file.clear();
+    file.seekg(0, std::ios::beg);
+
+    std::string header_line;
+    std::string count_line;
+    if (std::getline(file, header_line) && std::getline(file, count_line)) {
+        std::istringstream iss(count_line);
+        std::string label;
+        int num_lines = 0;
+        if (iss >> label >> num_lines) {
+            // Skip next 3 separator lines
+            for (int i = 0; i < 3 && std::getline(file, line); ++i) {}
+
+            int line_count = 0;
+            while (std::getline(file, line) && line_count < num_lines) {
+                if (line.empty() || line[0] == '#') {
+                    ++line_count;
+                    continue;
+                }
+
+                std::istringstream line_stream(line);
+                int op = 0;
+                int idx = 0;
+                double real_part = 0.0;
+                double imag_part = 0.0;
+
+                if (line_stream >> op >> idx >> real_part >> imag_part) {
+                    std::complex<double> coupling(real_part, imag_part);
+                    if (std::abs(coupling) >= 1e-14) {
+                        parse_single_site_entry(op, idx, coupling);
+                    }
+                }
+                ++line_count;
+            }
+        } else {
+            // Fallback: treat file as simple whitespace-delimited list without header
+            file.clear();
+            file.seekg(0, std::ios::beg);
+        }
     }
-    
-    num_interactions_ = interactions.size();
-    
-    // Allocate and copy to GPU
-    if (d_interactions_) {
-        cudaFree(d_interactions_);
+
+    if (new_terms.empty()) {
+        // Parse fallback simple format: op idx real imag
+        file.clear();
+        file.seekg(0, std::ios::beg);
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            std::istringstream line_stream(line);
+            int op = 0;
+            int idx = 0;
+            double real_part = 0.0;
+            double imag_part = 0.0;
+            if (!(line_stream >> op >> idx >> real_part >> imag_part)) {
+                continue;
+            }
+            std::complex<double> coupling(real_part, imag_part);
+            if (std::abs(coupling) < 1e-14) {
+                continue;
+            }
+            parse_single_site_entry(op, idx, coupling);
+        }
     }
-    
-    CUDA_CHECK(cudaMalloc(&d_interactions_, 
-                         num_interactions_ * sizeof(SpinInteraction)));
-    CUDA_CHECK(cudaMemcpy(d_interactions_, interactions.data(),
-                         num_interactions_ * sizeof(SpinInteraction),
-                         cudaMemcpyHostToDevice));
-    
-    std::cout << "Loaded " << num_interactions_ << " interactions from " 
-              << filename << std::endl;
+
+    host_interactions_.insert(host_interactions_.end(), new_terms.begin(), new_terms.end());
+    upload_interactions_to_device();
+
+    std::cout << "Loaded " << new_terms.size() << " single-site terms from "
+              << filename << " (total: " << host_interactions_.size() << ")" << std::endl;
 }
 
 void GPUHamiltonianOperator::load_from_interall_file(const std::string& filename) {
@@ -408,77 +498,99 @@ void GPUHamiltonianOperator::load_from_interall_file(const std::string& filename
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open file: " + filename);
     }
-    
-    std::vector<SpinInteraction> interactions;
+
+    std::vector<SpinInteraction> new_terms;
     std::string line;
-    
-    // Read header: first line with "==="
-    std::getline(file, line);
-    
-    // Second line: "num XXXX"
-    std::getline(file, line);
-    std::istringstream iss(line);
-    std::string num_str;
-    int num_lines;
-    iss >> num_str >> num_lines;
-    
-    // Skip next 3 lines (header separators)
-    for (int i = 0; i < 3; ++i) {
-        std::getline(file, line);
-    }
-    
-    // Read interaction lines
-    int line_count = 0;
-    while (std::getline(file, line) && line_count < num_lines) {
-        std::istringstream line_stream(line);
-        int op_i, indx_i, op_j, indx_j;
-        double E, F; // Real and imaginary parts
-        
-        if (!(line_stream >> op_i >> indx_i >> op_j >> indx_j >> E >> F)) {
-            continue;
+
+    auto append_interaction = [&](int op_i, int idx_i, int op_j, int idx_j,
+                                  const std::complex<double>& coupling) {
+        if (std::abs(coupling) < 1e-14) {
+            return;
         }
-        
-        // Skip zero or negligible interactions
-        if (std::abs(E) < 1e-14 && std::abs(F) < 1e-14) {
-            line_count++;
-            continue;
+        if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
+            std::cerr << "Warning: Unsupported operator combination (" << op_i << ", "
+                      << op_j << ") in " << filename << std::endl;
+            return;
         }
-        
-        // For now, only handle real couplings (F should be ~0)
-        if (std::abs(F) > 1e-10) {
-            std::cerr << "Warning: Skipping complex coupling at line " << line_count 
-                      << " (imaginary part not yet supported in GPU code)" << std::endl;
-            line_count++;
-            continue;
+        if (idx_i < 0 || idx_i >= num_sites_ || idx_j < 0 || idx_j >= num_sites_) {
+            std::cerr << "Warning: Site index out of bounds (" << idx_i << ", "
+                      << idx_j << ") in " << filename << std::endl;
+            return;
         }
-        
-        // Create SpinInteraction
-        SpinInteraction inter;
-        inter.site1 = indx_i;
-        inter.site2 = indx_j;
-        inter.op1 = op_i;  // 0=S+, 1=S-, 2=Sz
+        SpinInteraction inter{};
+        inter.site1 = idx_i;
+        inter.site2 = idx_j;
+        inter.op1 = op_i;
         inter.op2 = op_j;
-        inter.coupling = E;
-        
-        interactions.push_back(inter);
-        line_count++;
+        inter.coupling = make_cuDoubleComplex(coupling.real(), coupling.imag());
+        new_terms.push_back(inter);
+    };
+
+    file.clear();
+    file.seekg(0, std::ios::beg);
+
+    std::string header_line;
+    std::string count_line;
+    if (std::getline(file, header_line) && std::getline(file, count_line)) {
+        std::istringstream iss(count_line);
+        std::string label;
+        int num_lines = 0;
+        if (iss >> label >> num_lines) {
+            for (int i = 0; i < 3 && std::getline(file, line); ++i) {}
+
+            int line_count = 0;
+            while (std::getline(file, line) && line_count < num_lines) {
+                if (line.empty() || line[0] == '#') {
+                    ++line_count;
+                    continue;
+                }
+
+                std::istringstream line_stream(line);
+                int op_i = 0;
+                int idx_i = 0;
+                int op_j = 0;
+                int idx_j = 0;
+                double real_part = 0.0;
+                double imag_part = 0.0;
+                if (line_stream >> op_i >> idx_i >> op_j >> idx_j >> real_part >> imag_part) {
+                    append_interaction(op_i, idx_i, op_j, idx_j,
+                                       std::complex<double>(real_part, imag_part));
+                }
+                ++line_count;
+            }
+        } else {
+            file.clear();
+            file.seekg(0, std::ios::beg);
+        }
     }
-    
-    num_interactions_ = interactions.size();
-    
-    // Allocate and copy to GPU
-    if (d_interactions_) {
-        cudaFree(d_interactions_);
+
+    if (new_terms.empty()) {
+        file.clear();
+        file.seekg(0, std::ios::beg);
+        while (std::getline(file, line)) {
+            if (line.empty() || line[0] == '#') {
+                continue;
+            }
+            std::istringstream line_stream(line);
+            int op_i = 0;
+            int idx_i = 0;
+            int op_j = 0;
+            int idx_j = 0;
+            double real_part = 0.0;
+            double imag_part = 0.0;
+            if (!(line_stream >> op_i >> idx_i >> op_j >> idx_j >> real_part >> imag_part)) {
+                continue;
+            }
+            append_interaction(op_i, idx_i, op_j, idx_j,
+                               std::complex<double>(real_part, imag_part));
+        }
     }
-    
-    CUDA_CHECK(cudaMalloc(&d_interactions_, 
-                         num_interactions_ * sizeof(SpinInteraction)));
-    CUDA_CHECK(cudaMemcpy(d_interactions_, interactions.data(),
-                         num_interactions_ * sizeof(SpinInteraction),
-                         cudaMemcpyHostToDevice));
-    
-    std::cout << "Loaded " << num_interactions_ << " interactions from InterAll file " 
-              << filename << std::endl;
+
+    host_interactions_.insert(host_interactions_.end(), new_terms.begin(), new_terms.end());
+    upload_interactions_to_device();
+
+    std::cout << "Loaded " << new_terms.size() << " two-site interactions from "
+              << filename << " (total: " << host_interactions_.size() << ")" << std::endl;
 }
 
 void GPUHamiltonianOperator::apply(const GPUVector& psi_in, GPUVector& psi_out) {

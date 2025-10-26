@@ -15,9 +15,11 @@ namespace gpu {
  * Structure to store spin-spin interactions on GPU
  */
 struct SpinInteraction {
-    int site1, site2;      // Site indices
-    int op1, op2;          // Operator types: 0=S+, 1=S-, 2=Sz, 3=Sx, 4=Sy
-    double coupling;       // Coupling strength
+    int site1;                 // First site index
+    int site2;                 // Second site index (-1 for single-site terms)
+    int op1;                   // Operator on site1: 0=S+, 1=S-, 2=Sz
+    int op2;                   // Operator on site2 (same encoding, -1 for single-site)
+    cuDoubleComplex coupling;  // (Possibly complex) coupling strength
 };
 
 /**
@@ -36,6 +38,7 @@ protected:
     // Interaction data on GPU
     SpinInteraction* d_interactions_;
     int num_interactions_;
+    std::vector<SpinInteraction> host_interactions_;
     
     // cuBLAS handle
     cublasHandle_t cublas_handle_;
@@ -94,6 +97,11 @@ protected:
      * Format: "site1 op1 site2 op2 coupling"
      */
     SpinInteraction parse_interaction_line(const std::string& line);
+
+    /**
+     * Upload host interaction list to device memory
+     */
+    void upload_interactions_to_device();
 };
 
 /**

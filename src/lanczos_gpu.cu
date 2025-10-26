@@ -174,14 +174,15 @@ void lanczos_gpu(
     std::vector<double> beta;
     beta.push_back(0.0);
     
-    // Store Lanczos basis vectors if we need eigenvectors
+    // Store Lanczos basis vectors (always store for reorthogonalization)
     std::vector<GPUVector*> lanczos_basis;
-    if (compute_eigenvectors) {
-        lanczos_basis.push_back(v.clone().release());
-    }
+    lanczos_basis.push_back(v.clone().release());
     
     GPUTimer timer;
     timer.start();
+    
+    // Parameters for reorthogonalization
+    const int full_reorth_freq = 10;  // Full reorthogonalization every N iterations
     
     // Lanczos iteration
     for (int iter = 0; iter < max_iter; iter++) {
@@ -198,6 +199,15 @@ void lanczos_gpu(
         v_new.axpy(std::complex<double>(-alpha[iter], 0.0), v);
         if (iter > 0) {
             v_new.axpy(std::complex<double>(-beta[iter], 0.0), v_old);
+        }
+        
+        // Full reorthogonalization (periodically for numerical stability)
+        if ((iter + 1) % full_reorth_freq == 0 || iter < 2) {
+            // Orthogonalize against all previous Lanczos vectors
+            for (size_t j = 0; j < lanczos_basis.size(); j++) {
+                std::complex<double> overlap = lanczos_basis[j]->dot(v_new);
+                v_new.axpy(-overlap, *lanczos_basis[j]);
+            }
         }
         
         // beta[iter+1] = ||v_new||
@@ -217,9 +227,8 @@ void lanczos_gpu(
         v_old.copy_from(v);
         v.copy_from(v_new);
         
-        if (compute_eigenvectors) {
-            lanczos_basis.push_back(v.clone().release());
-        }
+        // Always store basis vector for reorthogonalization
+        lanczos_basis.push_back(v.clone().release());
         
         // Periodically check convergence
         if ((iter + 1) % 10 == 0 || iter == max_iter - 1) {
@@ -235,15 +244,22 @@ void lanczos_gpu(
             for (int i = 0; i < std::min(5, (int)current_eigenvalues.size()); i++) {
                 std::cout << std::setw(12) << std::setprecision(8) << current_eigenvalues[i] << " ";
             }
+            // Debug: print alpha and beta norms
+            if ((iter + 1) % 100 == 0) {
+                double alpha_max = 0, beta_max = 0;
+                for (const auto& a : alpha) alpha_max = std::max(alpha_max, std::abs(a));
+                for (const auto& b : beta) beta_max = std::max(beta_max, std::abs(b));
+                std::cout << " [α_max=" << alpha_max << ", β_max=" << beta_max << "]";
+            }
             std::cout << std::endl;
             
             // Check convergence of lowest eigenvalues
             if (iter > 20) {
                 bool converged = true;
-                if (iter >= 10) {
+                if (iter >= 10 && !eigenvalues.empty()) {
                     // Compare with previous iteration (stored eigenvalues)
                     for (int i = 0; i < std::min(num_eigs, (int)eigenvalues.size()); i++) {
-                        if (std::abs(current_eigenvalues[i] - eigenvalues[i]) > tol) {
+                        if (i < (int)current_eigenvalues.size() && std::abs(current_eigenvalues[i] - eigenvalues[i]) > tol) {
                             converged = false;
                             break;
                         }
@@ -321,14 +337,15 @@ void lanczos_fixed_sz_gpu(
     std::vector<double> beta;
     beta.push_back(0.0);
     
-    // Store Lanczos basis vectors if we need eigenvectors
+    // Store Lanczos basis vectors (always store for reorthogonalization)
     std::vector<GPUVector*> lanczos_basis;
-    if (compute_eigenvectors) {
-        lanczos_basis.push_back(v.clone().release());
-    }
+    lanczos_basis.push_back(v.clone().release());
     
     GPUTimer timer;
     timer.start();
+    
+    // Parameters for reorthogonalization
+    const int full_reorth_freq = 10;  // Full reorthogonalization every N iterations
     
     // Lanczos iteration
     for (int iter = 0; iter < max_iter; iter++) {
@@ -345,6 +362,15 @@ void lanczos_fixed_sz_gpu(
         v_new.axpy(std::complex<double>(-alpha[iter], 0.0), v);
         if (iter > 0) {
             v_new.axpy(std::complex<double>(-beta[iter], 0.0), v_old);
+        }
+        
+        // Full reorthogonalization (periodically for numerical stability)
+        if ((iter + 1) % full_reorth_freq == 0 || iter < 2) {
+            // Orthogonalize against all previous Lanczos vectors
+            for (size_t j = 0; j < lanczos_basis.size(); j++) {
+                std::complex<double> overlap = lanczos_basis[j]->dot(v_new);
+                v_new.axpy(-overlap, *lanczos_basis[j]);
+            }
         }
         
         // beta[iter+1] = ||v_new||
@@ -364,9 +390,8 @@ void lanczos_fixed_sz_gpu(
         v_old.copy_from(v);
         v.copy_from(v_new);
         
-        if (compute_eigenvectors) {
-            lanczos_basis.push_back(v.clone().release());
-        }
+        // Always store basis vector for reorthogonalization
+        lanczos_basis.push_back(v.clone().release());
         
         // Periodically check convergence
         if ((iter + 1) % 10 == 0 || iter == max_iter - 1) {
