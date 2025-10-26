@@ -63,9 +63,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Set CUDA standard if CUDA is enabled
 if(WITH_CUDA)
-    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 14)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_ARCHITECTURES "native")
+    
+    # Add CUDA compiler flags to handle C++ standard library compatibility
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
+    
+    # Separate host and device compilation to avoid C++17 issues
+    set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
 # Build type
@@ -267,28 +274,23 @@ set(HEADER_SOURCES
 
 # Add CUDA sources if available and CUDA is enabled
 if(WITH_CUDA)
-
-    # Check if the files exist and add them
-    foreach(cuda_file ${CUDA_SOURCES})
+    # Define GPU-specific sources (do NOT add to SOURCES - only for GPU targets)
+    set(GPU_SOURCES
+        ${SRC_DIR}/gpu_hamiltonian.cu
+        ${SRC_DIR}/lanczos_gpu.cu
+    )
+    
+    # Check if GPU source files exist
+    foreach(cuda_file ${GPU_SOURCES})
         if(EXISTS ${cuda_file})
-            list(APPEND SOURCES ${cuda_file})
-            message(STATUS "Adding CUDA source: ${cuda_file}")
+            message(STATUS "Found GPU source: ${cuda_file}")
         else()
-            message(WARNING "CUDA source file not found: ${cuda_file}")
+            message(WARNING "GPU source file not found: ${cuda_file}")
         endif()
     endforeach()
     
-    # Also search for any other .cu files
-    file(GLOB ADDITIONAL_CUDA_SOURCES ${SRC_DIR}/*.cu)
-    foreach(cuda_file ${ADDITIONAL_CUDA_SOURCES})
-        if(NOT ${cuda_file} IN_LIST SOURCES)
-            list(APPEND SOURCES ${cuda_file})
-            message(STATUS "Adding additional CUDA source: ${cuda_file}")
-        endif()
-    endforeach()
-    
-    # Create CUDA-only sources (without ed_run.cpp for tests)
-    set(CUDA_ONLY_SOURCES ${CUDA_SOURCES})
+    # Create GPU example file path
+    set(GPU_LANCZOS_EXAMPLE ${CMAKE_CURRENT_SOURCE_DIR}/examples/gpu_lanczos_example.cu)
 else()
     message(STATUS "CUDA disabled, skipping CUDA sources")
 endif()
@@ -302,6 +304,12 @@ add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/TPQ.cpp)
 
 # Add Fixed Sz example
 add_executable(FIXED_SZ_EXAMPLE examples/fixed_sz_example.cpp ${SRC_DIR}/lanczos.cpp)
+
+# Add GPU Lanczos example if CUDA is enabled
+if(WITH_CUDA AND EXISTS ${GPU_LANCZOS_EXAMPLE})
+    add_executable(GPU_LANCZOS_EXAMPLE ${GPU_LANCZOS_EXAMPLE} ${GPU_SOURCES})
+    message(STATUS "Adding GPU Lanczos example executable")
+endif()
 
 
 
@@ -369,6 +377,21 @@ if(TARGET FIXED_SZ_EXAMPLE)
         ${LAPACKE_LIBRARIES}
         ${EXTRA_LINALG_LIBRARIES}
         ${ARPACK_LIBRARY}
+    )
+endif()
+
+# Link libraries for GPU Lanczos example
+if(TARGET GPU_LANCZOS_EXAMPLE)
+    target_link_libraries(GPU_LANCZOS_EXAMPLE
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+        ${ARPACK_LIBRARY}
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
     )
 endif()
 
