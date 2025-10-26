@@ -9,6 +9,43 @@
 #include <map>
 
 
+// Function to read num_sites from positions.dat
+int read_num_sites_from_positions(const std::string& directory) {
+    std::string positions_file = directory + "/positions.dat";
+    std::ifstream file(positions_file);
+    
+    if (!file.is_open()) {
+        std::cerr << "Warning: Could not open positions.dat file at " << positions_file << std::endl;
+        std::cerr << "Please specify --num_sites manually" << std::endl;
+        return -1;
+    }
+    
+    int max_site_id = -1;
+    std::string line;
+    
+    // Skip header lines starting with '#'
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        
+        std::istringstream iss(line);
+        int site_id;
+        
+        // Read the site_id (first column)
+        if (iss >> site_id) {
+            max_site_id = std::max(max_site_id, site_id);
+        }
+    }
+    
+    file.close();
+    
+    if (max_site_id >= 0) {
+        // num_sites = max_site_id + 1 (since indexing starts at 0)
+        return max_site_id + 1;
+    }
+    
+    return -1;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
@@ -30,7 +67,7 @@ int main(int argc, char* argv[]) {
         std::cout << "  --temp_bins=<n>      : Number of temperature points (for thermo)" << std::endl;
         std::cout << "  --measure_spin       : Compute spin expectation values" << std::endl;
         std::cout << "  --samples=<n>        : Number of samples for TPQ method" << std::endl;
-        std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+        std::cout << "  --num_sites=<n>      : Number of sites (auto-detected from positions.dat if not specified)" << std::endl;
         std::cout << "  --spin_length=<value> : Spin length" << std::endl;
         std::cout << "  --calc_observables   : Calculate all custom operators" << std::endl;
         std::cout << "  --skip_ED            : Skip ED calculation" << std::endl;
@@ -85,7 +122,7 @@ int main(int argc, char* argv[]) {
 
     // Required parameters - must be specified by user
     params.num_sites = 0;
-    params.spin_length = 0.0;
+    params.spin_length = 0.5;
     
     // Logging configuration
     bool enable_logging = true;
@@ -120,7 +157,6 @@ int main(int argc, char* argv[]) {
         }
     };
     bool num_sites_specified = false;
-    bool spin_length_specified = false;
     bool full_spectrum = false;
     
     // Default method
@@ -256,7 +292,6 @@ int main(int argc, char* argv[]) {
         }
         else if (arg.find("--spin_length=") == 0) {
             params.spin_length = std::stod(arg.substr(14));
-            spin_length_specified = true;
         }
         else if (arg == "--calc_observables") {
             params.compute_eigenvectors = true;
@@ -329,28 +364,29 @@ int main(int argc, char* argv[]) {
         run_standard = true; // Default to running standard diagonalization
     }
     
+    // Auto-detect num_sites from positions.dat if not specified
+    if (!num_sites_specified) {
+        std::cout << "Auto-detecting num_sites from positions.dat..." << std::endl;
+        int detected_num_sites = read_num_sites_from_positions(directory);
+        
+        if (detected_num_sites > 0) {
+            params.num_sites = detected_num_sites;
+            std::cout << "Detected num_sites = " << params.num_sites << " from positions.dat" << std::endl;
+        } else {
+            std::cerr << "Error: Could not auto-detect num_sites from positions.dat" << std::endl;
+            std::cerr << "Please specify --num_sites parameter manually" << std::endl;
+            std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
+            std::cout << "Required options:" << std::endl;
+            std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
+            return 1;
+        }
+    }
+    
     if (full_spectrum) {
         params.num_eigenvalues = (1ULL << params.num_sites);
     }
 
     params.max_iterations = std::max(params.max_iterations, params.num_eigenvalues);
-
-    // Check if required parameters were provided
-    if (!num_sites_specified) {
-        std::cerr << "Error: --num_sites parameter is required" << std::endl;
-        std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
-        std::cout << "Required options:" << std::endl;
-        std::cout << "  --num_sites=<n>      : Number of sites in the system" << std::endl;
-        return 1;
-    }
-
-    if (!spin_length_specified) {
-        std::cerr << "Error: --spin_length parameter is required" << std::endl;
-        std::cout << "Usage: " << argv[0] << " <directory> [options]" << std::endl;
-        std::cout << "Required options:" << std::endl;
-        std::cout << "  --spin_length=<value> : Spin length" << std::endl;
-        return 1;
-    }
 
     
     // Create output directories

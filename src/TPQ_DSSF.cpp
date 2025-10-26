@@ -15,11 +15,11 @@
 #include "construct_ham.h"
 #include "TPQ.h"
 #include "observables.h"
+#include <mpi.h>
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;
 namespace fs = std::filesystem;
-#include <mpi.h>
 
 
 void printSpinConfiguration(ComplexVector &state, int num_sites, float spin_length, const std::string &dir) {

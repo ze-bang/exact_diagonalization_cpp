@@ -242,6 +242,11 @@ endif()
 # Source files
 set(SOURCES
     ${SRC_DIR}/ed_run.cpp
+    ${SRC_DIR}/arpack.cpp
+    ${SRC_DIR}/observables.cpp
+    ${SRC_DIR}/lanczos.cpp
+    ${SRC_DIR}/CG.cpp
+    ${SRC_DIR}/TPQ.cpp
 )
 
 # Header-only sources that should be included in compilation
@@ -281,7 +286,7 @@ endif()
 add_executable(ED ${SOURCES})
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
-add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp)
+add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/TPQ.cpp)
 
 
 

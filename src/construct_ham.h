@@ -15,257 +15,22 @@
 #include <queue>
 #include <map>
 #include <tuple>
+#include <unordered_map>
 
-// Define complex number type and matrix type for convenience
+// Define complex number type for convenience
 using Complex = std::complex<double>;
-using Matrix = std::vector<std::vector<Complex>>;
 
-
-/**
- * MinimalGeneratorFinder class to find the minimal set of generators for a group of automorphisms
- */
-class MinimalGeneratorFinder {
-public:
-    // Compose two permutations: result(i) = perm1(perm2[i])
-    std::vector<int> composePermutations(
-        const std::vector<int>& perm1, 
-        const std::vector<int>& perm2) {
-        std::vector<int> result(perm1.size());
-        for (size_t i = 0; i < perm1.size(); ++i) {
-            result[i] = perm1[perm2[i]];
-        }
-        return result;
-    }
-    
-    // Find the inverse of a permutation
-    std::vector<int> inversePermutation(const std::vector<int>& perm) {
-        std::vector<int> inverse(perm.size());
-        for (size_t i = 0; i < perm.size(); ++i) {
-            inverse[perm[i]] = i;
-        }
-        return inverse;
-    }
-    
-    // Find the order of a permutation
-    int findOrder(const std::vector<int>& perm) {
-        // Create identity permutation
-        std::vector<int> identity(perm.size());
-        for (size_t i = 0; i < perm.size(); ++i) {
-            identity[i] = i;
-        }
-        
-        // Create a working copy of the permutation
-        std::vector<int> current = perm;
-        int order = 1;
-        
-        // Keep composing with itself until we get the identity
-        while (current != identity) {
-            current = composePermutations(current, perm);
-            order++;
-        }
-        
-        return order;
-    }
-    
-    // Find minimal generators and their orders
-    std::pair<std::vector<std::vector<int>>, std::vector<int>> findMinimalGenerators(
-        const std::vector<std::vector<int>>& automorphisms) {
-        if (automorphisms.empty()) {
-            return {std::vector<std::vector<int>>(), std::vector<int>()};
-        }
-        
-        // Create identity permutation
-        std::vector<int> identity(automorphisms[0].size());
-        for (size_t i = 0; i < identity.size(); ++i) {
-            identity[i] = i;
-        }
-        
-        // Make a copy and ensure the identity is included
-        std::set<std::vector<int>> unique_autos(automorphisms.begin(), automorphisms.end());
-        unique_autos.insert(identity);
-        
-        // Convert back to vector and sort for deterministic results
-        std::vector<std::vector<int>> sorted_autos(unique_autos.begin(), unique_autos.end());
-        std::sort(sorted_autos.begin(), sorted_autos.end());
-        
-        // Store the generators and their orders
-        std::vector<std::vector<int>> generators;
-        std::vector<int> orders;
-        
-        // Set of all elements in the generated subgroup
-        std::set<std::vector<int>> generated_elements;
-        generated_elements.insert(identity);
-        
-        // Try each automorphism as a potential generator
-        for (const auto& automorphism : sorted_autos) {
-            // Skip the identity
-            if (automorphism == identity) continue;
-            
-            // Skip if we can already generate this automorphism
-            if (generated_elements.find(automorphism) != generated_elements.end()) continue;
-            
-            // Add this automorphism as a generator
-            generators.push_back(automorphism);
-            int order = findOrder(automorphism);
-            orders.push_back(order);
-            
-            // Generate all elements in the subgroup
-            generateSubgroup(generators, generated_elements);
-            
-            // If we've generated the entire group, we're done
-            if (generated_elements.size() == unique_autos.size()) {
-                break;
-            }
-        }
-        
-        return {generators, orders};
-    }
-    
-private:
-    // Helper method to generate the subgroup from a set of generators
-    void generateSubgroup(
-        const std::vector<std::vector<int>>& generators,
-        std::set<std::vector<int>>& generated_elements) {
-        
-        // Start with the identity
-        std::vector<int> identity(generators[0].size());
-        for (size_t i = 0; i < identity.size(); ++i) {
-            identity[i] = i;
-        }
-        
-        generated_elements.clear();
-        generated_elements.insert(identity);
-        
-        // Keep adding new elements until no more can be added
-        size_t old_size = 0;
-        while (old_size < generated_elements.size()) {
-            old_size = generated_elements.size();
-            
-            // Try composing each element with each generator
-            std::vector<std::vector<int>> existing(generated_elements.begin(), generated_elements.end());
-            for (const auto& elem : existing) {
-                for (const auto& gen : generators) {
-                    // Compose in both orders
-                    std::vector<int> composed1 = composePermutations(elem, gen);
-                    std::vector<int> composed2 = composePermutations(gen, elem);
-                    
-                    generated_elements.insert(composed1);
-                    generated_elements.insert(composed2);
-                }
-            }
-        }
-    }
-};
-
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
 /**
- * Represents automorphisms as powers of generators
+ * Apply a permutation to a basis state (represented as an integer)
+ * @param basis The basis state as a bit string
+ * @param perm The permutation to apply
+ * @return The permuted basis state
  */
-class AutomorphismPowerRepresentation {
-public:
-    // Represent an automorphism as powers of generators
-    static std::vector<int> representAsGeneratorPowers(
-        const std::vector<std::vector<int>>& generators,
-        const std::vector<int>& automorphism,
-        int maxPower = 5) {
-        
-        if (generators.empty()) {
-            return std::vector<int>();
-        }
-        
-        int numGenerators = generators.size();
-        int permSize = automorphism.size();
-        
-        // If the automorphism is the identity, return all zeros
-        bool isIdentity = true;
-        for (size_t i = 0; i < permSize; i++) {
-            if (automorphism[i] != i) {
-                isIdentity = false;
-                break;
-            }
-        }
-        
-        if (isIdentity) {
-            return std::vector<int>(numGenerators, 0);
-        }
-        
-        // Using BFS to find the representation
-        struct State {
-            std::vector<int> powers;
-            std::vector<int> currentPerm;
-        };
-        
-        std::queue<State> queue;
-        std::set<std::vector<int>> visited;
-        
-        // Start with identity permutation
-        std::vector<int> identity(permSize);
-        for (size_t i = 0; i < permSize; i++) {
-            identity[i] = i;
-        }
-        
-        State initialState;
-        initialState.powers = std::vector<int>(numGenerators, 0);
-        initialState.currentPerm = identity;
-        queue.push(initialState);
-        visited.insert(identity);
-        
-        while (!queue.empty()) {
-            State current = queue.front();
-            queue.pop();
-            
-            // Try applying each generator
-            for (int i = 0; i < numGenerators; i++) {
-                // Try both the generator and its inverse
-                for (int powerDelta : {1, -1}) {
-                    State next = current;
-                    next.powers[i] += powerDelta;
-                    
-                    // if (std::abs(next.powers[i]) > maxPower) {
-                    //     continue;
-                    // }
-                    
-                    // Apply the generator or its inverse
-                    std::vector<int> genToApply = powerDelta == 1 ? 
-                        generators[i] : MinimalGeneratorFinder().inversePermutation(generators[i]);
-                    
-                    next.currentPerm = MinimalGeneratorFinder().composePermutations(genToApply, next.currentPerm);
-                    
-                    if (next.currentPerm == automorphism) {
-                        return next.powers;
-                    }
-                    
-                    if (visited.find(next.currentPerm) == visited.end()) {
-                        visited.insert(next.currentPerm);
-                        queue.push(next);
-                    }
-                }
-            }
-        }
-        
-        return std::vector<int>();
-    }
-
-    // Represent all automorphisms as powers of generators
-    static std::vector<std::vector<int>> representAllAsGeneratorPowers(
-        const std::vector<std::vector<int>>& generators,
-        const std::vector<std::vector<int>>& automorphisms,
-        int maxPower = 5) {
-        
-        std::vector<std::vector<int>> results;
-        results.reserve(automorphisms.size());
-        
-        for (const auto& automorphism : automorphisms) {
-            std::vector<int> powers = representAsGeneratorPowers(generators, automorphism, maxPower);
-            results.push_back(powers);
-        }
-        
-        return results;
-    }
-};
-
-
-int applyPermutation(int basis, const std::vector<int>& perm) {
+inline int applyPermutation(int basis, const std::vector<int>& perm) {
     int result = 0;
     for (size_t i = 0; i < perm.size(); ++i) {
         result |= ((basis >> perm[i]) & 1) << i;
@@ -273,58 +38,384 @@ int applyPermutation(int basis, const std::vector<int>& perm) {
     return result;
 }
 
+// ============================================================================
+// Symmetry Data Structures
+// ============================================================================
 
 /**
- * Operator class that can represent arbitrary quantum operators
- * through bit flip operations and scalar multiplications
+ * Structure to hold symmetry sector metadata
+ */
+struct SectorMetadata {
+    int sector_id;
+    std::vector<int> quantum_numbers;
+    std::vector<Complex> phase_factors;
+    int dimension;  // Computed during basis generation
+    
+    SectorMetadata() : sector_id(0), dimension(0) {}
+};
+
+/**
+ * Structure to hold complete symmetry group information
+ * Loads data from JSON files produced by automorphism_finder.py
+ */
+struct SymmetryGroupInfo {
+    int num_generators;
+    std::vector<int> generator_orders;
+    std::vector<std::vector<int>> generators;
+    std::vector<std::vector<int>> max_clique;
+    std::vector<std::vector<int>> power_representation;
+    std::vector<SectorMetadata> sectors;
+    
+    /**
+     * Load all symmetry information from directory
+     * @param dir Directory containing automorphism_results/
+     */
+    void loadFromDirectory(const std::string& dir) {
+        std::string auto_dir = dir + "/automorphism_results";
+        loadMaxClique(auto_dir);
+        loadMinimalGenerators(auto_dir);
+        loadSectorMetadata(auto_dir);
+        computePowerRepresentation();
+        
+        std::cout << "Loaded symmetry group information:" << std::endl;
+        std::cout << "  Number of generators: " << num_generators << std::endl;
+        std::cout << "  Generator orders: ";
+        for (int order : generator_orders) std::cout << order << " ";
+        std::cout << std::endl;
+        std::cout << "  Number of symmetry sectors: " << sectors.size() << std::endl;
+        std::cout << "  Group size: " << max_clique.size() << std::endl;
+    }
+    
+private:
+    void loadMaxClique(const std::string& auto_dir) {
+        std::string filepath = auto_dir + "/max_clique.json";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open max_clique.json: " + filepath);
+        }
+        
+        std::string json((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+        max_clique = parseJsonIntArrays(json);
+        
+        std::cout << "Loaded max clique with " << max_clique.size() << " automorphisms" << std::endl;
+    }
+    
+    void loadMinimalGenerators(const std::string& auto_dir) {
+        std::string filepath = auto_dir + "/minimal_generators.json";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open minimal_generators.json: " + filepath);
+        }
+        
+        std::string json((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+        
+        // Parse JSON manually (simple parser for our specific format)
+        generators.clear();
+        generator_orders.clear();
+        
+        size_t pos = 0;
+        while ((pos = json.find("\"permutation\":", pos)) != std::string::npos) {
+            pos += 14;
+            size_t start = json.find('[', pos);
+            size_t end = json.find(']', start);
+            if (start == std::string::npos || end == std::string::npos) break;
+            
+            std::string perm_str = json.substr(start + 1, end - start - 1);
+            std::vector<int> perm;
+            std::istringstream iss(perm_str);
+            std::string num;
+            while (std::getline(iss, num, ',')) {
+                num.erase(0, num.find_first_not_of(" \t\n\r"));
+                num.erase(num.find_last_not_of(" \t\n\r") + 1);
+                if (!num.empty()) perm.push_back(std::stoi(num));
+            }
+            generators.push_back(perm);
+            
+            // Find order
+            size_t order_pos = json.find("\"order\":", pos);
+            if (order_pos != std::string::npos && order_pos < json.find('{', pos)) {
+                order_pos += 8;
+                size_t comma_pos = json.find_first_of(",}", order_pos);
+                std::string order_str = json.substr(order_pos, comma_pos - order_pos);
+                order_str.erase(0, order_str.find_first_not_of(" \t\n\r"));
+                order_str.erase(order_str.find_last_not_of(" \t\n\r") + 1);
+                generator_orders.push_back(std::stoi(order_str));
+            }
+            
+            pos = end;
+        }
+        
+        num_generators = generators.size();
+        std::cout << "Loaded " << num_generators << " minimal generators" << std::endl;
+    }
+    
+    void loadSectorMetadata(const std::string& auto_dir) {
+        std::string filepath = auto_dir + "/sector_metadata.json";
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            throw std::runtime_error("Could not open sector_metadata.json: " + filepath);
+        }
+        
+        std::string json((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+        
+        sectors.clear();
+        
+        // Parse sectors array
+        size_t sectors_pos = json.find("\"sectors\":");
+        if (sectors_pos == std::string::npos) {
+            throw std::runtime_error("Could not find 'sectors' in metadata");
+        }
+        
+        size_t pos = json.find('[', sectors_pos);
+        int depth = 0;
+        
+        while (pos < json.size()) {
+            if (json[pos] == '{') {
+                // Parse one sector
+                SectorMetadata sector;
+                
+                // Find sector_id
+                size_t id_pos = json.find("\"sector_id\":", pos);
+                if (id_pos != std::string::npos) {
+                    id_pos += 12;
+                    size_t comma = json.find_first_of(",}", id_pos);
+                    std::string id_str = json.substr(id_pos, comma - id_pos);
+                    id_str.erase(0, id_str.find_first_not_of(" \t\n\r"));
+                    sector.sector_id = std::stoi(id_str);
+                }
+                
+                // Find quantum_numbers array
+                size_t qn_pos = json.find("\"quantum_numbers\":", pos);
+                if (qn_pos != std::string::npos) {
+                    size_t qn_start = json.find('[', qn_pos);
+                    size_t qn_end = json.find(']', qn_start);
+                    std::string qn_str = json.substr(qn_start + 1, qn_end - qn_start - 1);
+                    
+                    std::istringstream iss(qn_str);
+                    std::string num;
+                    while (std::getline(iss, num, ',')) {
+                        num.erase(0, num.find_first_not_of(" \t\n\r"));
+                        num.erase(num.find_last_not_of(" \t\n\r") + 1);
+                        if (!num.empty()) sector.quantum_numbers.push_back(std::stoi(num));
+                    }
+                }
+                
+                // Parse phase_factors
+                size_t pf_pos = json.find("\"phase_factors\":", pos);
+                if (pf_pos != std::string::npos) {
+                    size_t pf_start = json.find('[', pf_pos);
+                    size_t pf_end = json.find(']', pf_start);
+                    
+                    // Count phase factors
+                    std::string pf_section = json.substr(pf_start, pf_end - pf_start);
+                    size_t temp_pos = 0;
+                    while ((temp_pos = pf_section.find('{', temp_pos)) != std::string::npos) {
+                        size_t real_pos = pf_section.find("\"real\":", temp_pos);
+                        size_t imag_pos = pf_section.find("\"imag\":", temp_pos);
+                        
+                        if (real_pos != std::string::npos && imag_pos != std::string::npos) {
+                            real_pos += 7;
+                            size_t real_end = pf_section.find_first_of(",}", real_pos);
+                            std::string real_str = pf_section.substr(real_pos, real_end - real_pos);
+                            real_str.erase(0, real_str.find_first_not_of(" \t\n\r"));
+                            real_str.erase(real_str.find_last_not_of(" \t\n\r") + 1);
+                            
+                            imag_pos += 7;
+                            size_t imag_end = pf_section.find_first_of(",}", imag_pos);
+                            std::string imag_str = pf_section.substr(imag_pos, imag_end - imag_pos);
+                            imag_str.erase(0, imag_str.find_first_not_of(" \t\n\r"));
+                            imag_str.erase(imag_str.find_last_not_of(" \t\n\r") + 1);
+                            
+                            Complex phase(std::stod(real_str), std::stod(imag_str));
+                            sector.phase_factors.push_back(phase);
+                        }
+                        
+                        temp_pos = pf_section.find('}', temp_pos) + 1;
+                    }
+                }
+                
+                sector.dimension = 0;  // Will be set during basis generation
+                sectors.push_back(sector);
+                
+                pos = json.find('}', pos) + 1;
+            } else {
+                pos++;
+            }
+            
+            // Stop when we reach the end of sectors array
+            if (json[pos] == ']' && depth == 0) break;
+        }
+        
+        std::cout << "Loaded metadata for " << sectors.size() << " symmetry sectors" << std::endl;
+    }
+    
+    void computePowerRepresentation() {
+        power_representation.clear();
+        
+        // Use BFS to represent each automorphism as powers of generators
+        for (const auto& automorphism : max_clique) {
+            std::vector<int> powers = representAsGeneratorPowers(automorphism);
+            power_representation.push_back(powers);
+        }
+        
+        std::cout << "Computed power representation for all automorphisms" << std::endl;
+    }
+    
+    std::vector<int> representAsGeneratorPowers(const std::vector<int>& automorphism) {
+        if (generators.empty()) return std::vector<int>();
+        
+        int n = automorphism.size();
+        std::vector<int> identity(n);
+        for (int i = 0; i < n; ++i) identity[i] = i;
+        
+        // Check if it's identity
+        if (automorphism == identity) {
+            return std::vector<int>(generators.size(), 0);
+        }
+        
+        // BFS to find representation
+        struct State {
+            std::vector<int> powers;
+            std::vector<int> perm;
+        };
+        
+        std::queue<State> queue;
+        std::set<std::vector<int>> visited;
+        
+        State init;
+        init.powers = std::vector<int>(generators.size(), 0);
+        init.perm = identity;
+        queue.push(init);
+        visited.insert(identity);
+        
+        while (!queue.empty()) {
+            State curr = queue.front();
+            queue.pop();
+            
+            for (size_t g = 0; g < generators.size(); ++g) {
+                std::vector<int> new_perm(n);
+                for (int i = 0; i < n; ++i) {
+                    new_perm[i] = curr.perm[generators[g][i]];
+                }
+                
+                if (new_perm == automorphism) {
+                    std::vector<int> result = curr.powers;
+                    result[g]++;
+                    return result;
+                }
+                
+                if (visited.find(new_perm) == visited.end()) {
+                    visited.insert(new_perm);
+                    State next;
+                    next.perm = new_perm;
+                    next.powers = curr.powers;
+                    next.powers[g]++;
+                    
+                    // Only explore if powers are reasonable
+                    bool valid = true;
+                    for (size_t i = 0; i < generators.size(); ++i) {
+                        if (next.powers[i] >= generator_orders[i]) {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    
+                    if (valid) queue.push(next);
+                }
+            }
+        }
+        
+        return std::vector<int>();  // Not found
+    }
+    
+    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
+        std::vector<std::vector<int>> result;
+        size_t pos = json.find('[');
+        if (pos == std::string::npos) return result;
+        ++pos;
+        
+        while (pos < json.size()) {
+            while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == '\t')) ++pos;
+            if (pos >= json.size() || json[pos] == ']') break;
+            
+            if (json[pos] == '[') {
+                size_t end = json.find(']', pos);
+                if (end == std::string::npos) break;
+                
+                std::string array_str = json.substr(pos + 1, end - pos - 1);
+                std::vector<int> array;
+                std::istringstream iss(array_str);
+                std::string num;
+                
+                while (std::getline(iss, num, ',')) {
+                    num.erase(0, num.find_first_not_of(" \t\n\r"));
+                    num.erase(num.find_last_not_of(" \t\n\r") + 1);
+                    if (!num.empty()) array.push_back(std::stoi(num));
+                }
+                
+                result.push_back(array);
+                pos = end + 1;
+            } else {
+                ++pos;
+            }
+        }
+        
+        return result;
+    }
+};
+
+// ============================================================================
+// Operator Class
+// ============================================================================
+
+/**
+ * Operator class that represents quantum operators through bit flip operations
+ * Supports symmetry-adapted basis and block diagonalization
  */
 class Operator {
 public:
-    // ============================================================================
-    // Type Definitions
-    // ============================================================================
     using TransformFunction = std::function<std::pair<int, Complex>(int)>;
-
-    // ============================================================================
-    // Public Member Variables
-    // ============================================================================
+    
+    // Public member variables
     std::vector<int> symmetrized_block_ham_sizes;
-
-    // ============================================================================
-    // Constructors and Assignment
-    // ============================================================================
-    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l) {}
-
+    SymmetryGroupInfo symmetry_info;
+    
+    // Constructor
+    Operator(int n_bits, float spin_l) : n_bits_(n_bits), spin_l_(spin_l), matrixBuilt_(false) {}
+    
+    // Assignment operator
     Operator& operator=(const Operator& other) {
         if (this != &other) {
             n_bits_ = other.n_bits_;
+            spin_l_ = other.spin_l_;
             transforms_ = other.transforms_;
             sparseMatrix_ = other.sparseMatrix_;
             matrixBuilt_ = other.matrixBuilt_;
             symmetrized_block_ham_sizes = other.symmetrized_block_ham_sizes;
+            symmetry_info = other.symmetry_info;
         }
         return *this;
     }
-
-    // ============================================================================
+    
+    // ========================================================================
     // Core Operator Functions
-    // ============================================================================
+    // ========================================================================
     
     void addTransform(TransformFunction transform) {
         transforms_.push_back(transform);
-        matrixBuilt_ = false;  // Matrix needs to be rebuilt
+        matrixBuilt_ = false;
     }
-
+    
     std::vector<Complex> apply(const std::vector<Complex>& vec) const {
         int dim = 1 << n_bits_;
-        
         if (vec.size() != static_cast<size_t>(dim)) {
-            throw std::invalid_argument("Input vector dimension does not match operator dimension");
+            throw std::invalid_argument("Input vector size mismatch");
         }
         
         buildSparseMatrix();
-        
-        // Convert to Eigen and multiply
         Eigen::VectorXcd eigenVec(dim);
         for (int i = 0; i < dim; ++i) {
             eigenVec(i) = vec[i];
@@ -332,81 +423,25 @@ public:
         
         Eigen::VectorXcd result = sparseMatrix_ * eigenVec;
         
-        // Convert back
         std::vector<Complex> resultVec(dim);
         for (int i = 0; i < dim; ++i) {
             resultVec[i] = result(i);
         }
-        
         return resultVec;
     }
-
+    
     void apply(const Complex* in, Complex* out, size_t size) const {
         int dim = 1 << n_bits_;
-        
         if (size != static_cast<size_t>(dim)) {
-            throw std::invalid_argument("Input/output vector size does not match operator dimension");
+            throw std::invalid_argument("Input/output vector size mismatch");
         }
         
         buildSparseMatrix();
-        
-        // Use Eigen maps to avoid copying
         Eigen::Map<const Eigen::VectorXcd> eigenIn(in, dim);
         Eigen::Map<Eigen::VectorXcd> eigenOut(out, dim);
-        
         eigenOut = sparseMatrix_ * eigenIn;
     }
-
-    // ============================================================================
-    // Matrix Generation Functions
-    // ============================================================================
     
-    Matrix returnSymmetrizedMatrix(const std::string& dir) {
-        int dim = 1 << n_bits_;
-        Matrix matrix(dim, std::vector<Complex>(dim, 0.0));
-        
-        std::vector<Complex> temp_vec_i, temp_vec_j, temp_vec_i_F;
-        
-        for (int i = 0; i < dim; ++i) {
-            temp_vec_i = read_sym_basis(i, dir);
-            temp_vec_i_F = apply(temp_vec_i);
-            
-            for (int j = 0; j < dim; ++j) {
-                temp_vec_j = read_sym_basis(j, dir);
-                
-                Complex res(0.0, 0.0);
-                for (int k = 0; k < dim; ++k) {
-                    res += temp_vec_i_F[k] * std::conj(temp_vec_j[k]);
-                }
-                matrix[i][j] = res;
-                
-                temp_vec_j.clear();
-                temp_vec_j.shrink_to_fit();
-            }
-            
-            temp_vec_i.clear();
-            temp_vec_i.shrink_to_fit();
-            temp_vec_i_F.clear();
-            temp_vec_i_F.shrink_to_fit();
-        }
-        return matrix;
-    }
-
-    Matrix returnMatrix() {
-        int dim = 1 << n_bits_;
-        Matrix matrix(dim, std::vector<Complex>(dim, 0.0));
-        
-        for (int i = 0; i < dim; ++i) {
-            for (const auto& transform : transforms_) {
-                auto [j, scalar] = transform(i);
-                if (j >= 0 && j < dim) {
-                    matrix[j][i] += scalar;
-                }
-            }
-        }
-        return matrix;
-    }
-
     void buildSparseMatrix() const {
         if (matrixBuilt_) return;
         
@@ -414,7 +449,6 @@ public:
         sparseMatrix_.resize(dim, dim);
         
         std::vector<Eigen::Triplet<Complex>> triplets;
-        
         for (int i = 0; i < dim; ++i) {
             for (const auto& transform : transforms_) {
                 auto [j, scalar] = transform(i);
@@ -427,15 +461,15 @@ public:
         sparseMatrix_.setFromTriplets(triplets.begin(), triplets.end());
         matrixBuilt_ = true;
     }
-
+    
     Eigen::SparseMatrix<Complex> getSparseMatrix() const {
         buildSparseMatrix();
         return sparseMatrix_;
     }
-
-    // ============================================================================
-    // File I/O Functions for Loading Operators
-    // ============================================================================
+    
+    // ========================================================================
+    // File I/O for Hamiltonian Parameters
+    // ========================================================================
     
     void loadFromFile(const std::string& filename) {
         std::ifstream file(filename);
@@ -443,37 +477,27 @@ public:
             throw std::runtime_error("Could not open file: " + filename);
         }
         
-        std::cout << "Reading file: " << filename << std::endl;
-        
-        // Parse header
         std::string line;
-        std::getline(file, line); // Skip header
-        
+        std::getline(file, line);
         std::getline(file, line);
         std::istringstream iss(line);
         int numLines;
         std::string m;
         iss >> m >> numLines;
         
-        // Skip separator lines
-        for (int i = 0; i < 3; ++i) {
-            std::getline(file, line);
-        }
+        for (int i = 0; i < 3; ++i) std::getline(file, line);
         
-        // Process transform data
         int lineCount = 0;
         while (std::getline(file, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
             int Op, indx;
             double E, F;
             
-            if (!(lineStream >> Op >> indx >> E >> F)) {
-                continue;
-            }
+            if (!(lineStream >> Op >> indx >> E >> F)) continue;
             
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 if (Op == 2) {
-                    return {basis, Complex(E,F) * double(spin_l_) * pow(-1,(basis >> indx) & 1)};
+                    return {basis, Complex(E, F) * double(spin_l_) * pow(-1, (basis >> indx) & 1)};
                 } else {
                     if (((basis >> indx) & 1) != Op) {
                         int flipped_basis = basis ^ (1 << indx);
@@ -485,333 +509,289 @@ public:
             
             lineCount++;
         }
-        
-        std::cout << "File read complete." << std::endl;
     }
-
+    
     void loadFromInterAllFile(const std::string& filename) {
         std::ifstream file(filename);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open file: " + filename);
         }
         
-        std::cout << "Reading file: " << filename << std::endl;
-        
-        // Parse header
         std::string line;
         std::getline(file, line);
-        
         std::getline(file, line);
         std::istringstream iss(line);
         int numLines;
         std::string m;
         iss >> m >> numLines;
         
-        // Skip separator lines
-        for (int i = 0; i < 3; ++i) {
-            std::getline(file, line);
-        }
+        for (int i = 0; i < 3; ++i) std::getline(file, line);
         
-        // Process two-site transform data
         int lineCount = 0;
         while (std::getline(file, line) && lineCount < numLines) {
             std::istringstream lineStream(line);
-            int Op1, indx1, Op2, indx2;
+            int Op_i, indx_i, Op_j, indx_j;
             double E, F;
             
-            if (!(lineStream >> Op1 >> indx1 >> Op2 >> indx2 >> E >> F)) {
-                continue;
-            }
+            if (!(lineStream >> Op_i >> indx_i >> Op_j >> indx_j >> E >> F)) continue;
             
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (Op1 == 2 && Op2 == 2) {
-                    // Both are Z operators
-                    int bit1 = (basis >> indx1) & 1;
-                    int bit2 = (basis >> indx2) & 1;
-                    return {basis, Complex(E, F) * double(spin_l_ * spin_l_) * 
-                            pow(-1, bit1) * pow(-1, bit2)};
-                } 
-                else if (Op1 == 2) {
-                    // First is Z, second is ladder
-                    int bit1 = (basis >> indx1) & 1;
-                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                    
-                    if (bit2_matches) {
-                        int flipped_basis = basis ^ (1 << indx2);
-                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit1)};
+                int bit_i = (basis >> indx_i) & 1;
+                int bit_j = (basis >> indx_j) & 1;
+                
+                Complex factor(E, F);
+                
+                if (Op_i == 2 && Op_j == 2) {
+                    double sign_i = pow(-1, bit_i);
+                    double sign_j = pow(-1, bit_j);
+                    return {basis, factor * double(spin_l_) * double(spin_l_) * sign_i * sign_j};
+                }
+                
+                int new_basis = basis;
+                bool valid = true;
+                
+                if (Op_i != 2) {
+                    if (bit_i != Op_i) {
+                        new_basis ^= (1 << indx_i);
+                    } else {
+                        valid = false;
                     }
-                } 
-                else if (Op2 == 2) {
-                    // First is ladder, second is Z
-                    int bit2 = (basis >> indx2) & 1;
-                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                    
-                    if (bit1_matches) {
-                        int flipped_basis = basis ^ (1 << indx1);
-                        return {flipped_basis, Complex(E, F) * double(spin_l_) * pow(-1, bit2)};
+                } else {
+                    factor *= double(spin_l_) * pow(-1, bit_i);
+                }
+                
+                if (valid && Op_j != 2) {
+                    int new_bit_j = (new_basis >> indx_j) & 1;
+                    if (new_bit_j != Op_j) {
+                        new_basis ^= (1 << indx_j);
+                    } else {
+                        valid = false;
                     }
-                } 
-                else {
-                    // Both are ladder operators
-                    bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                    bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                    
-                    if (bit1_matches && bit2_matches) {
-                        int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
-                        return {flipped_basis, Complex(E, F)};
-                    }
+                } else if (valid) {
+                    int new_bit_j = (new_basis >> indx_j) & 1;
+                    factor *= double(spin_l_) * pow(-1, new_bit_j);
+                }
+                
+                if (valid) {
+                    return {new_basis, factor};
                 }
                 return {basis, Complex(0.0, 0.0)};
             });
             
             lineCount++;
         }
-        
-        std::cout << "File read complete." << std::endl;
     }
-
+    
     void loadonebodycorrelation(const int Op, const int indx) {
         addTransform([=](int basis) -> std::pair<int, Complex> {
             if (Op == 2) {
-                return {basis, Complex(1.0,0.0) * double(spin_l_) * pow(-1,(basis >> indx) & 1)};
+                return {basis, Complex(double(spin_l_) * pow(-1, (basis >> indx) & 1), 0.0)};
             } else {
                 if (((basis >> indx) & 1) != Op) {
                     int flipped_basis = basis ^ (1 << indx);
-                    return {flipped_basis, Complex(1.0 * double(spin_l_ * 2), 0.0)};
+                    return {flipped_basis, Complex(1.0, 0.0)};
                 }
             }
             return {basis, Complex(0.0, 0.0)};
         });
     }
-
+    
     void loadtwobodycorrelation(const int Op1, const int indx1, const int Op2, const int indx2) {
         addTransform([=](int basis) -> std::pair<int, Complex> {
+            int bit1 = (basis >> indx1) & 1;
+            int bit2 = (basis >> indx2) & 1;
+            
+            Complex factor(1.0, 0.0);
+            
             if (Op1 == 2 && Op2 == 2) {
-                int bit1 = (basis >> indx1) & 1;
-                int bit2 = (basis >> indx2) & 1;
-                return {basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_) * 
-                        pow(-1, bit1) * pow(-1, bit2)};
-            } 
-            else if (Op1 == 2) {
-                int bit1 = (basis >> indx1) & 1;
-                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                
-                if (bit2_matches) {
-                    int flipped_basis = basis ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_ * 2) * 
-                            pow(-1, bit1)};
-                }
-            } 
-            else if (Op2 == 2) {
-                int bit2 = (basis >> indx2) & 1;
-                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                
-                if (bit1_matches) {
-                    int flipped_basis = basis ^ (1 << indx1);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * spin_l_ * 2) * 
-                            pow(-1, bit2)};
-                }
-            } 
-            else {
-                bool bit1_matches = ((basis >> indx1) & 1) != Op1;
-                bool bit2_matches = ((basis >> indx2) & 1) != Op2;
-                
-                if (bit1_matches && bit2_matches) {
-                    int flipped_basis = basis ^ (1 << indx1) ^ (1 << indx2);
-                    return {flipped_basis, Complex(1.0, 0.0) * double(spin_l_ * 2 * spin_l_ * 2)};
-                }
+                return {basis, Complex(double(spin_l_) * double(spin_l_) * pow(-1, bit1) * pow(-1, bit2), 0.0)};
             }
+            
+            int new_basis = basis;
+            bool valid = true;
+            
+            if (Op1 != 2) {
+                if (bit1 != Op1) {
+                    new_basis ^= (1 << indx1);
+                } else {
+                    valid = false;
+                }
+            } else {
+                factor *= Complex(double(spin_l_) * pow(-1, bit1), 0.0);
+            }
+            
+            if (valid && Op2 != 2) {
+                int new_bit2 = (new_basis >> indx2) & 1;
+                if (new_bit2 != Op2) {
+                    new_basis ^= (1 << indx2);
+                } else {
+                    valid = false;
+                }
+            } else if (valid) {
+                int new_bit2 = (new_basis >> indx2) & 1;
+                factor *= Complex(double(spin_l_) * pow(-1, new_bit2), 0.0);
+            }
+            
+            if (valid) return {new_basis, factor};
             return {basis, Complex(0.0, 0.0)};
         });
     }
-
-    // ============================================================================
-    // Symmetrized Basis Generation
-    // ============================================================================
     
+    std::vector<Complex> read_sym_basis(int index, const std::string& dir) const {
+        return readSymBasisVector(dir, index);
+    }
+    
+    // ========================================================================
+    // Symmetry-Adapted Basis Generation
+    // ========================================================================
+    
+    /**
+     * Generate symmetrized basis vectors for all symmetry sectors
+     * Uses symmetry group information to project onto irreducible representations
+     */
     void generateSymmetrizedBasis(const std::string& dir) {
-        // Step 1: Load automorphism data
-        auto max_clique = loadMaxClique(dir);
+        std::cout << "\n=== Generating Symmetrized Basis ===" << std::endl;
         
-        // Step 2: Find minimal generators
-        auto [generators, orders] = findGenerators(max_clique);
+        // Load symmetry information
+        symmetry_info.loadFromDirectory(dir);
         
-        // Step 3: Get power representation
-        auto power_representation = computePowerRepresentation(generators, max_clique);
+        // Setup output directory
+        std::string sym_basis_dir = dir + "/sym_basis";
+        system(("mkdir -p " + sym_basis_dir).c_str());
         
-        // Step 4: Generate all quantum number combinations
-        auto all_quantum_numbers = enumerateQuantumNumbers(generators, orders);
+        // Generate basis for each sector
+        const size_t dim = 1ULL << n_bits_;
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
         
-        // Step 5: Setup output directory
-        prepareOutputDirectory(dir);
-        
-        // Step 6: Generate basis vectors for each symmetry sector
-        generateBasisVectors(dir, max_clique, power_representation, orders, all_quantum_numbers);
-        
-        // Step 7: Save results
-        saveBlockSizes(dir);
-        
-        std::cout << "Symmetrized basis generation complete." << std::endl;
-    }
-
-    // ============================================================================
-    // Symmetrized Block Matrix Operations
-    // ============================================================================
-    
-    void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
-        loadBlockSizesIfNeeded(dir);
-        
-        std::cout << "Building and saving symmetrized Hamiltonian blocks..." << std::endl;
-        
-        std::string block_dir = createBlockDirectory(dir);
-        buildSparseMatrix();
-        processAllSymmetryBlocks(dir, block_dir);
-        
-        std::cout << "Symmetrized Hamiltonian blocks saved to " << block_dir << std::endl;
-    }
-
-    Eigen::SparseMatrix<Complex> loadSymmetrizedBlock(const std::string& filepath) {
-        // Try ASCII format first
-        {
-            std::ifstream tf(filepath);
-            if (!tf.is_open()) {
-                throw std::runtime_error("Could not open block file: " + filepath);
-            }
-
-            std::string firstLine;
-            if (std::getline(tf, firstLine)) {
-                std::istringstream hdr(firstLine);
-                int rows = 0, cols = 0;
-                if (hdr >> rows >> cols) {
-                    // ASCII format detected
-                    std::vector<Eigen::Triplet<Complex>> triplets;
-                    triplets.reserve(1024);
-
-                    int r, c;
-                    double real, imag;
-                    size_t count = 0;
-                    while (tf >> r >> c >> real >> imag) {
-                        if (r >= 0 && r < rows && c >= 0 && c < cols) {
-                            triplets.emplace_back(r, c, Complex(real, imag));
-                            ++count;
-                        }
-                    }
-
-                    Eigen::SparseMatrix<Complex> blockMatrix(rows, cols);
-                    blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
-                    blockMatrix.makeCompressed();
-
-                    std::cout << "Loaded block matrix (ASCII): " << rows << "x" << cols
-                              << " with " << count << " non-zeros ("
-                              << std::fixed << std::setprecision(2)
-                              << (rows * cols > 0 ? (100.0 * count / (rows * cols)) : 0.0)
-                              << "% fill)" << std::endl;
-                    return blockMatrix;
+        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+            const auto& sector = symmetry_info.sectors[sector_idx];
+            
+            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
+                      << symmetry_info.sectors.size() << " (QN: ";
+            for (int qn : sector.quantum_numbers) std::cout << qn << " ";
+            std::cout << ")" << std::endl;
+            
+            std::set<size_t> processed_orbits;
+            size_t sector_basis_count = 0;
+            
+            for (size_t basis = 0; basis < dim; ++basis) {
+                if (basis % (dim / 20) == 0 && dim > 20) {
+                    std::cout << "\r  Progress: " << (100 * basis / dim) << "%" << std::flush;
+                }
+                
+                // Check if this basis state's orbit was already processed
+                size_t orbit_rep = getOrbitRepresentative(basis);
+                if (processed_orbits.count(orbit_rep)) continue;
+                processed_orbits.insert(orbit_rep);
+                
+                // Create symmetrized vector for this sector
+                std::vector<Complex> sym_vec = createSymmetrizedVector(
+                    basis, sector.quantum_numbers, sector.phase_factors);
+                
+                // Check if vector is valid (non-zero norm)
+                double norm_sq = 0.0;
+                for (const auto& v : sym_vec) norm_sq += std::norm(v);
+                
+                if (norm_sq > 1e-10) {
+                    // Normalize
+                    double norm = std::sqrt(norm_sq);
+                    for (auto& v : sym_vec) v /= norm;
+                    
+                    // Save vector
+                    saveSymBasisVector(sym_basis_dir, total_written, sym_vec);
+                    sector_basis_count++;
+                    total_written++;
                 }
             }
+            
+            symmetrized_block_ham_sizes[sector_idx] = sector_basis_count;
+            std::cout << "\r  Sector " << (sector_idx + 1) << " complete: "
+                      << sector_basis_count << " basis vectors" << std::endl;
         }
-
-        // Binary format fallback
+        
+        // Save block sizes
+        saveBlockSizes(dir);
+        
+        std::cout << "\nTotal symmetrized basis vectors: " << total_written << std::endl;
+        std::cout << "=== Symmetrized Basis Generation Complete ===" << std::endl;
+    }
+    
+    /**
+     * Build and save block-diagonal Hamiltonian matrices
+     * Each block corresponds to one symmetry sector
+     */
+    void buildAndSaveSymmetrizedBlocks(const std::string& dir) {
+        std::cout << "\n=== Building Symmetrized Hamiltonian Blocks ===" << std::endl;
+        
+        loadBlockSizesIfNeeded(dir);
+        buildSparseMatrix();
+        
+        std::string block_dir = dir + "/sym_blocks";
+        system(("mkdir -p " + block_dir).c_str());
+        
+        int block_start = 0;
+        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
+            int block_size = symmetrized_block_ham_sizes[block_idx];
+            
+            if (block_size == 0) {
+                std::cout << "  Block " << block_idx << ": empty (skipping)" << std::endl;
+                continue;
+            }
+            
+            std::cout << "  Building block " << block_idx << " ("
+                      << block_size << "x" << block_size << ")..." << std::flush;
+            
+            buildSingleBlock(dir, block_dir, block_idx, block_start, block_size);
+            
+            block_start += block_size;
+        }
+        
+        std::cout << "=== Block Construction Complete ===" << std::endl;
+    }
+    
+    /**
+     * Load a specific symmetrized block matrix from disk
+     */
+    Eigen::SparseMatrix<Complex> loadSymmetrizedBlock(const std::string& filepath) {
         std::ifstream file(filepath, std::ios::binary);
         if (!file.is_open()) {
             throw std::runtime_error("Could not open block file: " + filepath);
         }
-
-        int rows = 0, cols = 0;
-        size_t nnz = 0;
+        
+        int rows, cols;
+        size_t nnz;
         file.read(reinterpret_cast<char*>(&rows), sizeof(int));
         file.read(reinterpret_cast<char*>(&cols), sizeof(int));
         file.read(reinterpret_cast<char*>(&nnz), sizeof(size_t));
-
-        if (!file.good()) {
-            throw std::runtime_error("Failed to read header from: " + filepath);
-        }
-
-        // Validate header
-        if (rows < 0 || cols < 0) {
-            throw std::runtime_error("Invalid header (negative dims) in: " + filepath);
-        }
         
-        const unsigned long long maxEntries = 
-            static_cast<unsigned long long>(rows) * static_cast<unsigned long long>(cols);
-        if (nnz > maxEntries) {
-            throw std::runtime_error("Invalid header (nnz > rows*cols) in: " + filepath);
-        }
-
         std::vector<Eigen::Triplet<Complex>> triplets;
         triplets.reserve(nnz);
-
+        
         for (size_t i = 0; i < nnz; ++i) {
-            int row = 0, col = 0;
-            double real = 0.0, imag = 0.0;
-
+            int row, col;
+            Complex val;
             file.read(reinterpret_cast<char*>(&row), sizeof(int));
             file.read(reinterpret_cast<char*>(&col), sizeof(int));
-            file.read(reinterpret_cast<char*>(&real), sizeof(double));
-            file.read(reinterpret_cast<char*>(&imag), sizeof(double));
-
-            if (!file.good()) {
-                throw std::runtime_error("Failed to read matrix element " +
-                                       std::to_string(i) + " from: " + filepath);
-            }
-
-            if (row >= 0 && row < rows && col >= 0 && col < cols) {
-                triplets.emplace_back(row, col, Complex(real, imag));
-            }
-        }
-
-        Eigen::SparseMatrix<Complex> blockMatrix(rows, cols);
-        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
-        blockMatrix.makeCompressed();
-
-        std::cout << "Loaded block matrix (binary): " << rows << "x" << cols
-                  << " with " << triplets.size() << " non-zeros ("
-                  << std::fixed << std::setprecision(2)
-                  << (rows * cols > 0 ? (100.0 * triplets.size() / (rows * cols)) : 0.0)
-                  << "% fill)" << std::endl;
-
-        return blockMatrix;
-    }
-
-    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocks(const std::string& dir) {
-        std::string block_dir = dir + "/sym_blocks";
-        loadBlockSizesIfNeeded(dir);
-        
-        std::vector<Eigen::SparseMatrix<Complex>> blocks;
-        blocks.reserve(symmetrized_block_ham_sizes.size());
-        
-        std::cout << "Loading symmetrized Hamiltonian blocks from " << block_dir << std::endl;
-        
-        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); ++block_idx) {
-            if (symmetrized_block_ham_sizes[block_idx] == 0) {
-                blocks.emplace_back(0, 0);
-                continue;
-            }
-            
-            std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
-            
-            try {
-                blocks.push_back(loadSymmetrizedBlock(filename));
-                std::cout << "  Loaded block " << block_idx << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Could not load block " << block_idx 
-                         << ": " << e.what() << std::endl;
-                blocks.emplace_back(symmetrized_block_ham_sizes[block_idx], 
-                                  symmetrized_block_ham_sizes[block_idx]);
-            }
+            file.read(reinterpret_cast<char*>(&val), sizeof(Complex));
+            triplets.emplace_back(row, col, val);
         }
         
-        std::cout << "Successfully loaded " << blocks.size() << " blocks" << std::endl;
-        return blocks;
+        Eigen::SparseMatrix<Complex> matrix(rows, cols);
+        matrix.setFromTriplets(triplets.begin(), triplets.end());
+        matrix.makeCompressed();
+        
+        return matrix;
     }
-
+    
+    /**
+     * Load a block by its index
+     */
     Eigen::SparseMatrix<Complex> loadSymmetrizedBlockByIndex(const std::string& dir, size_t block_idx) {
         loadBlockSizesIfNeeded(dir);
         
         if (block_idx >= symmetrized_block_ham_sizes.size()) {
-            throw std::out_of_range("Block index " + std::to_string(block_idx) + 
-                                   " out of range (max: " + 
-                                   std::to_string(symmetrized_block_ham_sizes.size() - 1) + ")");
+            throw std::runtime_error("Block index out of range");
         }
         
         if (symmetrized_block_ham_sizes[block_idx] == 0) {
@@ -821,752 +801,323 @@ public:
         std::string filepath = dir + "/sym_blocks/block_" + std::to_string(block_idx) + ".dat";
         return loadSymmetrizedBlock(filepath);
     }
-
-    // ============================================================================
-    // Symmetrized Basis I/O
-    // ============================================================================
     
-    std::vector<Complex> read_sym_basis(int index, const std::string& dir) {
-        std::ifstream file(dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + 
-                                   "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
-        }
+    /**
+     * Load all symmetrized blocks
+     */
+    std::vector<Eigen::SparseMatrix<Complex>> loadAllSymmetrizedBlocks(const std::string& dir) {
+        loadBlockSizesIfNeeded(dir);
         
-        std::vector<Complex> sym_basis((1ULL << n_bits_), 0.0);
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            int index;
-            double real, imag;
-            if (iss >> index >> real >> imag) {
-                sym_basis[index] = Complex(real, imag);
+        std::vector<Eigen::SparseMatrix<Complex>> blocks;
+        blocks.reserve(symmetrized_block_ham_sizes.size());
+        
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            if (symmetrized_block_ham_sizes[i] > 0) {
+                blocks.push_back(loadSymmetrizedBlockByIndex(dir, i));
+            } else {
+                blocks.push_back(Eigen::SparseMatrix<Complex>(0, 0));
             }
         }
-        return sym_basis;
-    }
-
-    void read_sym_basis_sparse(int index, const std::string& dir, 
-                              std::map<int, Complex>& sparse_vec) {
-        sparse_vec.clear();
-        std::ifstream file(dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file: " + dir + 
-                                   "/sym_basis/sym_basis" + std::to_string(index) + ".dat");
-        }
         
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            int idx;
-            double real, imag;
-            if (iss >> idx >> real >> imag) {
-                Complex val(real, imag);
-                if (std::abs(val) > 1e-10) {
-                    sparse_vec[idx] = val;
-                }
-            }
-        }
+        return blocks;
     }
-
-    std::vector<Complex> sym_basis_e_(int basis, 
-                                      std::vector<std::vector<int>> max_clique,
-                                      std::vector<std::vector<int>> power_representation,
-                                      std::vector<int> minimal_generators,
-                                      std::vector<int> e_i) {
-        
-        std::vector<Complex> sym_basis(1 << n_bits_, 0.0);
-
-        // Pre-compute phase factors
-        std::vector<Complex> phase_factors(max_clique.size(), Complex(1.0, 0.0));
-        for(size_t i = 0; i < max_clique.size(); i++) {
-            double phase = 0.0;
-            for(size_t j = 0; j < power_representation[i].size(); j++) {
-                phase += 2.0 * M_PI * power_representation[i][j] * e_i[j] / minimal_generators[j];
-            }
-            phase_factors[i] = Complex(std::cos(phase), std::sin(phase));
-        }
-
-        // Apply permutations with phase factors
-        for(size_t i = 0; i < max_clique.size(); i++) {
-            int permuted_state = applyPermutation(basis, max_clique[i]);
-            sym_basis[permuted_state] += phase_factors[i];
-        }
-
-        // Normalize
-        double norm = 0.0;
-        for (const auto& val : sym_basis) {
-            norm += std::norm(val);
-        }
-        if (norm < 1e-8) {
-            return sym_basis;
-        }
-        norm = std::sqrt(norm);
-        for (auto& val : sym_basis) {
-            val /= norm;
-        }
-        return sym_basis;
-    }
-
+    
 private:
-    // ============================================================================
-    // Private Member Variables
-    // ============================================================================
+    // Member variables
     std::vector<TransformFunction> transforms_;
     int n_bits_;
     float spin_l_;
     mutable Eigen::SparseMatrix<Complex> sparseMatrix_;
-    mutable bool matrixBuilt_ = false;
-
-    const std::array<std::array<double, 4>, 3> operators = {
+    mutable bool matrixBuilt_;
+    
+    const std::array<std::array<double, 4>, 3> operators_ = {
         {{0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, -1}}
     };
-
-    const std::array<std::array<double, 2>, 2> basis = {
-        {{1, 0}, {0, 1}}
-    };
-
-    // ============================================================================
-    // Private Helper Functions - Symmetrized Basis Generation
-    // ============================================================================
     
-    std::vector<std::vector<int>> loadMaxClique(const std::string& dir) {
-        const std::string filepath = dir + "/automorphism_results/max_clique.json";
-        std::cout << "Loading max clique from: " << filepath << std::endl;
-        
-        std::ifstream file(filepath);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open max_clique.json file: " + filepath);
+    // ========================================================================
+    // Private Helper Functions
+    // ========================================================================
+    
+    size_t getOrbitRepresentative(size_t basis) const {
+        size_t rep = basis;
+        for (const auto& perm : symmetry_info.max_clique) {
+            size_t permuted = applyPermutation(basis, perm);
+            if (permuted < rep) rep = permuted;
         }
-        
-        std::string json_content((std::istreambuf_iterator<char>(file)),
-                                 std::istreambuf_iterator<char>());
-        file.close();
-        
-        auto max_clique = parseJsonIntArrays(json_content);
-        if (max_clique.empty()) {
-            throw std::runtime_error("Invalid or empty max_clique.json");
-        }
-        
-        std::cout << "Loaded " << max_clique.size() << " permutations in max clique" << std::endl;
-        return max_clique;
+        return rep;
     }
-
-    std::vector<std::vector<int>> parseJsonIntArrays(const std::string& json) {
-        std::vector<std::vector<int>> result;
-        size_t pos = json.find('[');
-        if (pos == std::string::npos) return result;
-        ++pos;
+    
+    std::vector<Complex> createSymmetrizedVector(
+        size_t basis,
+        const std::vector<int>& quantum_numbers,
+        const std::vector<Complex>& phase_factors) const {
         
-        while (pos < json.size()) {
-            while (pos < json.size() && std::isspace(json[pos])) ++pos;
-            if (pos >= json.size() || json[pos] == ']') break;
-            if (json[pos] != '[') { ++pos; continue; }
+        const size_t dim = 1ULL << n_bits_;
+        std::vector<Complex> result(dim, Complex(0.0, 0.0));
+        
+        // Apply symmetry projection: |ψ_q⟩ = (1/|G|) Σ_g χ_q(g)* g|basis⟩
+        for (size_t g = 0; g < symmetry_info.max_clique.size(); ++g) {
+            const auto& perm = symmetry_info.max_clique[g];
+            const auto& powers = symmetry_info.power_representation[g];
             
-            ++pos;
-            std::vector<int> array;
-            std::string number;
-            
-            while (pos < json.size() && json[pos] != ']') {
-                char c = json[pos++];
-                if (std::isdigit(c)) {
-                    number += c;
-                } else if (!number.empty() && (c == ',' || std::isspace(c))) {
-                    array.push_back(std::stoi(number));
-                    number.clear();
+            // Compute character: χ_q(g) = exp(2πi Σ_k q_k * n_k / order_k)
+            Complex character(1.0, 0.0);
+            for (size_t k = 0; k < powers.size(); ++k) {
+                Complex phase = phase_factors[k];
+                for (int p = 0; p < powers[k]; ++p) {
+                    character *= phase;
                 }
             }
             
-            if (!number.empty()) array.push_back(std::stoi(number));
-            if (pos < json.size() && json[pos] == ']') ++pos;
-            if (!array.empty()) result.push_back(std::move(array));
+            size_t permuted_basis = applyPermutation(basis, perm);
+            result[permuted_basis] += std::conj(character);
         }
+        
+        // Normalization factor: 1/√|G|
+        double norm_factor = 1.0 / std::sqrt(symmetry_info.max_clique.size());
+        for (auto& v : result) v *= norm_factor;
         
         return result;
     }
-
-    std::pair<std::vector<std::vector<int>>, std::vector<int>> 
-    findGenerators(const std::vector<std::vector<int>>& max_clique) {
-        MinimalGeneratorFinder gen_finder;
-        auto [generators, orders] = gen_finder.findMinimalGenerators(max_clique);
-        
-        std::cout << "Found " << generators.size() << " minimal generators:\n";
-        for (size_t i = 0; i < generators.size(); ++i) {
-            std::cout << "  Generator " << i << " (order " << orders[i] << "): ";
-            for (int v : generators[i]) std::cout << v << " ";
-            std::cout << "\n";
-        }
-        
-        return {generators, orders};
-    }
-
-    std::vector<std::vector<int>> 
-    computePowerRepresentation(const std::vector<std::vector<int>>& generators,
-                               const std::vector<std::vector<int>>& max_clique) {
-        auto power_repr = AutomorphismPowerRepresentation::representAllAsGeneratorPowers(
-            generators, max_clique);
-        std::cout << "Power representation computed for all automorphisms.\n";
-        return power_repr;
-    }
-
-    std::vector<std::vector<int>> 
-    enumerateQuantumNumbers(const std::vector<std::vector<int>>& generators,
-                            const std::vector<int>& orders) {
-        std::vector<std::vector<int>> quantum_numbers;
-        std::vector<int> current(generators.size(), 0);
-        
-        std::function<void(size_t)> enumerate = [&](size_t pos) {
-            if (pos == generators.size()) {
-                quantum_numbers.push_back(current);
-                return;
-            }
-            for (int k = 0; k < orders[pos]; ++k) {
-                current[pos] = k;
-                enumerate(pos + 1);
-            }
-        };
-        
-        enumerate(0);
-        std::cout << "Total symmetry sectors: " << quantum_numbers.size() << std::endl;
-        return quantum_numbers;
-    }
-
-    void prepareOutputDirectory(const std::string& dir) {
-        const std::string sym_basis_dir = dir + "/sym_basis";
-        std::string mkdir_cmd = "mkdir -p " + sym_basis_dir;
-        system(mkdir_cmd.c_str());
-    }
-
-    void generateBasisVectors(const std::string& dir,
-                             const std::vector<std::vector<int>>& max_clique,
-                             const std::vector<std::vector<int>>& power_representation,
-                             const std::vector<int>& orders,
-                             const std::vector<std::vector<int>>& all_quantum_numbers) {
-        const size_t dim = 1ULL << n_bits_;
-        size_t total_written = 0;
-        symmetrized_block_ham_sizes.assign(all_quantum_numbers.size(), 0);
-        
-        for (size_t sector_idx = 0; sector_idx < all_quantum_numbers.size(); ++sector_idx) {
-            size_t sector_size = processSector(dir, sector_idx, all_quantum_numbers[sector_idx],
-                                              max_clique, power_representation, orders,
-                                              dim, total_written);
-            symmetrized_block_ham_sizes[sector_idx] = sector_size;
-            
-            std::cout << "Sector " << (sector_idx + 1) << "/" << all_quantum_numbers.size() 
-                     << ": " << sector_size << " basis vectors\n";
-        }
-        
-        std::cout << "\nTotal unique symmetrized basis vectors: " << total_written << std::endl;
-    }
-
-    size_t processSector(const std::string& dir, size_t sector_idx,
-                        const std::vector<int>& quantum_nums,
-                        const std::vector<std::vector<int>>& max_clique,
-                        const std::vector<std::vector<int>>& power_representation,
-                        const std::vector<int>& orders,
-                        size_t dim, size_t& total_written) {
-        std::set<size_t> processed_states;
-        std::set<std::string> unique_vectors;
-        size_t sector_basis_count = 0;
-        
-        for (size_t basis = 0; basis < dim; ++basis) {
-            if (basis % std::max<size_t>(1, dim / 100) == 0) {
-                showProgress(basis, dim, sector_idx);
-            }
-            
-            if (processed_states.count(basis)) continue;
-            
-            auto orbit = computeOrbit(basis, max_clique);
-            processed_states.insert(orbit.begin(), orbit.end());
-            
-            auto vec = createSymmetrizedVector(basis, max_clique, power_representation, 
-                                              orders, quantum_nums);
-            if (!isValidVector(vec)) continue;
-            
-            normalizePhase(vec);
-            std::string hash = computeVectorHash(vec);
-            if (unique_vectors.count(hash)) continue;
-            unique_vectors.insert(hash);
-            
-            saveVector(dir, vec, total_written);
-            ++sector_basis_count;
-            ++total_written;
-        }
-        
-        std::cout << std::endl;
-        return sector_basis_count;
-    }
-
-    // ============================================================================
-    // Private Helper Functions - Vector Operations
-    // ============================================================================
     
-    std::set<size_t> computeOrbit(size_t basis, const std::vector<std::vector<int>>& max_clique) {
-        std::set<size_t> orbit;
-        for (const auto& perm : max_clique) {
-            orbit.insert(applyPermutation(static_cast<int>(basis), perm));
-        }
-        return orbit;
-    }
-
-    std::vector<Complex> createSymmetrizedVector(int basis,
-                                                 const std::vector<std::vector<int>>& max_clique,
-                                                 const std::vector<std::vector<int>>& power_repr,
-                                                 const std::vector<int>& orders,
-                                                 const std::vector<int>& quantum_nums) {
-        return sym_basis_e_(basis, max_clique, power_repr, orders, quantum_nums);
-    }
-
-    bool isValidVector(const std::vector<Complex>& vec) {
-        double norm_squared = 0.0;
-        for (const auto& v : vec) {
-            norm_squared += std::norm(v);
-        }
-        return norm_squared > 1e-10;
-    }
-
-    void normalizePhase(std::vector<Complex>& vec) {
-        size_t first_nonzero = 0;
-        while (first_nonzero < vec.size() && std::abs(vec[first_nonzero]) < 1e-10) {
-            ++first_nonzero;
-        }
-        
-        if (first_nonzero >= vec.size()) return;
-        
-        Complex phase = vec[first_nonzero] / std::abs(vec[first_nonzero]);
-        for (auto& v : vec) {
-            v /= phase;
-        }
-    }
-
-    std::string computeVectorHash(const std::vector<Complex>& vec) {
-        std::stringstream ss;
-        ss << std::fixed << std::setprecision(12);
-        
-        for (size_t i = 0; i < vec.size(); ++i) {
-            if (std::abs(vec[i]) > 1e-10) {
-                ss << i << ":" << vec[i].real() << ":" << vec[i].imag() << ";";
-            }
-        }
-        
-        return ss.str();
-    }
-
-    void saveVector(const std::string& dir, const std::vector<Complex>& vec, size_t index) {
-        const std::string filepath = dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat";
+    void saveSymBasisVector(const std::string& dir, size_t index, const std::vector<Complex>& vec) const {
+        std::string filepath = dir + "/sym_basis" + std::to_string(index) + ".dat";
         std::ofstream file(filepath);
         
         for (size_t i = 0; i < vec.size(); ++i) {
-            if (std::abs(vec[i]) > 1e-10) {
+            if (std::abs(vec[i]) > 1e-12) {
                 file << i << " " << vec[i].real() << " " << vec[i].imag() << "\n";
             }
         }
     }
-
-    void showProgress(size_t current, size_t total, size_t sector_idx) {
-        double percent = (static_cast<double>(current) / total) * 100.0;
-        int bar_width = 40;
-        int pos = static_cast<int>(bar_width * percent / 100.0);
+    
+    std::vector<Complex> readSymBasisVector(const std::string& dir, size_t index) const {
+        std::string filepath = dir + "/sym_basis/sym_basis" + std::to_string(index) + ".dat";
+        std::ifstream file(filepath);
         
-        std::cout << "\rSector " << (sector_idx + 1) << " [";
-        for (int i = 0; i < bar_width; ++i) {
-            if (i < pos) std::cout << "=";
-            else if (i == pos) std::cout << ">";
-            else std::cout << " ";
+        std::vector<Complex> vec(1ULL << n_bits_, Complex(0.0, 0.0));
+        
+        std::string line;
+        while (std::getline(file, line)) {
+            std::istringstream iss(line);
+            size_t idx;
+            double real, imag;
+            if (iss >> idx >> real >> imag) {
+                vec[idx] = Complex(real, imag);
+            }
         }
-        std::cout << "] " << std::fixed << std::setprecision(1) << percent << "%" << std::flush;
+        
+        return vec;
     }
-
-    void saveBlockSizes(const std::string& dir) {
-        std::cout << "Block sizes: ";
-        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
-            std::cout << symmetrized_block_ham_sizes[i];
-            if (i < symmetrized_block_ham_sizes.size() - 1) std::cout << " ";
-        }
-        std::cout << std::endl;
-        
+    
+    void saveBlockSizes(const std::string& dir) const {
         std::ofstream file(dir + "/sym_basis/sym_block_sizes.txt");
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not save block sizes file");
-        }
-        
         for (int size : symmetrized_block_ham_sizes) {
             file << size << "\n";
         }
+        
+        std::cout << "Block sizes: ";
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            std::cout << symmetrized_block_ham_sizes[i];
+            if (i < symmetrized_block_ham_sizes.size() - 1) std::cout << ", ";
+        }
+        std::cout << std::endl;
     }
-
-    // ============================================================================
-    // Private Helper Functions - Block Matrix Processing
-    // ============================================================================
     
     void loadBlockSizesIfNeeded(const std::string& dir) {
-        if (!symmetrized_block_ham_sizes.empty()) {
-            return;
-        }
+        if (!symmetrized_block_ham_sizes.empty()) return;
         
         std::string filepath = dir + "/sym_basis/sym_block_sizes.txt";
         std::ifstream file(filepath);
         if (!file.is_open()) {
-            throw std::runtime_error(
-                "Symmetrized basis must be generated first with generateSymmetrizedBasis()"
-            );
+            throw std::runtime_error("Could not open block sizes file. Run generateSymmetrizedBasis first.");
         }
         
-        symmetrized_block_ham_sizes.clear();
-        int block_size;
-        while (file >> block_size) {
-            symmetrized_block_ham_sizes.push_back(block_size);
-        }
-        
-        std::cout << "Loaded " << symmetrized_block_ham_sizes.size() 
-                  << " symmetrized block sizes." << std::endl;
-    }
-
-    std::string createBlockDirectory(const std::string& dir) {
-        std::string block_dir = dir + "/sym_blocks";
-        std::string mkdir_command = "mkdir -p " + block_dir;
-        system(mkdir_command.c_str());
-        return block_dir;
-    }
-
-    void processAllSymmetryBlocks(const std::string& dir, const std::string& block_dir) {
-        int block_start = 0;
-        
-        for (size_t block_idx = 0; block_idx < symmetrized_block_ham_sizes.size(); block_idx++) {
-            int block_size = symmetrized_block_ham_sizes[block_idx];
-            
-            if (block_size == 0) {
-                continue;
-            }
-            
-            std::cout << "Processing block " << block_idx 
-                     << " (size: " << block_size << ")" << std::endl;
-            
-            processSingleBlockOptimized(dir, block_dir, block_idx, block_start, block_size);
-            block_start += block_size;
+        int size;
+        while (file >> size) {
+            symmetrized_block_ham_sizes.push_back(size);
         }
     }
-
-    void processSingleBlockOptimized(const std::string& dir, 
-                                    const std::string& block_dir,
-                                    size_t block_idx,
-                                    int block_start, 
-                                    int block_size) {
-        std::vector<std::vector<std::pair<int, Complex>>> columns(block_size);
+    
+    void buildSingleBlock(const std::string& dir, const std::string& block_dir,
+                         size_t block_idx, int block_start, int block_size) {
         
-        #pragma omp parallel for schedule(dynamic, 1)
-        for (int col = 0; col < block_size; col++) {
-            processColumn(dir, block_start, col, block_size, columns[col]);
-        }
+        std::vector<Eigen::Triplet<Complex>> triplets;
         
-        saveBlockMatrixOptimized(block_dir, block_idx, block_size, columns);
-    }
-
-    void processColumn(const std::string& dir,
-                      int block_start,
-                      int col,
-                      int block_size,
-                      std::vector<std::pair<int, Complex>>& column) {
-        std::map<int, Complex> basis_col;
-        read_sym_basis_sparse(block_start + col, dir, basis_col);
-        
-        if (basis_col.empty()) {
-            return;
-        }
-        
-        std::map<int, Complex> h_basis_col = applyHamiltonianOptimized(basis_col);
-        
-        column.reserve(block_size / 10);
-        
-        for (int row = 0; row < block_size; row++) {
-            Complex element = computeMatrixElementOptimized(dir, block_start + row, h_basis_col);
+        // Build matrix elements: H_ij = ⟨ψ_i|H|ψ_j⟩
+        for (int col = 0; col < block_size; ++col) {
+            auto basis_col = readSymBasisVector(dir, block_start + col);
             
-            if (std::abs(element) > 1e-10) {
-                column.emplace_back(row, element);
-            }
-        }
-    }
-
-    std::map<int, Complex> applyHamiltonianOptimized(const std::map<int, Complex>& basis_vec) {
-        std::map<int, Complex> result;
-        int dim = 1 << n_bits_;
-        
-        for (const auto& [idx, val] : basis_vec) {
-            if (idx >= dim) continue;
-            
-            for (const auto& transform : transforms_) {
-                auto [new_idx, scalar] = transform(idx);
+            // Apply Hamiltonian
+            std::vector<Complex> h_basis_col(1ULL << n_bits_, Complex(0.0, 0.0));
+            for (size_t k = 0; k < basis_col.size(); ++k) {
+                if (std::abs(basis_col[k]) < 1e-12) continue;
                 
-                if (new_idx >= 0 && new_idx < dim) {
-                    Complex contribution = val * scalar;
-                    if (std::abs(contribution) > 1e-10) {
-                        result[new_idx] += contribution;
+                for (const auto& transform : transforms_) {
+                    auto [j, scalar] = transform(k);
+                    if (j >= 0 && j < (1 << n_bits_)) {
+                        h_basis_col[j] += scalar * basis_col[k];
                     }
                 }
             }
-        }
-        
-        return result;
-    }
-
-    Complex computeMatrixElementOptimized(const std::string& dir,
-                                         int row_idx,
-                                         const std::map<int, Complex>& h_basis_col) {
-        static thread_local std::unordered_map<int, std::map<int, Complex>> basis_cache;
-        static thread_local int cache_counter = 0;
-        
-        if (++cache_counter > 1000) {
-            basis_cache.clear();
-            cache_counter = 0;
-        }
-        
-        auto cache_it = basis_cache.find(row_idx);
-        if (cache_it == basis_cache.end()) {
-            std::map<int, Complex> basis_row;
-            read_sym_basis_sparse(row_idx, dir, basis_row);
-            cache_it = basis_cache.emplace(row_idx, std::move(basis_row)).first;
-        }
-        
-        return computeInnerProductOptimized(cache_it->second, h_basis_col);
-    }
-
-    Complex computeInnerProductOptimized(const std::map<int, Complex>& basis_row,
-                                        const std::map<int, Complex>& h_basis_col) {
-        Complex result(0.0, 0.0);
-        
-        if (basis_row.size() < h_basis_col.size()) {
-            for (const auto& [idx, val] : basis_row) {
-                auto it = h_basis_col.find(idx);
-                if (it != h_basis_col.end()) {
-                    result += std::conj(val) * it->second;
+            
+            // Compute matrix elements with all rows
+            for (int row = 0; row < block_size; ++row) {
+                auto basis_row = readSymBasisVector(dir, block_start + row);
+                
+                Complex element(0.0, 0.0);
+                for (size_t k = 0; k < basis_row.size(); ++k) {
+                    element += std::conj(basis_row[k]) * h_basis_col[k];
                 }
-            }
-        } else {
-            for (const auto& [idx, val] : h_basis_col) {
-                auto it = basis_row.find(idx);
-                if (it != basis_row.end()) {
-                    result += std::conj(it->second) * val;
+                
+                if (std::abs(element) > 1e-12) {
+                    triplets.emplace_back(row, col, element);
                 }
             }
         }
         
-        return result;
-    }
-
-    void saveBlockMatrixOptimized(const std::string& block_dir,
-                                 size_t block_idx,
-                                 int block_size,
-                                 const std::vector<std::vector<std::pair<int, Complex>>>& columns) {
-        size_t nnz = 0;
-        for (const auto& col : columns) {
-            nnz += col.size();
-        }
-        
-        std::vector<Eigen::Triplet<Complex>> triplets;
-        triplets.reserve(nnz);
-        
-        for (int col = 0; col < block_size; col++) {
-            for (const auto& [row, val] : columns[col]) {
-                triplets.emplace_back(row, col, val);
-            }
-        }
-        
-        Eigen::SparseMatrix<Complex> blockMatrix(block_size, block_size);
-        blockMatrix.setFromTriplets(triplets.begin(), triplets.end());
-        blockMatrix.makeCompressed();
+        // Create and save sparse matrix
+        Eigen::SparseMatrix<Complex> block(block_size, block_size);
+        block.setFromTriplets(triplets.begin(), triplets.end());
+        block.makeCompressed();
         
         std::string filename = block_dir + "/block_" + std::to_string(block_idx) + ".dat";
         std::ofstream file(filename, std::ios::binary);
         
-        if (!file.is_open()) {
-            throw std::runtime_error("Could not open file for writing: " + filename);
-        }
-        
-        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
-        file.write(reinterpret_cast<const char*>(&block_size), sizeof(int));
+        int rows = block_size, cols = block_size;
+        size_t nnz = triplets.size();
+        file.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+        file.write(reinterpret_cast<const char*>(&cols), sizeof(int));
         file.write(reinterpret_cast<const char*>(&nnz), sizeof(size_t));
         
-        for (int k = 0; k < blockMatrix.outerSize(); ++k) {
-            for (Eigen::SparseMatrix<Complex>::InnerIterator it(blockMatrix, k); it; ++it) {
-                int row = it.row();
-                int col = it.col();
-                double real = it.value().real();
-                double imag = it.value().imag();
-                
-                file.write(reinterpret_cast<const char*>(&row), sizeof(int));
-                file.write(reinterpret_cast<const char*>(&col), sizeof(int));
-                file.write(reinterpret_cast<const char*>(&real), sizeof(double));
-                file.write(reinterpret_cast<const char*>(&imag), sizeof(double));
-            }
+        for (const auto& t : triplets) {
+            int row = t.row(), col = t.col();
+            Complex val = t.value();
+            file.write(reinterpret_cast<const char*>(&row), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&col), sizeof(int));
+            file.write(reinterpret_cast<const char*>(&val), sizeof(Complex));
         }
         
-        file.close();
-        
-        std::cout << "  Block " << block_idx << " saved: " 
-                  << block_size << "x" << block_size 
-                  << " with " << nnz << " non-zeros ("
-                  << std::fixed << std::setprecision(2) 
-                  << (100.0 * nnz / (block_size * block_size)) << "% fill)"
-                  << std::endl;
+        std::cout << " done (" << nnz << " nnz, "
+                  << std::fixed << std::setprecision(2)
+                  << (100.0 * nnz / (block_size * block_size)) << "% fill)" << std::endl;
     }
 };
 
+// ============================================================================
+// Derived Operator Classes
+// ============================================================================
 
+/**
+ * Single site operator (S+, S-, Sz, Sx, Sy)
+ */
 class SingleSiteOperator : public Operator {
 public:
-    /**
-     * Constructor for a single site operator
-     * @param num_site Total number of sites/qubits
-     * @param op Operator type: 0 for S+, 1 for S-, 2 for Sz, 3 for Sx, 4 for Sy
-     * @param site_j Site index to apply the operator to
-     */
-    SingleSiteOperator(int num_site, float spin_l, int op, int site_j) : Operator(num_site, spin_l) {
+    SingleSiteOperator(int num_site, float spin_l, int op, int site_j) 
+        : Operator(num_site, spin_l) {
+        
         if (op < 0 || op > 4) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz, 3 for Sx, 4 for Sy");
+            throw std::invalid_argument("Invalid operator type");
         }
         
         if (site_j < 0 || site_j >= num_site) {
-            throw std::invalid_argument("Site index out of range");
+            throw std::invalid_argument("Invalid site index");
         }
         
         if (op <= 2) {
-            // Original S+, S-, Sz operators
+            // S+, S-, Sz
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 if (op == 2) {
-                    return {basis, spin_l * pow(-1, (basis >> site_j) & 1)};
-                }
-                else if (op == 0 || op == 1) {
+                    return {basis, Complex(spin_l * pow(-1, (basis >> site_j) & 1), 0.0)};
+                } else {
                     if (((basis >> site_j) & 1) != op) {
-                        int flipped_basis = basis ^ (1 << site_j);
-                        return {flipped_basis, Complex(1.0, 0) * double(spin_l * 2)};
+                        int flipped = basis ^ (1 << site_j);
+                        return {flipped, Complex(1.0, 0.0)};
                     }
                 }
                 return {basis, Complex(0.0, 0.0)};
             });
-        }
-        else if (op == 3) {
-            // Sx = (S+ + S-) / 2
-            // S+ contribution
+        } else {
+            // Sx or Sy
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site_j) & 1) != 0) {
-                    int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(0.5, 0) * double(spin_l * 2)};
+                int flipped = basis ^ (1 << site_j);
+                if (op == 3) {
+                    // Sx = (S+ + S-) / 2
+                    return {flipped, Complex(0.5, 0.0)};
+                } else {
+                    // Sy = (S+ - S-) / (2i)
+                    bool is_up = ((basis >> site_j) & 1) == 0;
+                    return {flipped, Complex(0.0, is_up ? 0.5 : -0.5)};
                 }
-                return {basis, Complex(0.0, 0.0)};
-            });
-            // S- contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site_j) & 1) != 1) {
-                    int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(0.5, 0) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
-            });
-        }
-        else if (op == 4) {
-            // Sy = (S+ - S-) / 2i
-            // S+ contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site_j) & 1) != 0) {
-                    int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(0, -0.5) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
-            });
-            // S- contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site_j) & 1) != 1) {
-                    int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(0, 0.5) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
             });
         }
     }
 };
 
-
+/**
+ * Two-site operator for interactions
+ */
 class DoubleSiteOperator : public Operator {
 public:
-    /**
-     * Constructor for a double site operator
-     * @param num_site Total number of sites/qubits
-     * @param op Operator type: 0 for X, 1 for Y, 2 for Z
-     * @param site_j Site index to apply the operator to
-     */
-
-    DoubleSiteOperator() : Operator(0, 0) {
-        // Default constructor
-    }
-
-
-    DoubleSiteOperator(int num_site, float spin_l_, int op_i, int site_i, int op_j, int site_j) : Operator(num_site, spin_l_) {
+    DoubleSiteOperator() : Operator(0, 0.0) {}
+    
+    DoubleSiteOperator(int num_site, float spin_l, int op_i, int site_i, int op_j, int site_j)
+        : Operator(num_site, spin_l) {
+        
         if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Z");
+            throw std::invalid_argument("Invalid operator types");
         }
-        if (site_j < 0 || site_j >= num_site || site_i < 0 || site_i >= num_site) {
-            throw std::invalid_argument("Site index out of range");
+        
+        if (site_i < 0 || site_i >= num_site || site_j < 0 || site_j >= num_site) {
+            throw std::invalid_argument("Invalid site indices");
         }
         
         addTransform([=](int basis) -> std::pair<int, Complex> {
-            // Check what type of operators we're dealing with
+            int bit_i = (basis >> site_i) & 1;
+            int bit_j = (basis >> site_j) & 1;
+            
+            Complex factor(1.0, 0.0);
+            
             if (op_i == 2 && op_j == 2) {
-                // Both are identity operators with phase factors
-                int bit1 = (basis >> site_i) & 1;
-                int bit2 = (basis >> site_j) & 1;
-                return {basis, Complex(1.0,0.0)*double(spin_l_ * spin_l_) * pow(-1, bit1) * pow(-1, bit2)};
-            } 
-            else if (op_i == 2) {
-                // Op1 is identity with phase, Op2 is bit flip
-                int bit1 = (basis >> site_i) & 1;
-                bool bit2_matches = ((basis >> site_j) & 1) != op_j;
-                
-                if (bit2_matches) {
-                    int flipped_basis = basis ^ (1 << site_j);
-                    return {flipped_basis, Complex(1.0,0.0) * double(2*spin_l_) * pow(-1, bit1)};
-                }
-            } 
-            else if (op_j == 2) {
-                // Op2 is identity with phase, Op1 is bit flip
-                int bit2 = (basis >> site_j) & 1;
-                bool bit1_matches = ((basis >> site_i) & 1) != op_i;
-                
-                if (bit1_matches) {
-                    // Flip the first bit
-                    int flipped_basis = basis ^ (1 << site_i);
-                    return {flipped_basis,  Complex(1.0,0.0)*double(2*spin_l_) * pow(-1, bit2)};
-                }
-            } 
-            else {
-                // Both are bit flip operators
-                bool bit1_matches = ((basis >> site_i) & 1) != op_i;
-                bool bit2_matches = ((basis >> site_j) & 1) != op_j;
-                
-                if (bit1_matches && bit2_matches) {
-                    // Flip both bits
-                    int flipped_basis = basis ^ (1 << site_i) ^ (1 << site_j);
-                    return {flipped_basis, Complex(1.0,0.0)*double(4*spin_l_*spin_l_)};
-                }
+                return {basis, Complex(spin_l * spin_l * pow(-1, bit_i) * pow(-1, bit_j), 0.0)};
             }
-            // Default case: no transformation applies
+            
+            int new_basis = basis;
+            bool valid = true;
+            
+            if (op_i != 2) {
+                if (bit_i != op_i) {
+                    new_basis ^= (1 << site_i);
+                } else {
+                    valid = false;
+                }
+            } else {
+                factor *= Complex(spin_l * pow(-1, bit_i), 0.0);
+            }
+            
+            if (valid && op_j != 2) {
+                int new_bit_j = (new_basis >> site_j) & 1;
+                if (new_bit_j != op_j) {
+                    new_basis ^= (1 << site_j);
+                } else {
+                    valid = false;
+                }
+            } else if (valid) {
+                int new_bit_j = (new_basis >> site_j) & 1;
+                factor *= Complex(spin_l * pow(-1, new_bit_j), 0.0);
+            }
+            
+            if (valid) return {new_basis, factor};
             return {basis, Complex(0.0, 0.0)};
         });
     }
 };
 
 /**
- * BasePositionOperator class - intermediate class that provides common functionality
- * for operators that use position-dependent phases
+ * Base class for position-dependent operators
  */
 class BasePositionOperator : public Operator {
 protected:
-    /**
-     * Read site positions from file
-     * Expected format: Each line contains x y z coordinates for one site
-     * @param filename Path to positions file
-     * @param expected_sites Expected number of sites
-     * @return Vector of position vectors
-     */
     std::vector<std::vector<double>> readPositionsFromFile(const std::string& filename, int expected_sites) {
         std::ifstream file(filename);
         if (!file.is_open()) {
@@ -1576,276 +1127,188 @@ protected:
         std::vector<std::vector<double>> positions(expected_sites);
         std::string line;
         
-        // Skip the header lines (comments starting with #)
-        while (std::getline(file, line) && line[0] == '#') {
-            // Skip header lines
-        }
+        while (std::getline(file, line) && line[0] == '#');
         
-        // Process the first non-header line (if we stopped at one)
-        bool process_current_line = !line.empty() && line[0] != '#';
+        bool process_current = !line.empty() && line[0] != '#';
         
         do {
-            if (process_current_line) {
-                std::istringstream iss(line);
-                int site_id, matrix_index, sublattice_index;
-                double x, y, z;
-                
-                if (iss >> site_id >> matrix_index >> sublattice_index >> x >> y >> z) {
-                    if (site_id >= 0 && site_id < expected_sites) {
-                        positions[site_id] = {x, y, z};
-                    }
+            if (line.empty() || line[0] == '#') continue;
+            
+            std::istringstream iss(line);
+            int site_id, matrix_idx, sublattice;
+            double x, y, z;
+            
+            if (iss >> site_id >> matrix_idx >> sublattice >> x >> y >> z) {
+                if (site_id >= 0 && site_id < expected_sites) {
+                    positions[site_id] = {x, y, z};
                 }
             }
-            process_current_line = true;
         } while (std::getline(file, line));
-        
-        // Verify all positions were loaded
-        for (int i = 0; i < expected_sites; ++i) {
-            if (positions[i].empty()) {
-                throw std::runtime_error("Missing position data for site " + std::to_string(i));
-            }
-        }
         
         return positions;
     }
-
-    /**
-     * Calculate phase factors for all sites based on Q vector and positions
-     * @param Q_vector Momentum vector [Qx, Qy, Qz]
-     * @param positions Site positions
-     * @param normalization Normalization factor (typically 1/√N)
-     * @return Vector of complex phase factors
-     */
+    
     std::vector<Complex> calculatePhaseFactors(const std::vector<double>& Q_vector,
-                                               const std::vector<std::vector<double>>& positions,
-                                               double normalization) {
-        std::vector<Complex> phase_factors(positions.size());
+                                                const std::vector<std::vector<double>>& positions,
+                                                double normalization) {
+        std::vector<Complex> phases(positions.size());
         for (size_t i = 0; i < positions.size(); ++i) {
-            if (positions[i].size() < 3) {
-                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
+            double dot_product = 0.0;
+            for (size_t d = 0; d < 3; ++d) {
+                dot_product += Q_vector[d] * positions[i][d];
             }
-            
-            double phase = Q_vector[0] * positions[i][0] + 
-                          Q_vector[1] * positions[i][1] + 
-                          Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase) * normalization, std::sin(phase) * normalization);
+            phases[i] = normalization * std::exp(Complex(0.0, dot_product));
         }
-        return phase_factors;
+        return phases;
     }
+    
+public:
+    BasePositionOperator(int num_site, float spin_l) : Operator(num_site, spin_l) {}
+};
 
-    /**
-     * Calculate phase factors with sublattice-dependent weighting
-     * @param Q_vector Momentum vector [Qx, Qy, Qz]
-     * @param v Direction vector [vx, vy, vz]
-     * @param positions Site positions
-     * @param normalization Normalization factor
-     * @return Vector of complex phase factors
-     */
-    std::vector<Complex> calculateTransversePhaseFactors(const std::vector<double>& Q_vector,
-                                                         const std::vector<double>& v,
-                                                         const std::vector<std::vector<double>>& positions,
-                                                         double normalization) {
+/**
+ * Sum operator: S^α = Σᵢ S^α_i e^(iQ·Rᵢ) / √N
+ */
+class SumOperator : public BasePositionOperator {
+public:
+    SumOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector,
+                const std::string& positions_file)
+        : BasePositionOperator(num_site, spin_l) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        int flipped = basis ^ (1 << site);
+                        return {flipped, phase};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Sum operator with Cartesian basis (Sx, Sy, Sz)
+ */
+class SumOperatorXYZ : public BasePositionOperator {
+public:
+    SumOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector,
+                   const std::string& positions_file)
+        : BasePositionOperator(num_site, spin_l) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            if (op == 0) {
+                // Sx = (S+ + S-) / 2
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    int flipped = basis ^ (1 << site);
+                    return {flipped, phase * Complex(0.5, 0.0)};
+                });
+            } else if (op == 1) {
+                // Sy = (S+ - S-) / (2i)
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    int flipped = basis ^ (1 << site);
+                    bool is_up = ((basis >> site) & 1) == 0;
+                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
+                });
+            } else if (op == 2) {
+                // Sz
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                });
+            }
+        }
+    }
+};
+
+/**
+ * Sublattice operator: sum over specific sublattice sites
+ */
+class SublatticeOperator : public BasePositionOperator {
+public:
+    SublatticeOperator(int sublattice_idx, int unit_cell_size, int num_site, float spin_l,
+                      int op, const std::vector<double>& Q_vector,
+                      const std::string& positions_file)
+        : BasePositionOperator(num_site, spin_l) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
+        
+        for (int site = sublattice_idx; site < num_site; site += unit_cell_size) {
+            Complex phase = phases[site];
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                } else {
+                    if (((basis >> site) & 1) != op) {
+                        int flipped = basis ^ (1 << site);
+                        return {flipped, phase};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        }
+    }
+};
+
+/**
+ * Transverse operator with sublattice-dependent weighting
+ */
+class TransverseOperator : public BasePositionOperator {
+public:
+    TransverseOperator(int num_site, float spin_l, int op,
+                      const std::vector<double>& Q_vector,
+                      const std::vector<double>& v,
+                      const std::string& positions_file)
+        : BasePositionOperator(num_site, spin_l) {
+        
+        auto positions = readPositionsFromFile(positions_file, num_site);
+        
+        // Calculate transverse phase factors with sublattice weighting
+        std::vector<Complex> phases(num_site);
         const std::vector<std::vector<double>> z_mu = {
             {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
             {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
             {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
             {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
         };
-
-        std::vector<Complex> phase_factors(positions.size());
-        for (size_t i = 0; i < positions.size(); ++i) {
-            if (positions[i].size() < 3) {
-                throw std::runtime_error("Position vector must have at least 3 components for site " + std::to_string(i));
+        
+        for (int i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
             }
+            
             int sublattice = i % 4;
-            double factor = z_mu[sublattice][0]*v[0] + z_mu[sublattice][1]*v[1] + z_mu[sublattice][2]*v[2];
-            double phase = Q_vector[0] * positions[i][0] + 
-                          Q_vector[1] * positions[i][1] + 
-                          Q_vector[2] * positions[i][2];
-            phase_factors[i] = Complex(std::cos(phase) * normalization * factor, 
-                                      std::sin(phase) * normalization * factor);
+            double v_dot_z = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
         }
-        return phase_factors;
-    }
-
-    /**
-     * Add transforms for Pauli basis operators (S+, S-, Sz)
-     */
-    void addPauliTransforms(int num_site, float spin_l, int op, const std::vector<Complex>& phase_factors) {
+        
         for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
-            
+            Complex phase = phases[site];
             addTransform([=](int basis) -> std::pair<int, Complex> {
                 if (op == 2) {
-                    // Sz operator
-                    int bit = (basis >> site) & 1;
-                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
-                } else {
-                    // S+ or S- operator
-                    if (((basis >> site) & 1) != op) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * double(spin_l * 2)};
-                    }
-                }
-                return {basis, Complex(0.0, 0.0)};
-            });
-        }
-    }
-
-    /**
-     * Add transforms for Cartesian basis operators (Sx, Sy, Sz)
-     */
-    void addCartesianTransforms(int num_site, float spin_l, int op, const std::vector<Complex>& phase_factors) {
-        if (op == 0) {
-            // Sx = (S+ + S-) / 2
-            for (int site = 0; site < num_site; ++site) {
-                Complex phase_factor = phase_factors[site];
-                
-                // S+ contribution
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    if (((basis >> site) & 1) != 0) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * Complex(0.5, 0) * double(spin_l * 2)};
-                    }
-                    return {basis, Complex(0.0, 0.0)};
-                });
-                
-                // S- contribution
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    if (((basis >> site) & 1) != 1) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * Complex(0.5, 0) * double(spin_l * 2)};
-                    }
-                    return {basis, Complex(0.0, 0.0)};
-                });
-            }
-        } else if (op == 1) {
-            // Sy = (S+ - S-) / 2i
-            for (int site = 0; site < num_site; ++site) {
-                Complex phase_factor = phase_factors[site];
-                
-                // S+ contribution
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    if (((basis >> site) & 1) != 0) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * Complex(0, -0.5) * double(spin_l * 2)};
-                    }
-                    return {basis, Complex(0.0, 0.0)};
-                });
-                
-                // S- contribution
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    if (((basis >> site) & 1) != 1) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * Complex(0, 0.5) * double(spin_l * 2)};
-                    }
-                    return {basis, Complex(0.0, 0.0)};
-                });
-            }
-        } else {
-            // Sz operator
-            for (int site = 0; site < num_site; ++site) {
-                Complex phase_factor = phase_factors[site];
-                
-                addTransform([=](int basis) -> std::pair<int, Complex> {
-                    int bit = (basis >> site) & 1;
-                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
-                });
-            }
-        }
-    }
-
-public:
-    BasePositionOperator(int num_site, float spin_l) : Operator(num_site, spin_l) {}
-};
-
-
-/**
- * SumOperator class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {+,−,z}, Q is momentum vector, Rᵢ are site positions
- */
-class SumOperator : public BasePositionOperator {
-public:
-    SumOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
-        : BasePositionOperator(num_site, spin_l) {
-        
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        
-        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
-        addPauliTransforms(num_site, spin_l, op, phase_factors);
-    }
-};
-
-
-/**
- * SumOperatorXYZ class represents a sum of single-site operators with position-dependent phases
- * S^α = Σᵢ S^α_i e^(iQ·Rᵢ) 1/√N, where α ∈ {x,y,z}, Q is momentum vector, Rᵢ are site positions
- */
-class SumOperatorXYZ : public BasePositionOperator {
-public:
-    SumOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, const std::string& positions_file) 
-        : BasePositionOperator(num_site, spin_l) {
-        
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for Sx, 1 for Sy, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        
-        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
-        addCartesianTransforms(num_site, spin_l, op, phase_factors);
-    }
-};
-
-
-/**
- * SublatticeOperator class represents a sum over specific sublattice sites
- */
-class SublatticeOperator : public BasePositionOperator {
-public:
-    SublatticeOperator(int i, int unit_cel_size, int num_site, float spin_l, int op, 
-                      const std::vector<double>& Q_vector, const std::string& positions_file) 
-        : BasePositionOperator(num_site, spin_l) {
-
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        
-        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
-        
-        // Only add transforms for sublattice sites
-        for (int site = i; site < num_site; site += unit_cel_size) {
-            Complex phase_factor = phase_factors[site];
-            
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (op == 2) {
-                    int bit = (basis >> site) & 1;
-                    return {basis, phase_factor * double(spin_l) * pow(-1, bit)};
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
                 } else {
                     if (((basis >> site) & 1) != op) {
-                        int flipped_basis = basis ^ (1 << site);
-                        return {flipped_basis, phase_factor * double(spin_l * 2)};
+                        int flipped = basis ^ (1 << site);
+                        return {flipped, phase};
                     }
                 }
                 return {basis, Complex(0.0, 0.0)};
@@ -1854,181 +1317,154 @@ public:
     }
 };
 
-
 /**
- * TransverseOperator class with sublattice-dependent transverse weighting
- */
-class TransverseOperator : public BasePositionOperator {
-public:
-    TransverseOperator(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, 
-                      const std::vector<double>& v, const std::string& positions_file) 
-        : BasePositionOperator(num_site, spin_l) {
-        
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for S+, 1 for S-, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        if (v.size() != 3) {
-            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
-        }
-        
-        auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        
-        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
-        addPauliTransforms(num_site, spin_l, op, phase_factors);
-    }
-};
-
-
-/**
- * TransverseOperatorXYZ class with Cartesian basis and sublattice weighting
+ * Transverse operator with Cartesian basis
  */
 class TransverseOperatorXYZ : public BasePositionOperator {
 public:
-    TransverseOperatorXYZ(int num_site, float spin_l, int op, const std::vector<double>& Q_vector, 
-                         const std::vector<double>& v, const std::string& positions_file) 
+    TransverseOperatorXYZ(int num_site, float spin_l, int op,
+                         const std::vector<double>& Q_vector,
+                         const std::vector<double>& v,
+                         const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
-        if (op < 0 || op > 2) {
-            throw std::invalid_argument("Invalid operator type. Use 0 for Sx, 1 for Sy, 2 for Sz");
-        }
-        
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        if (v.size() != 3) {
-            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
-        }
-        
         auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
         
-        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
-        addCartesianTransforms(num_site, spin_l, op, phase_factors);
+        // Calculate transverse phase factors with sublattice weighting
+        std::vector<Complex> phases(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+        
+        for (int i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
+            }
+            
+            int sublattice = i % 4;
+            double v_dot_z = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
+        }
+        
+        for (int site = 0; site < num_site; ++site) {
+            Complex phase = phases[site];
+            
+            if (op == 0) {
+                // Sx
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    int flipped = basis ^ (1 << site);
+                    return {flipped, phase * Complex(0.5, 0.0)};
+                });
+            } else if (op == 1) {
+                // Sy
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    int flipped = basis ^ (1 << site);
+                    bool is_up = ((basis >> site) & 1) == 0;
+                    return {flipped, phase * Complex(0.0, is_up ? 0.5 : -0.5)};
+                });
+            } else if (op == 2) {
+                // Sz
+                addTransform([=](int basis) -> std::pair<int, Complex> {
+                    return {basis, phase * Complex(spin_l * pow(-1, (basis >> site) & 1), 0.0)};
+                });
+            }
+        }
     }
 };
 
 /**
- * ExperimentalOperator class for sum of cos(θ)Sz + sin(θ)Sx operators
+ * Experimental operator: cos(θ)Sz + sin(θ)Sx
  */
 class ExperimentalOperator : public BasePositionOperator {
 public:
-    ExperimentalOperator(int num_site, float spin_l, double theta, 
-                        const std::vector<double>& Q_vector, 
-                        const std::string& positions_file) 
+    ExperimentalOperator(int num_site, float spin_l, double theta,
+                        const std::vector<double>& Q_vector,
+                        const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
         auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
-        
-        auto phase_factors = calculatePhaseFactors(Q_vector, positions, 1.0/std::sqrt(num_site));
+        auto phases = calculatePhaseFactors(Q_vector, positions, 1.0 / std::sqrt(num_site));
         
         double cos_theta = std::cos(theta);
         double sin_theta = std::sin(theta);
         
-        // Add Sz contribution (cos(θ) * Sz)
         for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
+            Complex phase = phases[site];
             
+            // Sz contribution
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                int bit = (basis >> site) & 1;
-                return {basis, phase_factor * cos_theta * double(spin_l) * pow(-1, bit)};
-            });
-        }
-        
-        // Add Sx contribution (sin(θ) * Sx = sin(θ) * (S+ + S-) / 2)
-        for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
-            
-            // S+ contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site) & 1) != 0) {
-                    int flipped_basis = basis ^ (1 << site);
-                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
+                return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
             });
             
-            // S- contribution
+            // Sx contribution = (S+ + S-) / 2
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site) & 1) != 1) {
-                    int flipped_basis = basis ^ (1 << site);
-                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
+                int flipped = basis ^ (1 << site);
+                return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
     }
 };
 
-
 /**
- * TransverseExperimentalOperator class with sublattice-dependent weighting
+ * Transverse experimental operator with sublattice weighting
  */
 class TransverseExperimentalOperator : public BasePositionOperator {
 public:
     TransverseExperimentalOperator(int num_site, float spin_l, double theta,
-                                  const std::vector<double>& Q_vector, 
+                                  const std::vector<double>& Q_vector,
                                   const std::vector<double>& v,
-                                  const std::string& positions_file) 
+                                  const std::string& positions_file)
         : BasePositionOperator(num_site, spin_l) {
         
-        if (Q_vector.size() != 3) {
-            throw std::invalid_argument("Q_vector must have 3 components [Qx, Qy, Qz]");
-        }
-        
-        if (v.size() != 3) {
-            throw std::invalid_argument("v must have 3 components [vx, vy, vz]");
-        }
-        
         auto positions = readPositionsFromFile(positions_file, num_site);
-        std::cout << "Loaded positions for " << num_site << " sites from " << positions_file << std::endl;
         
-        auto phase_factors = calculateTransversePhaseFactors(Q_vector, v, positions, 1.0/std::sqrt(num_site));
+        // Calculate transverse phase factors
+        std::vector<Complex> phases(num_site);
+        const std::vector<std::vector<double>> z_mu = {
+            {-1/std::sqrt(3), -1/std::sqrt(3), -1/std::sqrt(3)},
+            {-1/std::sqrt(3), 1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), -1/std::sqrt(3), 1/std::sqrt(3)},
+            {1/std::sqrt(3), 1/std::sqrt(3), -1/std::sqrt(3)}
+        };
+        
+        for (int i = 0; i < num_site; ++i) {
+            double Q_dot_R = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                Q_dot_R += Q_vector[d] * positions[i][d];
+            }
+            
+            int sublattice = i % 4;
+            double v_dot_z = 0.0;
+            for (int d = 0; d < 3; ++d) {
+                v_dot_z += v[d] * z_mu[sublattice][d];
+            }
+            
+            phases[i] = (1.0 / std::sqrt(num_site)) * v_dot_z * std::exp(Complex(0.0, Q_dot_R));
+        }
         
         double cos_theta = std::cos(theta);
         double sin_theta = std::sin(theta);
         
-        // Add Sz contribution (cos(θ) * Sz)
         for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
+            Complex phase = phases[site];
             
+            // Sz contribution
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                int bit = (basis >> site) & 1;
-                return {basis, phase_factor * cos_theta * double(spin_l) * pow(-1, bit)};
-            });
-        }
-        
-        // Add Sx contribution (sin(θ) * Sx = sin(θ) * (S+ + S-) / 2)
-        for (int site = 0; site < num_site; ++site) {
-            Complex phase_factor = phase_factors[site];
-            
-            // S+ contribution
-            addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site) & 1) != 0) {
-                    int flipped_basis = basis ^ (1 << site);
-                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
+                return {basis, phase * Complex(cos_theta * spin_l * pow(-1, (basis >> site) & 1), 0.0)};
             });
             
-            // S- contribution
+            // Sx contribution
             addTransform([=](int basis) -> std::pair<int, Complex> {
-                if (((basis >> site) & 1) != 1) {
-                    int flipped_basis = basis ^ (1 << site);
-                    return {flipped_basis, phase_factor * sin_theta * Complex(0.5, 0) * double(spin_l * 2)};
-                }
-                return {basis, Complex(0.0, 0.0)};
+                int flipped = basis ^ (1 << site);
+                return {flipped, phase * Complex(sin_theta * 0.5, 0.0)};
             });
         }
     }
