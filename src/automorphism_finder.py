@@ -546,5 +546,95 @@ def main():
         json.dump(generators, f, indent=2)
     print(f"Saved minimal generators to {generators_file}")
 
+    # Generate sector metadata for symmetry sectors
+    sector_metadata = generate_sector_metadata(generators, max_clique)
+    sector_metadata_file = os.path.join(output_dir, "sector_metadata.json")
+    with open(sector_metadata_file, 'w') as f:
+        json.dump(sector_metadata, f, indent=2)
+    print(f"Saved sector metadata to {sector_metadata_file}")
+    print(f"Number of symmetry sectors: {len(sector_metadata['sectors'])}")
+
+
+def generate_sector_metadata(generators, max_clique):
+    """
+    Generate metadata for all symmetry sectors (irreducible representations).
+    
+    For abelian groups, each sector is characterized by quantum numbers corresponding
+    to the eigenvalues of the symmetry operators (generators).
+    
+    Args:
+        generators: List of generator info dictionaries with 'permutation' and 'order'
+        max_clique: List of all group elements (permutations)
+        
+    Returns:
+        Dictionary with sector metadata including quantum numbers and phase factors
+    """
+    if not generators:
+        # No generators -> only trivial sector
+        return {
+            "num_generators": 0,
+            "generator_orders": [],
+            "sectors": [
+                {
+                    "sector_id": 0,
+                    "quantum_numbers": [],
+                    "phase_factors": []
+                }
+            ]
+        }
+    
+    # Extract generator orders
+    generator_orders = [gen['order'] for gen in generators]
+    num_generators = len(generator_orders)
+    
+    print(f"\nGenerating sector metadata for abelian group:")
+    print(f"  Generators: {num_generators}")
+    print(f"  Orders: {generator_orders}")
+    
+    # For abelian groups, quantum numbers range from 0 to order-1 for each generator
+    # Each sector corresponds to a unique combination of quantum numbers
+    sectors = []
+    sector_id = 0
+    
+    # Generate all possible quantum number combinations
+    def generate_quantum_numbers(idx, current_qn):
+        nonlocal sector_id
+        
+        if idx == num_generators:
+            # Compute phase factors for each generator for this sector
+            # phase_k = exp(2πi * quantum_number_k / order_k)
+            # The C++ code will compose these based on power representation
+            phase_factors = []
+            for j in range(num_generators):
+                phase_angle = 2.0 * np.pi * current_qn[j] / generator_orders[j]
+                # Store as complex number: real and imaginary parts
+                phase_factors.append({
+                    "real": np.cos(phase_angle),
+                    "imag": np.sin(phase_angle)
+                })
+            
+            sectors.append({
+                "sector_id": sector_id,
+                "quantum_numbers": list(current_qn),
+                "phase_factors": phase_factors
+            })
+            sector_id += 1
+            return
+        
+        # Try all quantum numbers for current generator
+        for qn in range(generator_orders[idx]):
+            generate_quantum_numbers(idx + 1, current_qn + [qn])
+    
+    generate_quantum_numbers(0, [])
+    
+    print(f"  Total sectors: {len(sectors)}")
+    
+    return {
+        "num_generators": num_generators,
+        "generator_orders": generator_orders,
+        "sectors": sectors
+    }
+
+
 if __name__ == "__main__":
     main()

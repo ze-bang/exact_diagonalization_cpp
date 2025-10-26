@@ -20,6 +20,34 @@
 // Define complex number type for convenience
 using Complex = std::complex<double>;
 
+
+
+// Calculate thermodynamic quantities directly from eigenvalues
+struct ThermodynamicData {
+    std::vector<double> temperatures;
+    std::vector<double> energy;
+    std::vector<double> specific_heat;
+    std::vector<double> entropy;
+    std::vector<double> free_energy;
+};
+
+
+// Calculate dynamical susceptibility χ(ω) for operator A
+// χ(ω) = ∑_{n,m} (p_m - p_n) * |<n|A|m>|^2 / (ω - (E_n - E_m) + iη)
+struct DynamicalSusceptibilityData {
+    std::vector<double> frequencies;         // ω values
+    std::vector<std::complex<double>> chi;   // χ(ω) values (complex)
+};
+
+// Calculate spectral function A(ω) for operator O using all eigenstates
+// A(ω) = Σ_n,m |<n|O|m>|^2 δ(ω - (E_n - E_m)) * weight(m)
+// where δ is approximated by a broadening function (Gaussian or Lorentzian)
+struct SpectralFunctionData {
+    std::vector<double> frequencies;     // ω values
+    std::vector<std::complex<double>> spectral_function;  // A(ω) values
+};
+
+
 // ============================================================================
 // Utility Functions
 // ============================================================================
@@ -170,29 +198,63 @@ private:
         }
         
         size_t pos = json.find('[', sectors_pos);
-        int depth = 0;
+        if (pos == std::string::npos) {
+            throw std::runtime_error("Could not find sectors array start");
+        }
+        pos++; // Move past the opening bracket
         
-        while (pos < json.size()) {
+        // Find the end of the sectors array by counting brackets
+        size_t array_end = pos;
+        int bracket_depth = 1;
+        while (array_end < json.size() && bracket_depth > 0) {
+            if (json[array_end] == '[') bracket_depth++;
+            else if (json[array_end] == ']') bracket_depth--;
+            array_end++;
+        }
+        
+        // Parse each sector object
+        while (pos < array_end) {
+            // Skip whitespace and commas
+            while (pos < array_end && (json[pos] == ' ' || json[pos] == '\n' || 
+                   json[pos] == '\r' || json[pos] == '\t' || json[pos] == ',')) {
+                pos++;
+            }
+            
+            if (pos >= array_end || json[pos] == ']') break;
+            
             if (json[pos] == '{') {
+                // Find the matching closing brace for this sector
+                size_t sector_start = pos;
+                size_t sector_end = sector_start + 1;
+                int brace_depth = 1;
+                while (sector_end < array_end && brace_depth > 0) {
+                    if (json[sector_end] == '{') brace_depth++;
+                    else if (json[sector_end] == '}') brace_depth--;
+                    sector_end++;
+                }
+                
+                // Extract this sector's JSON
+                std::string sector_json = json.substr(sector_start, sector_end - sector_start);
+                
                 // Parse one sector
                 SectorMetadata sector;
                 
                 // Find sector_id
-                size_t id_pos = json.find("\"sector_id\":", pos);
+                size_t id_pos = sector_json.find("\"sector_id\":");
                 if (id_pos != std::string::npos) {
                     id_pos += 12;
-                    size_t comma = json.find_first_of(",}", id_pos);
-                    std::string id_str = json.substr(id_pos, comma - id_pos);
+                    size_t comma = sector_json.find_first_of(",}", id_pos);
+                    std::string id_str = sector_json.substr(id_pos, comma - id_pos);
                     id_str.erase(0, id_str.find_first_not_of(" \t\n\r"));
                     sector.sector_id = std::stoi(id_str);
                 }
                 
                 // Find quantum_numbers array
-                size_t qn_pos = json.find("\"quantum_numbers\":", pos);
+                size_t qn_pos = sector_json.find("\"quantum_numbers\":");
                 if (qn_pos != std::string::npos) {
-                    size_t qn_start = json.find('[', qn_pos);
-                    size_t qn_end = json.find(']', qn_start);
-                    std::string qn_str = json.substr(qn_start + 1, qn_end - qn_start - 1);
+                    size_t qn_start = sector_json.find('[', qn_pos);
+                    size_t qn_end = sector_json.find(']', qn_start);
+                    std::string qn_str = sector_json.substr(qn_start + 1, qn_end - qn_start - 1);
                     
                     std::istringstream iss(qn_str);
                     std::string num;
@@ -204,13 +266,12 @@ private:
                 }
                 
                 // Parse phase_factors
-                size_t pf_pos = json.find("\"phase_factors\":", pos);
+                size_t pf_pos = sector_json.find("\"phase_factors\":");
                 if (pf_pos != std::string::npos) {
-                    size_t pf_start = json.find('[', pf_pos);
-                    size_t pf_end = json.find(']', pf_start);
+                    size_t pf_start = sector_json.find('[', pf_pos);
+                    size_t pf_end = sector_json.find(']', pf_start);
                     
-                    // Count phase factors
-                    std::string pf_section = json.substr(pf_start, pf_end - pf_start);
+                    std::string pf_section = sector_json.substr(pf_start, pf_end - pf_start + 1);
                     size_t temp_pos = 0;
                     while ((temp_pos = pf_section.find('{', temp_pos)) != std::string::npos) {
                         size_t real_pos = pf_section.find("\"real\":", temp_pos);
@@ -240,13 +301,11 @@ private:
                 sector.dimension = 0;  // Will be set during basis generation
                 sectors.push_back(sector);
                 
-                pos = json.find('}', pos) + 1;
+                // Move to the position after this sector
+                pos = sector_end;
             } else {
                 pos++;
             }
-            
-            // Stop when we reach the end of sectors array
-            if (json[pos] == ']' && depth == 0) break;
         }
         
         std::cout << "Loaded metadata for " << sectors.size() << " symmetry sectors" << std::endl;

@@ -29,7 +29,7 @@
  * @return Element-wise sum of the two vectors
  * @throws std::invalid_argument if vectors have different sizes
  */
-std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for addition.");
     }
@@ -43,7 +43,7 @@ std::vector<Complex> operator+ (const std::vector<Complex>& a, const std::vector
 /**
  * @brief Vector subtraction operator for complex vectors
  */
-std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for subtraction.");
     }
@@ -57,7 +57,7 @@ std::vector<Complex> operator- (const std::vector<Complex>& a, const std::vector
 /**
  * @brief In-place addition operator for complex vectors
  */
-std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for addition.");
     }
@@ -70,7 +70,7 @@ std::vector<Complex> operator+= (std::vector<Complex>& a, const std::vector<Comp
 /**
  * @brief In-place subtraction operator for complex vectors
  */
-std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
+inline std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Complex>& b) {
     if (a.size() != b.size()) {
         throw std::invalid_argument("Vectors must be of the same size for subtraction.");
     }
@@ -83,7 +83,7 @@ std::vector<Complex> operator-= (std::vector<Complex>& a, const std::vector<Comp
 /**
  * @brief Scalar multiplication operator for complex vectors
  */
-std::vector<Complex> operator* (const std::vector<Complex>& a, const Complex& b) {
+inline std::vector<Complex> operator* (const std::vector<Complex>& a, const Complex& b) {
     std::vector<Complex> result(a.size());
     for (size_t i = 0; i < a.size(); ++i) {
         result[i] = a[i] * b;
@@ -1099,10 +1099,15 @@ void setup_symmetry_basis(
 ) {
     std::string sym_basis_dir = directory + "/sym_basis";
     std::string sym_blocks_dir = directory + "/sym_blocks";
+    std::string block_sizes_file = sym_basis_dir + "/sym_block_sizes.txt";
     
     struct stat buffer;
-    bool sym_basis_exists = (stat(sym_basis_dir.c_str(), &buffer) == 0);
-    bool sym_blocks_exists = (stat(sym_blocks_dir.c_str(), &buffer) == 0);
+    // Check if the actual block sizes file exists, not just the directory
+    bool sym_basis_exists = (stat(block_sizes_file.c_str(), &buffer) == 0);
+    
+    // Check if at least one block file exists (block_0.dat)
+    std::string first_block_file = sym_blocks_dir + "/block_0.dat";
+    bool sym_blocks_exist = (stat(first_block_file.c_str(), &buffer) == 0);
     
     if (!sym_basis_exists) {
         std::cout << "Symmetrized basis not found. Generating..." << std::endl;
@@ -1111,7 +1116,7 @@ void setup_symmetry_basis(
         std::cout << "Using existing symmetrized basis from " << sym_basis_dir << std::endl;
     }
     
-    if (!sym_blocks_exists) {
+    if (!sym_blocks_exist) {
         hamiltonian.buildAndSaveSymmetrizedBlocks(directory);
     } else {
         hamiltonian.loadAllSymmetrizedBlocks(directory);
@@ -1308,7 +1313,8 @@ EDResults exact_diagonalization_from_directory_symmetrized(
 
         // Configure block parameters
         EDParameters block_params = params;
-        block_params.num_eigenvalues = std::min(params.num_eigenvalues - block_start_dim, block_dim);
+        // Compute at least params.num_eigenvalues for each block (up to block dimension)
+        block_params.num_eigenvalues = std::min(params.num_eigenvalues, block_dim);
         if (params.compute_eigenvectors) {
             block_params.output_dir = params.output_dir + "/min_sector";
             system(("mkdir -p " + block_params.output_dir).c_str());

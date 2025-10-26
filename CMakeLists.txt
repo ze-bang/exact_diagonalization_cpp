@@ -249,6 +249,17 @@ set(SOURCES
     ${SRC_DIR}/TPQ.cpp
 )
 
+# New elegant main sources
+set(NEW_MAIN_SOURCES
+    ${SRC_DIR}/ed_main.cpp
+    ${SRC_DIR}/ed_config.cpp
+    ${SRC_DIR}/arpack.cpp
+    ${SRC_DIR}/observables.cpp
+    ${SRC_DIR}/lanczos.cpp
+    ${SRC_DIR}/CG.cpp
+    ${SRC_DIR}/TPQ.cpp
+)
+
 # Header-only sources that should be included in compilation
 set(HEADER_SOURCES
     ${SRC_DIR}/*.h
@@ -282,8 +293,9 @@ else()
     message(STATUS "CUDA disabled, skipping CUDA sources")
 endif()
 
-# Define executable
-add_executable(ED ${SOURCES})
+# Define executables
+add_executable(ED_LEGACY ${SOURCES})          # Old main (kept for backward compatibility)
+add_executable(ED ${NEW_MAIN_SOURCES})  # New elegant main
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/TPQ.cpp)
@@ -310,7 +322,7 @@ endif()
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
-        target_link_libraries(ED MKL::MKL)
+        target_link_libraries(ED_LEGACY MKL::MKL)
     else()
         # Link traditional MKL (already linked via BLAS_LIBRARIES)
         # No additional linking needed since MKL is detected as BLAS/LAPACK
@@ -318,6 +330,15 @@ if(WITH_MKL)
 endif()
 
 # Link libraries
+target_link_libraries(ED_LEGACY
+    ${BLAS_LIBRARIES}
+    ${LAPACK_LIBRARIES}
+    ${LAPACKE_LIBRARIES}
+    ${EXTRA_LINALG_LIBRARIES}
+    ${ARPACK_LIBRARY}
+)
+
+# Link libraries for new main
 target_link_libraries(ED
     ${BLAS_LIBRARIES}
     ${LAPACK_LIBRARIES}
@@ -364,6 +385,7 @@ endif()
 if(WITH_MKL)
     if(USE_ONEMKL AND MKL_FOUND)
         # Link oneMKL using its modern CMake targets
+        target_link_libraries(ED_LEGACY MKL::MKL)
         target_link_libraries(ED MKL::MKL)
         
         if(TARGET TPQ_DSSF)
@@ -388,6 +410,13 @@ endif()
 
 # Add CUDA libraries if enabled
 if(WITH_CUDA)
+    target_link_libraries(ED
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+    )
+    
     target_link_libraries(ED
         CUDA::cudart
         CUDA::cublas
@@ -429,6 +458,7 @@ endif()
 
 # Add MPI if enabled
 if(WITH_MPI)
+    target_link_libraries(ED_LEGACY ${MPI_CXX_LIBRARIES})
     target_link_libraries(ED ${MPI_CXX_LIBRARIES})
     
     if(TARGET TPQ_DSSF)
@@ -448,7 +478,7 @@ if(WITH_MPI)
 endif()
 
 # Install targets
-install(TARGETS ED DESTINATION bin)
+install(TARGETS ED_LEGACY ED DESTINATION bin)
 
 # Print configuration summary
 message(STATUS "Configuration Summary:")
@@ -497,6 +527,13 @@ endif()
 
 # CUDA-specific compile options
 if(WITH_CUDA)
+    set_property(TARGET ED_LEGACY PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+    target_compile_options(ED_LEGACY PRIVATE 
+        $<$<COMPILE_LANGUAGE:CUDA>:-O3>
+        $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
+        $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
+    )
+    
     set_property(TARGET ED PROPERTY CUDA_SEPARABLE_COMPILATION ON)
     target_compile_options(ED PRIVATE 
         $<$<COMPILE_LANGUAGE:CUDA>:-O3>
@@ -538,6 +575,7 @@ endif()
 # Add OpenMP support if available
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
+    target_link_libraries(ED_LEGACY OpenMP::OpenMP_CXX)
     target_link_libraries(ED OpenMP::OpenMP_CXX)
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF OpenMP::OpenMP_CXX)

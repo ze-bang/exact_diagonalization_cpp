@@ -29,31 +29,6 @@ using ComplexVector = std::vector<Complex>;
 
 
 // Calculate thermodynamic quantities directly from eigenvalues
-struct ThermodynamicData {
-    std::vector<double> temperatures;
-    std::vector<double> energy;
-    std::vector<double> specific_heat;
-    std::vector<double> entropy;
-    std::vector<double> free_energy;
-};
-
-
-// Calculate dynamical susceptibility χ(ω) for operator A
-// χ(ω) = ∑_{n,m} (p_m - p_n) * |<n|A|m>|^2 / (ω - (E_n - E_m) + iη)
-struct DynamicalSusceptibilityData {
-    std::vector<double> frequencies;         // ω values
-    std::vector<std::complex<double>> chi;   // χ(ω) values (complex)
-};
-
-// Calculate spectral function A(ω) for operator O using all eigenstates
-// A(ω) = Σ_n,m |<n|O|m>|^2 δ(ω - (E_n - E_m)) * weight(m)
-// where δ is approximated by a broadening function (Gaussian or Lorentzian)
-struct SpectralFunctionData {
-    std::vector<double> frequencies;     // ω values
-    std::vector<std::complex<double>> spectral_function;  // A(ω) values
-};
-
-// Calculate thermodynamic quantities directly from eigenvalues
 ThermodynamicData calculate_thermodynamics_from_spectrum(
     const std::vector<double>& eigenvalues,
     double T_min = 0.01,        // Minimum temperature
