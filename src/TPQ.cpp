@@ -1,5 +1,256 @@
 #include "TPQ.h"
 
+// Note: Time evolution and dynamics computation methods have been moved to dynamics.cpp
+// This file now focuses on TPQ-specific functionality and wraps the general dynamics module
+
+// ============================================================================
+// TPQ-SPECIFIC WRAPPER FUNCTIONS
+// These provide backward compatibility while delegating to the dynamics module
+// ============================================================================
+
+/**
+ * TPQ-specific wrapper for time evolution using Taylor method
+ * Delegates to the general dynamics module
+ */
+void time_evolve_tpq_state(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int n_max,
+    bool normalize
+) {
+    time_evolve_taylor(H, tpq_state, N, delta_t, n_max, normalize);
+}
+
+/**
+ * TPQ-specific wrapper for Krylov time evolution
+ * Delegates to the general dynamics module
+ */
+void time_evolve_tpq_krylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int krylov_dim,
+    bool normalize
+) {
+    time_evolve_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
+}
+
+/**
+ * TPQ-specific wrapper for Chebyshev time evolution
+ * Delegates to the general dynamics module
+ */
+void time_evolve_tpq_chebyshev(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    double E_min,
+    double E_max,
+    int num_terms,
+    bool normalize
+) {
+    time_evolve_chebyshev(H, tpq_state, N, delta_t, E_min, E_max, num_terms, normalize);
+}
+
+/**
+ * TPQ-specific wrapper for RK4 time evolution
+ * Delegates to the general dynamics module
+ */
+void time_evolve_tpq_rk4(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    bool normalize
+) {
+    time_evolve_rk4(H, tpq_state, N, delta_t, normalize);
+}
+
+/**
+ * TPQ-specific wrapper for adaptive time evolution
+ * Delegates to the general dynamics module
+ */
+void time_evolve_tpq_adaptive(
+    std::function<void(const Complex*, Complex*, int)> H,
+    ComplexVector& tpq_state,
+    int N,
+    double delta_t,
+    int accuracy_level,
+    bool normalize
+) {
+    time_evolve_adaptive(H, tpq_state, N, delta_t, accuracy_level, normalize);
+}
+
+/**
+ * Compute dynamical correlations for TPQ using Krylov method
+ * Delegates to the general dynamics module with TPQ-specific file naming
+ */
+void computeDynamicCorrelationsKrylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& tpq_state,
+    const std::vector<Operator>& operators_1,
+    const std::vector<Operator>& operators_2,
+    const std::vector<std::string>& operator_names,
+    int N,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    double t_end,
+    double dt,
+    int krylov_dim
+) {
+    // Create TPQ-specific label
+    std::string label = "sample" + std::to_string(sample) + "_beta" + std::to_string(inv_temp);
+    
+    // Delegate to the general dynamics module
+    compute_operator_dynamics(H, tpq_state, operators_1, operators_2, operator_names,
+                             N, dir, label, t_end, dt, krylov_dim);
+}
+
+/**
+ * Legacy wrapper for backward compatibility with old TPQ code
+ */
+SpectralFunctionData calculate_spectral_function_from_tpq(
+    std::function<void(const Complex*, Complex*, int)> H,
+    std::function<void(const Complex*, Complex*, int)> O,
+    const ComplexVector& tpq_state,
+    int N,
+    double omega_min,
+    double omega_max,
+    int num_points,
+    double tmax,
+    double dt,
+    double eta,
+    bool use_lorentzian,
+    int n_max
+) {
+    // Compute time correlation using the general dynamics module
+    std::vector<Complex> time_corr = compute_time_correlation(
+        H, O, O, tpq_state, N, tmax, dt, 0, n_max, 30);
+    
+    // Compute spectral function from time correlation
+    return compute_spectral_function(time_corr, dt, omega_min, omega_max, 
+                                    num_points, eta, use_lorentzian);
+}
+
+/**
+ * Legacy wrapper for computing time correlations with pre-constructed U_t
+ */
+std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
+    const ComplexVector& tpq_state,
+    int N,
+    const int num_steps
+) {
+    return compute_time_correlations_with_U_t(U_t, operators_1, operators_2, 
+                                             tpq_state, N, num_steps);
+}
+
+/**
+ * Legacy wrapper for incremental time correlation computation
+ */
+void calculate_spectral_function_from_tpq_U_t_incremental(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
+    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
+    const ComplexVector& tpq_state,
+    int N,
+    const int num_steps,
+    double dt,
+    std::vector<std::ofstream>& output_files
+) {
+    compute_time_correlations_incremental(U_t, operators_1, operators_2, 
+                                         tpq_state, N, num_steps, dt, output_files);
+}
+
+/**
+ * Compute observable dynamics for TPQ with legacy interface
+ */
+void computeObservableDynamics_U_t(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    const ComplexVector& tpq_state,
+    const std::vector<Operator>& observables_1,
+    const std::vector<Operator>& observables_2,
+    const std::vector<std::string>& observable_names,
+    int N,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    double t_end,
+    double dt
+) {
+    // Save the current TPQ state for later analysis
+    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
+    save_tpq_state(tpq_state, state_file);
+
+    std::cout << "Computing dynamical susceptibility for sample " << sample 
+              << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
+    
+    // Prebuild sparse matrices for all observables to ensure thread-safe applies
+    for (const auto& op : observables_1) {
+        op.buildSparseMatrix();
+    }
+    for (const auto& op : observables_2) {
+        op.buildSparseMatrix();
+    }
+
+    // Create array of operator functions
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_1;
+    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_2;
+    operatorFuncs_1.reserve(observables_1.size());
+    operatorFuncs_2.reserve(observables_2.size());
+
+    for (size_t i = 0; i < observables_1.size(); i++) {
+        operatorFuncs_1.emplace_back([&observables_1, i](const Complex* in, Complex* out, int size) {
+            std::vector<Complex> input(in, in + size);
+            std::vector<Complex> result = observables_1[i].apply(input);
+            std::copy(result.begin(), result.end(), out);
+        });
+        operatorFuncs_2.emplace_back([&observables_2, i](const Complex* in, Complex* out, int size) {
+            std::vector<Complex> input(in, in + size);
+            std::vector<Complex> result = observables_2[i].apply(input);
+            std::copy(result.begin(), result.end(), out);
+        });
+    }
+
+    // Open output files and write headers for each observable
+    std::vector<std::ofstream> time_corr_files(observables_1.size());
+    for (size_t i = 0; i < observables_1.size(); i++) {
+        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
+        
+        time_corr_files[i].open(time_corr_file);
+        if (time_corr_files[i].is_open()) {
+            time_corr_files[i] << "# t time_correlation_real time_correlation_imag" << std::endl;
+            time_corr_files[i] << std::setprecision(16);
+        } else {
+            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
+        }
+    }
+
+    // Call the general dynamics module's incremental function
+    compute_time_correlations_incremental(
+        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1), dt, time_corr_files);
+
+    // Close all files
+    for (size_t i = 0; i < observables_1.size(); i++) {
+        if (time_corr_files[i].is_open()) {
+            time_corr_files[i].close();
+            std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
+                                 + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
+            std::cout << "Time correlation saved to " << time_corr_file << std::endl;
+        }
+    }
+}
+
+// ============================================================================
+// TPQ-SPECIFIC UTILITY FUNCTIONS
+// ============================================================================
 
 /**
  * Generate a random normalized vector for TPQ initial state
@@ -396,136 +647,6 @@ bool readTPQData(const std::string& filename, int step, double& energy,
 }
 
 
-/**
- * Time evolve TPQ state using Taylor expansion of exp(-iH*delta_t)
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param n_max Maximum order of Taylor expansion
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_state(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int n_max,
-    bool normalize
-) {
-    // Temporary vectors for calculation
-    ComplexVector result(N);
-    ComplexVector term(N);
-    ComplexVector Hterm(N);
-    
-    // Copy initial state to term
-    std::copy(tpq_state.begin(), tpq_state.end(), term.begin());
-    
-    // Copy initial state to result for the first term in Taylor series
-    std::copy(tpq_state.begin(), tpq_state.end(), result.begin());
-    
-    // Precompute coefficients for each term in the Taylor series
-    std::vector<Complex> coefficients(n_max + 1);
-    coefficients[0] = Complex(1.0, 0.0);  // 0th order term
-    double factorial = 1.0;
-    
-    for (int order = 1; order <= n_max; order++) {
-        factorial *= order;
-        // For exp(-iH*t), each term has (-i)^order
-        Complex coef = std::pow(Complex(0.0, -1.0), order);  
-        coefficients[order] = coef * std::pow(delta_t, order) / factorial;
-    }
-    
-    // Apply Taylor expansion terms
-    for (int order = 1; order <= n_max; order++) {
-        // Apply H to the previous term
-        H(term.data(), Hterm.data(), N);
-        std::swap(term, Hterm);
-        
-        // Add this term to the result
-        for (int i = 0; i < N; i++) {
-            result[i] += coefficients[order] * term[i];
-        }
-    }
-    
-    // Replace tpq_state with the evolved state
-    std::swap(tpq_state, result);
-    
-    // Normalize if requested
-    if (normalize) {
-        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
-    }
-}
-
-
-/**
- * Create a time evolution operator using Taylor expansion of exp(-iH*delta_t)
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param n_max Maximum order of Taylor expansion
- * @param normalize Whether to normalize the state after evolution
- * @return Function that applies time evolution to a complex vector
- */
-std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
-    std::function<void(const Complex*, Complex*, int)> H,
-    double delta_t,
-    int n_max,
-    bool normalize
-) {
-    // Precompute coefficients for each term in the Taylor series
-    auto coefficients = std::make_shared<std::vector<Complex>>(n_max + 1);
-    (*coefficients)[0] = Complex(1.0, 0.0);  // 0th order term
-    double factorial = 1.0;
-    
-    for (int order = 1; order <= n_max; order++) {
-        factorial *= order;
-        // For exp(-iH*t), each term has (-i)^order
-        Complex coef = std::pow(Complex(0.0, -1.0), order);  
-        (*coefficients)[order] = coef * std::pow(delta_t, order) / factorial;
-    }
-    
-    // Return a function that applies the time evolution
-    return [H, coefficients, n_max, normalize](const Complex* input, Complex* output, int size) -> void {
-        // Temporary vectors for calculation
-        std::vector<Complex> term(size);
-        std::vector<Complex> Hterm(size);
-        std::vector<Complex> result(size);
-        
-        // Copy input to term and result
-        std::copy(input, input + size, term.begin());
-        std::copy(input, input + size, result.begin());
-        
-        // Apply Taylor expansion terms
-        for (int order = 1; order <= n_max; order++) {
-            // Apply H to the previous term
-            H(term.data(), Hterm.data(), size);
-            std::swap(term, Hterm);
-            
-            // Add this term to the result
-            for (int i = 0; i < size; i++) {
-                result[i] += (*coefficients)[order] * term[i];
-            }
-        }
-        
-        // Normalize if requested
-        if (normalize) {
-            double norm = cblas_dznrm2(size, result.data(), 1);
-            if (norm > 0.0) {
-                Complex scale_factor = Complex(1.0/norm, 0.0);
-                cblas_zscal(size, &scale_factor, result.data(), 1);
-            }
-        }
-        
-        // Copy result to output
-        std::copy(result.begin(), result.end(), output);
-    };
-}
-
 
 /**
  * Save the current TPQ state to a file
@@ -601,328 +722,6 @@ bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N)
     in.close();
     return true;
 }
-
-/**
- * Calculate spectral function from a TPQ state using real-time evolution
- * 
- * @param H Hamiltonian operator function
- * @param O Observable operator function
- * @param tpq_state Current TPQ state
- * @param N Dimension of the Hilbert space
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_points Number of frequency points
- * @param tmax Maximum evolution time
- * @param dt Time step
- * @param eta Broadening parameter
- * @param use_lorentzian Use Lorentzian (true) or Gaussian (false) broadening
- * @return Structure containing frequencies and spectral function values
- */
-SpectralFunctionData calculate_spectral_function_from_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& tpq_state,
-    int N,
-    double omega_min,
-    double omega_max,
-    int num_points,
-    double tmax,
-    double dt,
-    double eta,
-    bool use_lorentzian,
-    int n_max // Order of Taylor expansion
-) {
-    SpectralFunctionData result;
-    
-    // Generate frequency points
-    result.frequencies.resize(num_points);
-    double omega_step = (omega_max - omega_min) / (num_points - 1);
-    for (int i = 0; i < num_points; i++) {
-        result.frequencies[i] = omega_min + i * omega_step;
-    }
-    result.spectral_function.resize(num_points, 0.0);
-    
-    // Goal is to calculate C(t) = <ψ|e^{iHt}O†e^{-iHt}O|ψ>
-    // where |ψ> is the TPQ state and O is the operator
-    // As such we need to calculate  <ψ(t)|O†|Oψ(t)> 
-
-
-    // Calculate O|ψ>
-    ComplexVector O_psi(N);
-    O(tpq_state.data(), O_psi.data(), N);
-    
-    // Prepare for time evolution
-    int num_steps = static_cast<int>(tmax / dt) + 1;
-    std::vector<Complex> time_correlation(num_steps);
-    
-    // Create a copy of the state for time evolution
-    ComplexVector evolved_state = tpq_state;
-    ComplexVector temp_state(N);
-    
-    // <ψ|O†
-    O(evolved_state.data(), temp_state.data(), N);
-    
-    // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-    Complex initial_corr = Complex(0.0, 0.0);
-    for (int i = 0; i < N; i++) {
-        initial_corr += std::conj(temp_state[i]) * O_psi[i];
-    }
-    time_correlation[0] = initial_corr;
-    
-    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
-    
-    // Time evolve and calculate correlation function C(t) = <ψ|O†e^{iHt}Oe^{-iHt}|ψ>
-    for (int step = 1; step < num_steps; step++) {
-        
-        // Evolve temp_state = <ψ|e^{iHt}
-        time_evolve_tpq_state(H, evolved_state, N, dt, n_max, true);
-        // <ψ|e^{iHt} O†
-        O(evolved_state.data(), temp_state.data(), N);
-        // Evolve temp_state =  e^{-iHt}O|ψ> 
-        time_evolve_tpq_state(H, O_psi, N, dt, n_max, true);
-
-        
-        // Calculate correlation C(t)
-        Complex corr_t = Complex(0.0, 0.0);
-        for (int i = 0; i < N; i++) {
-            corr_t += std::conj(temp_state[i]) * O_psi[i];
-        }
-        time_correlation[step] = corr_t;
-        
-        if (step % 100 == 0) {
-            std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
-        }
-    }
-    
-    std::cout << "Calculating spectral function via Fourier transform..." << std::endl;
-    
-    // Perform Fourier transform to get spectral function
-    for (int i = 0; i < num_points; i++) {
-        double omega = result.frequencies[i];
-        Complex spectral_value = Complex(0.0, 0.0);
-        
-        for (int step = 0; step < num_steps; step++) {
-            double t = step * dt;
-            Complex phase = std::exp(Complex(0.0, -omega * t));
-            
-            // Add damping factor
-            double damping;
-            if (use_lorentzian) {
-                damping = std::exp(-eta * t);
-            } else {
-                damping = std::exp(-eta * t * t / 2.0);
-            }
-            
-            spectral_value += time_correlation[step] * phase * damping * dt;
-        }
-        
-        // The spectral function is the real part of the Fourier transform
-        result.spectral_function[i] = spectral_value.real();
-    }
-    
-    return result;
-}
-
-
-std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    int N,
-    const int num_steps
-) {
-    int num_operators = operators_1.size();
-    
-    // Pre-allocate all buffers needed for calculation
-    std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));        // O|ψ> for each operator
-    std::vector<ComplexVector> O_psi_next_vec(num_operators, ComplexVector(N));   // For time evolution of O|ψ>
-    ComplexVector state(N);        // |ψ(t)>
-    ComplexVector state_next(N);   // For time evolution of |ψ>
-    std::vector<ComplexVector> O_dag_state_vec(num_operators, ComplexVector(N));  // O†|ψ(t)> for each operator
-    
-    // Initialize state to tpq_state
-    std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
-    
-    // Calculate O|ψ> once for each operator (parallel over operators)
-    #pragma omp parallel for schedule(static)
-    for (int op = 0; op < num_operators; op++) {
-        operators_1[op](state.data(), O_psi_vec[op].data(), N);
-    }
-    
-    // Prepare time evolution
-    std::vector<std::vector<Complex>> time_correlations(num_operators, std::vector<Complex>(num_steps));
-    
-    // Calculate initial O†|ψ> for each operator (parallel over operators)
-    #pragma omp parallel for schedule(static)
-    for (int op = 0; op < num_operators; op++) {
-        operators_2[op](state.data(), O_dag_state_vec[op].data(), N);
-        
-        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-        Complex init_corr = Complex(0.0, 0.0);
-        for (int i = 0; i < N; i++) {
-            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
-        }
-        time_correlations[op][0] = init_corr;
-    }
-    
-    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
-        
-    // Time evolution loop
-    for (int step = 1; step < num_steps; step++) {
-        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
-        U_t(state.data(), state_next.data(), N);
-
-        // Parallel over operators for this time slice
-        #pragma omp parallel for schedule(static)
-        for (int op = 0; op < num_operators; op++) {
-            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
-            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
-
-            // Calculate O†|ψ(t)>
-            operators_2[op](state_next.data(), O_dag_state_vec[op].data(), N);
-
-            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
-            Complex corr = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
-            }
-            time_correlations[op][step] = corr;
-        }
-
-        // After parallel region: update O_psi buffers and state for next step
-        for (int op = 0; op < num_operators; op++) {
-            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
-        }
-        std::swap(state, state_next);
-
-        if (step % 100 == 0) {
-            std::cout << "  Completed time step " << step << " of " << num_steps << std::endl;
-        }
-    }
-    
-    std::cout << "Calculating spectral function via Fourier transform..." << std::endl;
-    
-    return time_correlations;
-}
-
-
-/**
- * Incremental version that writes time correlation data as computation happens
- */
-void calculate_spectral_function_from_tpq_U_t_incremental(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    int N,
-    const int num_steps,
-    double dt,
-    std::vector<std::ofstream>& output_files
-) {
-    int num_operators = operators_1.size();
-    
-    // Pre-allocate all buffers needed for calculation
-    std::vector<ComplexVector> O_psi_vec(num_operators, ComplexVector(N));        // O|ψ> for each operator
-    std::vector<ComplexVector> O_psi_next_vec(num_operators, ComplexVector(N));   // For time evolution of O|ψ>
-    ComplexVector state(N);        // |ψ(t)>
-    ComplexVector state_next(N);   // For time evolution of |ψ>
-    std::vector<ComplexVector> O_dag_state_vec(num_operators, ComplexVector(N));  // O†|ψ(t)> for each operator
-    
-    // Initialize state to tpq_state
-    std::copy(tpq_state.begin(), tpq_state.end(), state.begin());
-    
-    // Calculate O|ψ> once for each operator (parallel over operators)
-    #pragma omp parallel for schedule(static)
-    for (int op = 0; op < num_operators; op++) {
-        operators_1[op](state.data(), O_psi_vec[op].data(), N);
-    }
-    
-    // Calculate initial O†|ψ> for each operator and write initial time point
-    #pragma omp parallel for schedule(static)
-    for (int op = 0; op < num_operators; op++) {
-        operators_2[op](state.data(), O_dag_state_vec[op].data(), N);
-        
-        // Calculate initial correlation C(0) = <ψ|O†O|ψ>
-        Complex init_corr = Complex(0.0, 0.0);
-        for (int i = 0; i < N; i++) {
-            init_corr += std::conj(O_dag_state_vec[op][i]) * O_psi_vec[op][i];
-        }
-        
-        // Write initial time point (t=0) to file - need to serialize this part
-        #pragma omp critical
-        {
-            if (output_files[op].is_open()) {
-                output_files[op] << 0.0 << " " 
-                          << init_corr.real() << " " 
-                          << init_corr.imag() << std::endl;
-                output_files[op].flush(); // Ensure data is written immediately
-            }
-        }
-    }
-    
-    std::cout << "Starting real-time evolution for correlation function..." << std::endl;
-        
-    // Time evolution loop
-    for (int step = 1; step < num_steps; step++) {
-        double current_time = step * dt;
-        
-        // Evolve state: |ψ(t)> = U_t|ψ(t-dt)>
-        U_t(state.data(), state_next.data(), N);
-
-        // Parallel over operators for this time slice
-        #pragma omp parallel for schedule(static)
-        for (int op = 0; op < num_operators; op++) {
-            // Evolve O_psi: O|ψ(t)> = U_t(O|ψ(t-dt)>)
-            U_t(O_psi_vec[op].data(), O_psi_next_vec[op].data(), N);
-
-            // Calculate O†|ψ(t)>
-            operators_2[op](state_next.data(), O_dag_state_vec[op].data(), N);
-
-            // Calculate correlation C(t) = <ψ(t)|O†O|ψ(t)>
-            Complex corr = Complex(0.0, 0.0);
-            for (int i = 0; i < N; i++) {
-                corr += std::conj(O_dag_state_vec[op][i]) * O_psi_next_vec[op][i];
-            }
-            
-            // Write current time point to file immediately - need to serialize this part
-            #pragma omp critical
-            {
-                if (output_files[op].is_open()) {
-                    output_files[op] << current_time << " " 
-                              << corr.real() << " " 
-                              << corr.imag() << std::endl;
-                    
-                    // Flush every 10 steps to balance performance and data safety
-                    if (step % 10 == 0) {
-                        output_files[op].flush();
-                    }
-                }
-            }
-        }
-
-        // After parallel region: update O_psi buffers and state for next step
-        for (int op = 0; op < num_operators; op++) {
-            std::swap(O_psi_vec[op], O_psi_next_vec[op]);
-        }
-        std::swap(state, state_next);
-
-        if (step % 100 == 0) {
-            std::cout << "  Completed time step " << step << " of " << num_steps 
-                      << " (t = " << current_time << ")" << std::endl;
-        }
-    }
-    
-    // Final flush for all files
-    for (auto& file : output_files) {
-        if (file.is_open()) {
-            file.flush();
-        }
-    }
-    
-    std::cout << "Real-time evolution complete - data written incrementally during computation." << std::endl;
-}
-
 
 /**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
@@ -1255,166 +1054,6 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
     return {ss_file, norm_file, flct_file, spin_corr_files};
 }
 
-/**
- * Compute and save dynamics for observables in TPQ evolution
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector
- * @param observables List of observables to compute
- * @param observable_names Names of the observables
- * @param N Dimension of the Hilbert space
- * @param dir Output directory
- * @param sample Current sample index
- * @param step Current TPQ step
- * @param omega_min Minimum frequency 
- * @param omega_max Maximum frequency
- * @param num_points Number of frequency points
- * @param t_end Maximum evolution time
- * @param dt Time step
- */
-void computeObservableDynamics(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables,
-    const std::vector<std::string>& observable_names,
-    int N, 
-    const std::string& dir,
-    int sample,
-    int step,
-    double omega_min,
-    double omega_max,
-    int num_points,
-    double t_end,
-    double dt
-) {
-    // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_step" + std::to_string(step) + ".dat";
-    save_tpq_state(tpq_state, state_file);
-
-    for (size_t i = 0; i < observables.size(); i++) {
-        std::cout << "Computing dynamical susceptibility for sample " << sample 
-                  << ", step " << step << ", observable: " << observable_names[i] << std::endl;
-                  
-        std::string dyn_file = dir + "/dyn_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_step" + std::to_string(step) + ".dat";
-                             
-        // Create a lambda to adapt Operator to the required function signature
-        auto operatorFunc = [&observables, i](const Complex* in, Complex* out, int size) {
-            // Convert input to vector
-            std::vector<Complex> input(in, in + size);
-            // Apply operator
-            std::vector<Complex> result = observables[i].apply(input);
-            // Copy result to output
-            std::copy(result.begin(), result.end(), out);
-        };
-        
-        // Calculate spectral function with current parameters
-        SpectralFunctionData spectrum = calculate_spectral_function_from_tpq(
-            H, operatorFunc, tpq_state, N, omega_min, omega_max, num_points, t_end, dt, 0.1, false);
-            
-        // Write spectral function to file
-        std::ofstream dyn_out(dyn_file);
-        if (dyn_out.is_open()) {
-            dyn_out << "# omega spectral_function" << std::endl;
-            for (size_t j = 0; j < spectrum.frequencies.size(); j++) {
-                dyn_out << std::setprecision(16) 
-                      << spectrum.frequencies[j] << " " 
-                      << spectrum.spectral_function[j].real() << " "
-                      << spectrum.spectral_function[j].imag() << std::endl;
-            }
-            dyn_out.close();
-            std::cout << "Dynamical susceptibility saved to " << dyn_file << std::endl;
-        }
-    }
-}
-
-
-// Forward-time only evolution of observable correlations C_O(t)=<psi(t)|O^\u2020 O|psi(t)>, leveraging hermiticity.
-// Removed negative time evolution to halve computational cost.
-// Modified to write time correlation data incrementally during computation.
-void computeObservableDynamics_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables_1,
-    const std::vector<Operator>& observables_2,
-    const std::vector<std::string>& observable_names,
-    int N,
-    const std::string& dir,
-    int sample,
-    double inv_temp,
-    double t_end,
-    double dt
-) {
-    // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
-    save_tpq_state(tpq_state, state_file);
-
-    std::cout << "Computing dynamical susceptibility for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << observables_1.size() << " observables" << std::endl;
-    
-    // Prebuild sparse matrices for all observables to ensure thread-safe applies
-    for (const auto& op : observables_1) {
-        op.buildSparseMatrix();
-    }
-    for (const auto& op : observables_2) {
-        op.buildSparseMatrix();
-    }
-
-    // Create array of operator functions
-    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_1;
-    std::vector<std::function<void(const Complex*, Complex*, int)>> operatorFuncs_2;
-    operatorFuncs_1.reserve(observables_1.size());
-    operatorFuncs_2.reserve(observables_2.size());
-
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        operatorFuncs_1.emplace_back([&observables_1, i](const Complex* in, Complex* out, int size) {
-            // Convert input to vector
-            std::vector<Complex> input(in, in + size);
-            // Apply operator
-            std::vector<Complex> result = observables_1[i].apply(input);
-            // Copy result to output
-            std::copy(result.begin(), result.end(), out);
-        });
-        operatorFuncs_2.emplace_back([&observables_2, i](const Complex* in, Complex* out, int size) {
-            // Convert input to vector
-            std::vector<Complex> input(in, in + size);
-            // Apply operator
-            std::vector<Complex> result = observables_2[i].apply(input);
-            // Copy result to output
-            std::copy(result.begin(), result.end(), out);
-        });
-    }
-
-    // Open output files and write headers for each observable
-    std::vector<std::ofstream> time_corr_files(observables_1.size());
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                             + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
-        
-        time_corr_files[i].open(time_corr_file);
-        if (time_corr_files[i].is_open()) {
-            time_corr_files[i] << "# t time_correlation_real time_correlation_imag" << std::endl;
-            time_corr_files[i] << std::setprecision(16);
-        } else {
-            std::cerr << "Error: Could not open file " << time_corr_file << " for writing" << std::endl;
-        }
-    }
-
-    // Call modified spectral function that writes incrementally
-    calculate_spectral_function_from_tpq_U_t_incremental(
-        U_t, operatorFuncs_1, operatorFuncs_2, tpq_state, N, int(t_end/dt + 1), dt, time_corr_files);
-
-    // Close all files
-    for (size_t i = 0; i < observables_1.size(); i++) {
-        if (time_corr_files[i].is_open()) {
-            time_corr_files[i].close();
-            std::string time_corr_file = dir + "/time_corr_rand" + std::to_string(sample) + "_" 
-                                 + observable_names[i] + "_beta=" + std::to_string(inv_temp) + ".dat";
-            std::cout << "Time correlation saved to " << time_corr_file << std::endl;
-        }
-    }
-}
-
 
 /**
  * Calculate spectrum function from TPQ state
@@ -1492,525 +1131,6 @@ void calculate_spectrum_from_tpq(
     spectrum_file.close();
     std::cout << "Spectrum calculation complete. Written to " << out_file << std::endl;
 }
-
-/**
- * Krylov-based time evolution using Lanczos method
- * This is much more accurate and stable than Taylor expansion
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param krylov_dim Dimension of Krylov subspace (typically 20-50)
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_krylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int krylov_dim,
-    bool normalize
-) {
-    if (N <= 0) {
-        return;
-    }
-
-    // Ensure Krylov dimension doesn't exceed system size
-    krylov_dim = std::max(1, std::min(krylov_dim, N));
-    
-    // Pre-allocate all memory to avoid repeated allocations
-    static thread_local std::vector<ComplexVector> krylov_vectors;
-    static thread_local std::vector<double> alpha;
-    static thread_local std::vector<double> beta;
-    static thread_local ComplexVector w;
-    static thread_local int last_N = 0;
-    static thread_local int last_krylov_dim = 0;
-    
-    // Resize only if dimensions changed
-    if (last_N != N || last_krylov_dim < krylov_dim) {
-        krylov_vectors.resize(krylov_dim);
-        for (auto& vec : krylov_vectors) {
-            vec.resize(N);
-        }
-        alpha.resize(krylov_dim);
-        beta.resize(krylov_dim > 1 ? krylov_dim - 1 : 0);
-        w.resize(N);
-        last_N = N;
-        last_krylov_dim = krylov_dim;
-    }
-    
-    // Initialize first Krylov vector as normalized input state
-    double norm = cblas_dznrm2(N, tpq_state.data(), 1);
-    if (norm < 1e-14) {
-        // Handle zero state
-        return;
-    }
-    
-    Complex scale_factor = Complex(1.0/norm, 0.0);
-    cblas_zcopy(N, tpq_state.data(), 1, krylov_vectors[0].data(), 1);
-    cblas_zscal(N, &scale_factor, krylov_vectors[0].data(), 1);
-    
-    // Lanczos iteration with improved numerical stability
-    int effective_dim = krylov_dim;
-    constexpr double ortho_threshold = 1e-10;
-    constexpr double breakdown_threshold = 1e-14;
-    
-    for (int j = 0; j < krylov_dim - 1; j++) {
-        // Apply Hamiltonian: w = H * v_j
-        H(krylov_vectors[j].data(), w.data(), N);
-        
-        // Compute alpha_j = Re(<v_j | H | v_j>) - use BLAS for efficiency
-        Complex alpha_complex;
-        cblas_zdotc_sub(N, krylov_vectors[j].data(), 1, w.data(), 1, &alpha_complex);
-        alpha[j] = alpha_complex.real();
-        
-        // w = w - alpha_j * v_j
-        Complex neg_alpha = Complex(-alpha[j], 0.0);
-        cblas_zaxpy(N, &neg_alpha, krylov_vectors[j].data(), 1, w.data(), 1);
-        
-        // Full reorthogonalization for better stability
-        // This is more expensive but necessary for numerical accuracy
-        for (int i = 0; i <= j; i++) {
-            Complex overlap;
-            cblas_zdotc_sub(N, krylov_vectors[i].data(), 1, w.data(), 1, &overlap);
-            if (std::abs(overlap) > ortho_threshold) {
-                Complex neg_overlap = -overlap;
-                cblas_zaxpy(N, &neg_overlap, krylov_vectors[i].data(), 1, w.data(), 1);
-            }
-        }
-        
-        // Compute beta_{j} = ||w||
-        beta[j] = cblas_dznrm2(N, w.data(), 1);
-        
-        // Check for breakdown
-        if (beta[j] < breakdown_threshold) {
-            effective_dim = j + 1;
-            break;
-        }
-        
-        // v_{j+1} = w / beta_{j}
-        Complex inv_beta = Complex(1.0/beta[j], 0.0);
-        cblas_zcopy(N, w.data(), 1, krylov_vectors[j+1].data(), 1);
-        cblas_zscal(N, &inv_beta, krylov_vectors[j+1].data(), 1);
-    }
-    
-    // Handle the last alpha
-    if (effective_dim == krylov_dim) {
-        H(krylov_vectors[effective_dim-1].data(), w.data(), N);
-        Complex alpha_complex;
-        cblas_zdotc_sub(N, krylov_vectors[effective_dim-1].data(), 1, w.data(), 1, &alpha_complex);
-        alpha[effective_dim-1] = alpha_complex.real();
-    }
-    
-    // Use Eigen's optimized routines for the small tridiagonal problem
-    Eigen::MatrixXd H_krylov(effective_dim, effective_dim);
-    
-    // Build tridiagonal matrix efficiently
-    H_krylov.setZero();
-    for (int i = 0; i < effective_dim; i++) {
-        H_krylov(i, i) = alpha[i];
-    }
-    for (int i = 0; i < effective_dim - 1; i++) {
-        H_krylov(i, i+1) = beta[i];
-        H_krylov(i+1, i) = beta[i];
-    }
-    
-    // Compute eigendecomposition (more stable than matrix exponential)
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(H_krylov);
-    const auto& eigenvalues = solver.eigenvalues();
-    const auto& eigenvectors = solver.eigenvectors();
-    // Apply time evolution using eigendecomposition
-    // exp(-i*H*t)|ψ⟩ = V * exp(-i*D*t) * V^† * |e_0⟩
-    Eigen::VectorXcd phase_factors(effective_dim);
-    for (int i = 0; i < effective_dim; i++) {
-        phase_factors(i) = std::exp(Complex(0, -eigenvalues(i) * delta_t)) * eigenvectors(0, i);
-    }
-
-    // Reconstruct state in original basis
-    std::fill(tpq_state.begin(), tpq_state.end(), Complex(0, 0));
-
-    for (int i = 0; i < effective_dim; i++) {
-        Complex coeff(0, 0);
-        for (int j = 0; j < effective_dim; j++) {
-            coeff += eigenvectors(i, j) * phase_factors(j);
-        }
-        coeff *= norm;
-        cblas_zaxpy(N, &coeff, krylov_vectors[i].data(), 1, tpq_state.data(), 1);
-    }
-    
-    // Normalize if requested
-    if (normalize) {
-        double final_norm = cblas_dznrm2(N, tpq_state.data(), 1);
-        if (final_norm > 1e-14) {
-            Complex final_scale = Complex(1.0/final_norm, 0.0);
-            cblas_zscal(N, &final_scale, tpq_state.data(), 1);
-        }
-    }
-}
-
-/**
- * Chebyshev polynomial-based time evolution
- * Excellent for systems with bounded spectra
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param E_min Minimum eigenvalue of H (estimate)
- * @param E_max Maximum eigenvalue of H (estimate)
- * @param num_terms Number of Chebyshev polynomials to use
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_chebyshev(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    double E_min,
-    double E_max,
-    int num_terms,
-    bool normalize
-) {
-    // Scale Hamiltonian to [-1, 1] range for Chebyshev expansion
-    double E_center = (E_max + E_min) / 2.0;
-    double E_scale = (E_max - E_min) / 2.0;
-
-    constexpr double scale_epsilon = 1e-12;
-    if (std::abs(E_scale) < scale_epsilon) {
-        // Spectrum is effectively flat: evolution is a global phase
-        Complex phase = std::exp(Complex(0, -E_center * delta_t));
-        cblas_zscal(N, &phase, tpq_state.data(), 1);
-        if (normalize) {
-            double norm = cblas_dznrm2(N, tpq_state.data(), 1);
-            if (norm > 1e-14) {
-                Complex scale_factor = Complex(1.0/norm, 0.0);
-                cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
-            }
-        }
-        return;
-    }
-    
-    // Scaled time parameter
-    double tau = delta_t * E_scale;
-    
-    // Create scaled Hamiltonian operator: H_scaled = (H - E_center * I) / E_scale
-    auto H_scaled = [&](const Complex* input, Complex* output, int size) {
-        H(input, output, size);
-        // output = (H - E_center * I) * input / E_scale
-        Complex center_factor = Complex(-E_center / E_scale, 0.0);
-        Complex scale_factor = Complex(1.0 / E_scale, 0.0);
-        
-        cblas_zscal(size, &scale_factor, output, 1);
-        cblas_zaxpy(size, &center_factor, input, 1, output, 1);
-    };
-    
-    // Initialize result and Chebyshev polynomials
-    ComplexVector result(N, Complex(0, 0));
-    ComplexVector T_prev(N), T_curr(N), T_next(N);
-    
-    // T_0(H_scaled) |ψ⟩ = |ψ⟩
-    std::copy(tpq_state.begin(), tpq_state.end(), T_prev.begin());
-    
-    // First term: J_0(-iτ) * T_0
-    double J_0 = std::cyl_bessel_j(0, tau);
-    Complex coeff_0 = Complex(J_0, 0.0);
-    cblas_zaxpy(N, &coeff_0, T_prev.data(), 1, result.data(), 1);
-    
-    if (num_terms > 1) {
-        // T_1(H_scaled) |ψ⟩ = H_scaled |ψ⟩
-        H_scaled(tpq_state.data(), T_curr.data(), N);
-        
-        // Second term: 2 * J_1(-iτ) * (-i) * T_1
-        double J_1 = std::cyl_bessel_j(1, tau);
-        Complex coeff_1 = Complex(0, -2.0 * J_1);
-        cblas_zaxpy(N, &coeff_1, T_curr.data(), 1, result.data(), 1);
-        
-        // Higher order terms using Chebyshev recurrence
-        for (int n = 2; n < num_terms; n++) {
-            // T_n = 2 * H_scaled * T_{n-1} - T_{n-2}
-            H_scaled(T_curr.data(), T_next.data(), N);
-            Complex two = Complex(2.0, 0.0);
-            Complex neg_one = Complex(-1.0, 0.0);
-            
-            cblas_zscal(N, &two, T_next.data(), 1);
-            cblas_zaxpy(N, &neg_one, T_prev.data(), 1, T_next.data(), 1);
-            
-            // Add contribution: 2 * J_n(-iτ) * (-i)^n * T_n
-            double J_n = std::cyl_bessel_j(n, tau);
-            Complex i_power = std::pow(Complex(0, -1), n);
-            Complex coeff_n = 2.0 * J_n * i_power;
-            
-            cblas_zaxpy(N, &coeff_n, T_next.data(), 1, result.data(), 1);
-            
-            // Cycle for next iteration
-            std::swap(T_prev, T_curr);
-            std::swap(T_curr, T_next);
-        }
-    }
-    
-    // Apply phase factor from center shift: exp(-i * E_center * delta_t)
-    Complex phase = std::exp(Complex(0, -E_center * delta_t));
-    cblas_zscal(N, &phase, result.data(), 1);
-    
-    // Replace state with evolved result
-    std::swap(tpq_state, result);
-    
-    // Normalize if requested
-    if (normalize) {
-        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
-    }
-}
-
-/**
- * 4th-order Runge-Kutta time evolution
- * Best for time-dependent Hamiltonians or when high accuracy is needed
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_rk4(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    bool normalize
-) {
-    ComplexVector k1(N), k2(N), k3(N), k4(N);
-    ComplexVector temp_state(N);
-    Complex neg_i = Complex(0, -1);
-    Complex half = Complex(0.5, 0);
-    
-    // k1 = -i * H * ψ(t)
-    H(tpq_state.data(), k1.data(), N);
-    cblas_zscal(N, &neg_i, k1.data(), 1);
-    
-    // temp_state = ψ(t) + (Δt/2) * k1
-    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
-    Complex dt_half = Complex(delta_t / 2.0, 0);
-    cblas_zaxpy(N, &dt_half, k1.data(), 1, temp_state.data(), 1);
-    
-    // k2 = -i * H * (ψ(t) + (Δt/2) * k1)
-    H(temp_state.data(), k2.data(), N);
-    cblas_zscal(N, &neg_i, k2.data(), 1);
-    
-    // temp_state = ψ(t) + (Δt/2) * k2
-    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
-    cblas_zaxpy(N, &dt_half, k2.data(), 1, temp_state.data(), 1);
-    
-    // k3 = -i * H * (ψ(t) + (Δt/2) * k2)
-    H(temp_state.data(), k3.data(), N);
-    cblas_zscal(N, &neg_i, k3.data(), 1);
-    
-    // temp_state = ψ(t) + Δt * k3
-    std::copy(tpq_state.begin(), tpq_state.end(), temp_state.begin());
-    Complex dt = Complex(delta_t, 0);
-    cblas_zaxpy(N, &dt, k3.data(), 1, temp_state.data(), 1);
-    
-    // k4 = -i * H * (ψ(t) + Δt * k3)
-    H(temp_state.data(), k4.data(), N);
-    cblas_zscal(N, &neg_i, k4.data(), 1);
-    
-    // ψ(t + Δt) = ψ(t) + (Δt/6) * (k1 + 2*k2 + 2*k3 + k4)
-    Complex dt_sixth = Complex(delta_t / 6.0, 0);
-    Complex two_dt_sixth = Complex(delta_t / 3.0, 0);
-    
-    cblas_zaxpy(N, &dt_sixth, k1.data(), 1, tpq_state.data(), 1);
-    cblas_zaxpy(N, &two_dt_sixth, k2.data(), 1, tpq_state.data(), 1);
-    cblas_zaxpy(N, &two_dt_sixth, k3.data(), 1, tpq_state.data(), 1);
-    cblas_zaxpy(N, &dt_sixth, k4.data(), 1, tpq_state.data(), 1);
-    
-    // Normalize if requested
-    if (normalize) {
-        double norm = cblas_dznrm2(N, tpq_state.data(), 1);
-        Complex scale_factor = Complex(1.0/norm, 0.0);
-        cblas_zscal(N, &scale_factor, tpq_state.data(), 1);
-    }
-}
-
-/**
- * Adaptive time evolution with automatic method selection
- * Chooses the best method based on system size and accuracy requirements
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param accuracy_level Accuracy level: 1=fast, 2=balanced, 3=high accuracy
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_adaptive(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int accuracy_level,
-    bool normalize
-) {
-    if (accuracy_level == 1) {
-        // Fast: Use improved Taylor with higher order
-        time_evolve_tpq_state(H, tpq_state, N, delta_t, 50, normalize);
-    } else if (accuracy_level == 2) {
-        // Balanced: Use Krylov method
-        int krylov_dim = std::max(1, std::min(30, std::max(N / 2, 1)));
-        time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
-    } else {
-        // High accuracy: Use RK4 for small systems, Krylov for large
-        if (N < 1000) {
-            time_evolve_tpq_rk4(H, tpq_state, N, delta_t, normalize);
-        } else {
-            int krylov_dim = std::max(1, std::min(50, std::max(N / 2, 1)));
-            time_evolve_tpq_krylov(H, tpq_state, N, delta_t, krylov_dim, normalize);
-        }
-    }
-}
-
-/**
- * Compute dynamical correlations using Krylov method with pre-constructed operators
- * 
- * This is the more general version that takes Operator objects directly for maximum versatility.
- * Computes the time correlation function C(t) = ⟨ψ|O_1†(0)O_2(t)|ψ⟩
- * using the Krylov-based time evolution method for high accuracy.
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector
- * @param operators_1 Vector of first Operator objects in correlation (applied at t=0)
- * @param operators_2 Vector of second Operator objects in correlation (applied at time t)
- * @param operator_names Names corresponding to each operator pair
- * @param N Dimension of the Hilbert space
- * @param dir Output directory
- * @param sample Current sample index
- * @param inv_temp Inverse temperature
- * @param t_end Maximum evolution time
- * @param dt Time step
- * @param krylov_dim Dimension of Krylov subspace for time evolution
- */
-void computeDynamicCorrelationsKrylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& operators_1,
-    const std::vector<Operator>& operators_2,
-    const std::vector<std::string>& operator_names,
-    int N,
-    const std::string& dir,
-    int sample,
-    double inv_temp,
-    double t_end,
-    double dt,
-    int krylov_dim
-) {
-    // Save the current TPQ state for later analysis
-    std::string state_file = dir + "/tpq_state_" + std::to_string(sample) + "_beta=" + std::to_string(inv_temp) + ".dat";
-    save_tpq_state(tpq_state, state_file);
-
-    std::cout << "Computing dynamical correlations using Krylov method for sample " << sample 
-              << ", beta = " << inv_temp << ", for " << operators_1.size() << " operators" << std::endl;
-    
-    // Ensure Krylov dimension doesn't exceed system size
-    krylov_dim = std::min(krylov_dim, N/2);
-    
-    int num_steps = static_cast<int>(t_end / dt) + 1;
-    
-    // Pre-allocate reusable buffers to avoid repeated allocations
-    ComplexVector evolved_psi(N);
-    ComplexVector evolved_O1_psi(N);
-    ComplexVector O2_psi(N);
-    ComplexVector O1_psi(N);
-    ComplexVector O2_evolved_psi(N);
-    std::vector<Complex> time_correlation(num_steps);
-    
-    // Process each operator pair
-    for (size_t op_idx = 0; op_idx < operators_1.size(); op_idx++) {
-        std::string op_name = operator_names[op_idx];
-        
-        std::cout << "  Computing " << op_name << " correlations..." << std::endl;
-
-        // Apply O_1 to initial state: |φ⟩ = O_1|ψ⟩
-        operators_1[op_idx].apply(tpq_state.data(), O1_psi.data(), N);
-        
-        // Calculate initial correlation: C(0) = ⟨ψ|O_2†O_1|ψ⟩
-        operators_2[op_idx].apply(tpq_state.data(), O2_psi.data(), N);
-        
-        // Use BLAS for dot product
-        Complex initial_corr;
-        cblas_zdotc_sub(N, O2_psi.data(), 1, O1_psi.data(), 1, &initial_corr);
-        time_correlation[0] = initial_corr;
-
-        std::cout << "    Initial correlation C(0) = " 
-                  << initial_corr.real() << " + i*" 
-                  << initial_corr.imag() << std::endl;
-        
-        // Initialize evolution states
-        std::copy(tpq_state.begin(), tpq_state.end(), evolved_psi.begin());
-        std::copy(O1_psi.begin(), O1_psi.end(), evolved_O1_psi.begin());
-        
-        // Open file for writing time correlation data
-        std::string base_name = dir + "/" + op_name + "_sample" + std::to_string(sample) + 
-                   "_beta" + std::to_string(inv_temp);
-        std::string time_corr_file = base_name + "_time_correlation.dat";
-        
-        std::ofstream time_corr_out(time_corr_file);
-        if (time_corr_out.is_open()) {
-            time_corr_out << "# time real(C(t)) imag(C(t))" << std::endl;
-            time_corr_out << std::setprecision(16);
-            
-            // Write initial time point
-            time_corr_out << 0.0 << " " 
-                << time_correlation[0].real() << " " 
-                << time_correlation[0].imag() << std::endl;
-            time_corr_out.flush(); // Ensure data is written to disk
-        }
-        
-        // Time evolution loop using Krylov method
-        for (int step = 1; step < num_steps; step++) {
-            // Evolve states using Krylov method
-            time_evolve_tpq_krylov(H, evolved_psi, N, dt, krylov_dim, true);
-            time_evolve_tpq_krylov(H, evolved_O1_psi, N, dt, krylov_dim, true);
-            
-            // Apply O_2 to evolved state
-            operators_2[op_idx].apply(evolved_psi.data(), O2_evolved_psi.data(), N);
-            
-            // Calculate correlation using BLAS
-            Complex corr_t;
-            cblas_zdotc_sub(N, O2_evolved_psi.data(), 1, evolved_O1_psi.data(), 1, &corr_t);
-            time_correlation[step] = corr_t;
-            
-            // Write current time point to file
-            if (time_corr_out.is_open()) {
-                double t = step * dt;
-                time_corr_out << t << " " 
-                    << time_correlation[step].real() << " " 
-                    << time_correlation[step].imag() << std::endl;
-                
-                // Flush every 100 steps to ensure data is written
-                if (step % 100 == 0) {
-                    time_corr_out.flush();
-                }
-            }
-            
-            if (step % 100 == 0) {
-                std::cout << "    Completed time step " << step << " / " << num_steps << std::endl;
-                std::cout << "    Current correlation: " 
-                          << time_correlation[step].real() << " + i*" 
-                          << time_correlation[step].imag() << " at t = " << step * dt << std::endl;
-            }
-        }
-        
-        // Close the file
-        if (time_corr_out.is_open()) {
-            time_corr_out.close();
-            std::cout << "    Time correlation saved to " << time_corr_file << std::endl;
-        }
-    }
-    
-    std::cout << "Dynamical correlation calculation using Krylov method complete for sample " << sample << std::endl;
-}
-
 
 
 /**

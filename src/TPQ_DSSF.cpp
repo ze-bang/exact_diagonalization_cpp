@@ -16,6 +16,8 @@
 #include "TPQ.h"
 #include "observables.h"
 #include <mpi.h>
+#include "dynamics.h"
+
 
 using Complex = std::complex<double>;
 using ComplexVector = std::vector<Complex>;

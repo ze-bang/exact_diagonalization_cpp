@@ -23,6 +23,7 @@
 #include <unsupported/Eigen/MatrixFunctions>
 #include "observables.h"
 #include "construct_ham.h"
+#include "dynamics.h"
 #include <memory>
 
 
@@ -107,42 +108,6 @@ bool readTPQData(const std::string& filename, int step, double& energy,
                 double& temp, double& specificHeat);
 
 /**
- * Time evolve TPQ state using Taylor expansion of exp(-iH*delta_t)
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param n_max Maximum order of Taylor expansion
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_state(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int n_max = 100,
-    bool normalize = true
-);
-
-/**
- * Create a time evolution operator using Taylor expansion of exp(-iH*delta_t)
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param n_max Maximum order of Taylor expansion
- * @param normalize Whether to normalize the state after evolution
- * @return Function that applies time evolution to a complex vector
- */
-std::function<void(const Complex*, Complex*, int)> create_time_evolution_operator(
-    std::function<void(const Complex*, Complex*, int)> H,
-    double delta_t,
-    int n_max = 10,
-    bool normalize = true
-);
-
-/**
  * Save the current TPQ state to a file
  * 
  * @param tpq_state TPQ state vector to save
@@ -171,60 +136,6 @@ bool load_tpq_state(ComplexVector& tpq_state, const std::string& filename);
 bool load_raw_data(ComplexVector& tpq_state, const std::string& filename, int N);
 
 /**
- * Calculate spectral function from a TPQ state using real-time evolution
- * 
- * @param H Hamiltonian operator function
- * @param O Observable operator function
- * @param tpq_state Current TPQ state
- * @param N Dimension of the Hilbert space
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param num_points Number of frequency points
- * @param tmax Maximum evolution time
- * @param dt Time step
- * @param eta Broadening parameter
- * @param use_lorentzian Use Lorentzian (true) or Gaussian (false) broadening
- * @return Structure containing frequencies and spectral function values
- */
-SpectralFunctionData calculate_spectral_function_from_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    std::function<void(const Complex*, Complex*, int)> O,
-    const ComplexVector& tpq_state,
-    int N,
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
-    double tmax = 10.0,
-    double dt = 0.01,
-    double eta = 0.1,
-    bool use_lorentzian = false,
-    int n_max = 100 // Order of Taylor expansion
-);
-
-std::vector<std::vector<Complex>> calculate_spectral_function_from_tpq_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    int N,
-    const int num_steps
-);
-
-/**
- * Incremental version that writes time correlation data as computation happens
- */
-void calculate_spectral_function_from_tpq_U_t_incremental(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_1,
-    const std::vector<std::function<void(const Complex*, Complex*, int)>>& operators_2,   
-    const ComplexVector& tpq_state,
-    int N,
-    const int num_steps,
-    double dt,
-    std::vector<std::ofstream>& output_files
-);
-
-/**
  * Compute spin expectations (S^+, S^-, S^z) at each site using a TPQ state
  * 
  * @param tpq_state The TPQ state vector
@@ -241,9 +152,6 @@ std::vector<std::vector<Complex>> compute_spin_expectations_from_tpq(
     const std::string& output_file = "",
     bool print_output = true
 );
-
-
-
 
 void writeFluctuationData(
     const std::string& flct_file,
@@ -288,200 +196,6 @@ std::tuple<std::string, std::string, std::string, std::vector<std::string>> init
     const std::string& dir,
     int sample,
     int sublattice_size
-);
-
-/**
- * Compute and save dynamics for observables in TPQ evolution
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector
- * @param observables List of observables to compute
- * @param observable_names Names of the observables
- * @param N Dimension of the Hilbert space
- * @param dir Output directory
- * @param sample Current sample index
- * @param step Current TPQ step
- * @param omega_min Minimum frequency 
- * @param omega_max Maximum frequency
- * @param num_points Number of frequency points
- * @param t_end Maximum evolution time
- * @param dt Time step
- */
-void computeObservableDynamics(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables,
-    const std::vector<std::string>& observable_names,
-    int N, 
-    const std::string& dir,
-    int sample,
-    int step,
-    double omega_min = -10.0,
-    double omega_max = 10.0,
-    int num_points = 1000,
-    double t_end = 100.0,
-    double dt = 0.1
-);
-
-// Forward-time only evolution of observable correlations C_O(t)=<psi(t)|O^\u2020 O|psi(t)>, leveraging hermiticity.
-// Removed negative time evolution to halve computational cost.
-// Modified to write time correlation data incrementally during computation.
-void computeObservableDynamics_U_t(
-    std::function<void(const Complex*, Complex*, int)> U_t,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& observables_1,
-    const std::vector<Operator>& observables_2,
-    const std::vector<std::string>& observable_names,
-    int N,
-    const std::string& dir,
-    int sample,
-    double inv_temp,
-    double t_end = 100.0,
-    double dt = 0.01
-);
-
-/**
- * Calculate spectrum function from TPQ state
- * 
- * @param H Hamiltonian operator function
- * @param N Dimension of the Hilbert space
- * @param tpq_sample Sample index to use from TPQ calculation
- * @param tpq_step TPQ step to use
- * @param omega_min Minimum frequency
- * @param omega_max Maximum frequency
- * @param omega_step Step size in frequency domain
- * @param eta Broadening factor
- * @param tpq_dir Directory containing TPQ data
- * @param out_file Output file for spectrum
- */
-void calculate_spectrum_from_tpq(
-    std::function<void(const Complex*, Complex*, int)> H,
-    int N,
-    int tpq_sample,
-    int tpq_step,
-    double omega_min,
-    double omega_max,
-    double omega_step,
-    double eta,
-    const std::string& tpq_dir,
-    const std::string& out_file
-);
-
-/**
- * Krylov-based time evolution using Lanczos method
- * This is much more accurate and stable than Taylor expansion
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param krylov_dim Dimension of Krylov subspace (typically 20-50)
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_krylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int krylov_dim = 30,
-    bool normalize = true
-);
-
-/**
- * Chebyshev polynomial-based time evolution
- * Excellent for systems with bounded spectra
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param E_min Minimum eigenvalue of H (estimate)
- * @param E_max Maximum eigenvalue of H (estimate)
- * @param num_terms Number of Chebyshev polynomials to use
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_chebyshev(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    double E_min,
-    double E_max,
-    int num_terms = 100,
-    bool normalize = true
-);
-
-/**
- * 4th-order Runge-Kutta time evolution
- * Best for time-dependent Hamiltonians or when high accuracy is needed
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_rk4(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    bool normalize = true
-);
-
-/**
- * Adaptive time evolution with automatic method selection
- * Chooses the best method based on system size and accuracy requirements
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector (will be modified)
- * @param N Dimension of the Hilbert space
- * @param delta_t Time step
- * @param accuracy_level Accuracy level: 1=fast, 2=balanced, 3=high accuracy
- * @param normalize Whether to normalize the state after evolution
- */
-void time_evolve_tpq_adaptive(
-    std::function<void(const Complex*, Complex*, int)> H,
-    ComplexVector& tpq_state,
-    int N,
-    double delta_t,
-    int accuracy_level = 2,
-    bool normalize = true
-);
-
-/**
- * Compute dynamical correlations using Krylov method with pre-constructed operators
- * 
- * This is the more general version that takes Operator objects directly for maximum versatility.
- * Computes the time correlation function C(t) = ⟨ψ|O_1†(0)O_2(t)|ψ⟩
- * using the Krylov-based time evolution method for high accuracy.
- * 
- * @param H Hamiltonian operator function
- * @param tpq_state Current TPQ state vector
- * @param operators_1 Vector of first Operator objects in correlation (applied at t=0)
- * @param operators_2 Vector of second Operator objects in correlation (applied at time t)
- * @param operator_names Names corresponding to each operator pair
- * @param N Dimension of the Hilbert space
- * @param dir Output directory
- * @param sample Current sample index
- * @param inv_temp Inverse temperature
- * @param t_end Maximum evolution time
- * @param dt Time step
- * @param krylov_dim Dimension of Krylov subspace for time evolution
- */
-void computeDynamicCorrelationsKrylov(
-    std::function<void(const Complex*, Complex*, int)> H,
-    const ComplexVector& tpq_state,
-    const std::vector<Operator>& operators_1,
-    const std::vector<Operator>& operators_2,
-    const std::vector<std::string>& operator_names,
-    int N,
-    const std::string& dir,
-    int sample,
-    double inv_temp,
-    double t_end = 100.0,
-    double dt = 0.01,
-    int krylov_dim = 30
 );
 
 /**
@@ -554,5 +268,40 @@ void canonical_tpq(
     int num_sites = 16
 );
 
+/**
+ * Compute dynamical correlations for TPQ using Krylov method
+ * Delegates to the general dynamics module with TPQ-specific file naming
+ */
+void computeDynamicCorrelationsKrylov(
+    std::function<void(const Complex*, Complex*, int)> H,
+    const ComplexVector& tpq_state,
+    const std::vector<Operator>& operators_1,
+    const std::vector<Operator>& operators_2,
+    const std::vector<std::string>& operator_names,
+    int N,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    double t_end,
+    double dt,
+    int krylov_dim
+);
+
+/**
+ * Compute observable dynamics for TPQ with legacy interface
+ */
+void computeObservableDynamics_U_t(
+    std::function<void(const Complex*, Complex*, int)> U_t,
+    const ComplexVector& tpq_state,
+    const std::vector<Operator>& observables_1,
+    const std::vector<Operator>& observables_2,
+    const std::vector<std::string>& observable_names,
+    int N,
+    const std::string& dir,
+    int sample,
+    double inv_temp,
+    double t_end,
+    double dt
+);
 
 #endif // TPQ_H

@@ -55,6 +55,7 @@ void block_cg(
     std::string dir = ""                                   // Directory for temporary files
 );
 
+
 // Davidson method for finding lowest eigenvalues
 void davidson_method(
     std::function<void(const Complex*, Complex*, int)> H,  // Hamiltonian operator
