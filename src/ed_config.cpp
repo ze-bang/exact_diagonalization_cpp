@@ -32,7 +32,9 @@ enum class DiagonalizationMethod {
     ARPACK_SM,
     ARPACK_LM,
     ARPACK_SHIFT_INVERT,
-    ARPACK_ADVANCED
+    ARPACK_ADVANCED,
+    LANCZOS_GPU,
+    LANCZOS_GPU_FIXED_SZ
 };
 
 // ============================================================================
@@ -387,6 +389,10 @@ std::optional<DiagonalizationMethod> parseMethod(const std::string& str) {
     if (lower == "arpack_lm") return DiagonalizationMethod::ARPACK_LM;
     if (lower == "arpack_advanced") return DiagonalizationMethod::ARPACK_ADVANCED;
     if (lower == "oss") return DiagonalizationMethod::OSS;
+#ifdef WITH_CUDA
+    if (lower == "lanczos_gpu") return DiagonalizationMethod::LANCZOS_GPU;
+    if (lower == "lanczos_gpu_fixed_sz") return DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ;
+#endif
     
     std::cerr << "Warning: Unknown method '" << str << "', using LANCZOS\n";
     return std::nullopt;
@@ -404,6 +410,10 @@ std::string methodToString(DiagonalizationMethod method) {
         case DiagonalizationMethod::ARPACK_LM: return "ARPACK_LM";
         case DiagonalizationMethod::ARPACK_ADVANCED: return "ARPACK_ADVANCED";
         case DiagonalizationMethod::OSS: return "OSS";
+#ifdef WITH_CUDA
+        case DiagonalizationMethod::LANCZOS_GPU: return "LANCZOS_GPU";
+        case DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ: return "LANCZOS_GPU_FIXED_SZ";
+#endif
         default: return "UNKNOWN";
     }
 }

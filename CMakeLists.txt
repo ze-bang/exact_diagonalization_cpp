@@ -297,7 +297,13 @@ endif()
 
 # Define executables
 add_executable(ED_LEGACY ${SOURCES})          # Old main (kept for backward compatibility)
-add_executable(ED ${NEW_MAIN_SOURCES})  # New elegant main
+
+# New elegant main (add GPU sources if CUDA is enabled)
+if(WITH_CUDA)
+    add_executable(ED ${NEW_MAIN_SOURCES} ${GPU_SOURCES})
+else()
+    add_executable(ED ${NEW_MAIN_SOURCES})
+endif()
 
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/TPQ.cpp)
@@ -357,6 +363,16 @@ target_link_libraries(ED
     ${EXTRA_LINALG_LIBRARIES}
     ${ARPACK_LIBRARY}
 )
+
+# Add CUDA libraries to ED if CUDA is enabled
+if(WITH_CUDA)
+    target_link_libraries(ED
+        CUDA::cudart
+        CUDA::cublas
+        CUDA::cusparse
+        CUDA::curand
+    )
+endif()
 
 # Link libraries for TPQ_DSSF executable (only if it exists)
 if(TARGET TPQ_DSSF)

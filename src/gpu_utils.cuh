@@ -221,8 +221,12 @@ __device__ inline void apply_sy_contributions(
 /**
  * Device function: Count number of bits set (popcount)
  */
-__device__ inline int popcount_64(uint64_t x) {
+__device__ __host__ inline int popcount_64(uint64_t x) {
+#ifdef __CUDA_ARCH__
     return __popcll(x);
+#else
+    return __builtin_popcountll(x);
+#endif
 }
 
 /**

@@ -15,9 +15,13 @@
 #include <filesystem>
 #include <algorithm>
 
-// Uncomment for CUDA support
-// #include "TPQ_cuda.cuh"
-// #include "lanczos_cuda.cuh"
+// GPU support
+#ifdef WITH_CUDA
+#include "gpu_hamiltonian.cuh"
+#include "lanczos_gpu.cuh"
+#include "gpu_vector.cuh"
+#include "gpu_utils.cuh"
+#endif
 
 // ============================================================================
 // VECTOR OPERATIONS FOR COMPLEX VECTORS
@@ -127,7 +131,11 @@ enum class DiagonalizationMethod {
     ARPACK_SM,             // ARPACK smallest magnitude eigenvalues
     ARPACK_LM,             // ARPACK largest magnitude eigenvalues
     ARPACK_SHIFT_INVERT,   // ARPACK in shift-invert mode
-    ARPACK_ADVANCED        // ARPACK advanced multi-attempt strategy
+    ARPACK_ADVANCED,       // ARPACK advanced multi-attempt strategy
+    
+    // GPU methods
+    LANCZOS_GPU,           // GPU-accelerated Lanczos (full Hilbert space)
+    LANCZOS_GPU_FIXED_SZ   // GPU-accelerated Lanczos (fixed Sz sector)
 };
 
 /**
@@ -1245,7 +1253,75 @@ EDResults exact_diagonalization_from_files(
     std::cerr << "[DEBUG] exact_diagonalization_from_files: num_sites=" << params.num_sites 
               << ", method=" << static_cast<int>(method) << std::endl;
     
-    // Load Hamiltonian
+#ifdef WITH_CUDA
+    // Handle GPU methods separately since they don't use the Operator class
+    if (method == DiagonalizationMethod::LANCZOS_GPU_FIXED_SZ) {
+        std::cout << "Using GPU Lanczos (fixed Sz sector)" << std::endl;
+        
+        // Create GPU Fixed Sz operator with num_up = num_sites/2 as default
+        int n_up = params.num_sites / 2;  // Default to half-filling
+        cublasHandle_t cublas_handle;
+        cublasCreate(&cublas_handle);
+        gpu::GPUFixedSzOperator H_gpu(params.num_sites, params.spin_length, n_up, cublas_handle);
+        
+        // Load interaction files
+        std::cout << "Loading Trans file: " << single_site_file << std::endl;
+        H_gpu.load_from_file(single_site_file.c_str());
+        
+        std::cout << "Loading InterAll file: " << interaction_file << std::endl;
+        H_gpu.load_from_interall_file(interaction_file.c_str());
+        
+        // Generate fixed Sz basis on GPU
+        std::cout << "Generating fixed Sz basis on GPU..." << std::endl;
+        H_gpu.generate_basis();
+        
+        int hilbert_space_dim = H_gpu.get_dimension();
+        std::cout << "Fixed Sz sector dimension: " << hilbert_space_dim << std::endl;
+        
+        // Run GPU Lanczos
+        EDResults results;
+        results.eigenvalues.resize(params.num_eigenvalues);
+        gpu::lanczos_fixed_sz_gpu(H_gpu, params.max_iterations, params.num_eigenvalues,
+                                 params.tolerance, results.eigenvalues, params.output_dir,
+                                 params.compute_eigenvectors);
+        
+        std::cout << "GPU Lanczos (fixed Sz) completed" << std::endl;
+        cublasDestroy(cublas_handle);
+        return results;
+    }
+    
+    if (method == DiagonalizationMethod::LANCZOS_GPU) {
+        std::cout << "Using GPU Lanczos (full space)" << std::endl;
+        
+        // Create GPU Hamiltonian operator
+        cublasHandle_t cublas_handle;
+        cublasCreate(&cublas_handle);
+        gpu::GPUHamiltonianOperator H_gpu(params.num_sites, params.spin_length, cublas_handle);
+        
+        // Load interaction files
+        std::cout << "Loading Trans file: " << single_site_file << std::endl;
+        H_gpu.load_from_file(single_site_file.c_str());
+        
+        std::cout << "Loading InterAll file: " << interaction_file << std::endl;
+        H_gpu.load_from_interall_file(interaction_file.c_str());
+        
+        // Generate full basis (already done in constructor for full space)
+        std::cout << "Full Hilbert space dimension: " << H_gpu.get_dimension() << std::endl;
+        
+        // Run GPU Lanczos
+        EDResults results;
+        results.eigenvalues.resize(params.num_eigenvalues);
+        gpu::lanczos_gpu(H_gpu, params.max_iterations, params.num_eigenvalues,
+                       params.tolerance, results.eigenvalues, params.output_dir,
+                       params.compute_eigenvectors);
+        
+        std::cout << "GPU Lanczos completed" << std::endl;
+        cublasDestroy(cublas_handle);
+        return results;
+    }
+#endif
+    
+    // Load Hamiltonian (for CPU methods)
     Operator hamiltonian = ed_internal::load_hamiltonian_from_files(
         interaction_file, single_site_file, params.num_sites, params.spin_length, method, format
     );
