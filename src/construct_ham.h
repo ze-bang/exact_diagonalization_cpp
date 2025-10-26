@@ -53,6 +53,58 @@ struct SpectralFunctionData {
 // ============================================================================
 
 /**
+ * Count number of bits set in an integer (population count)
+ * @param x Integer to count bits in
+ * @return Number of bits set to 1
+ */
+inline int popcount(uint64_t x) {
+    return __builtin_popcountll(x);
+}
+
+/**
+ * Generate all basis states with exactly n_up bits set
+ * Returns states in lexicographic order
+ * @param n_bits Total number of bits
+ * @param n_up Number of bits that should be 1
+ * @return Vector of basis states (as integers)
+ */
+inline std::vector<uint64_t> generateFixedSzBasis(int n_bits, int n_up) {
+    std::vector<uint64_t> basis;
+    if (n_up < 0 || n_up > n_bits) return basis;
+    
+    // Start with lowest n_up bits set
+    uint64_t state = (1ULL << n_up) - 1;
+    uint64_t limit = 1ULL << n_bits;
+    
+    while (state < limit) {
+        basis.push_back(state);
+        
+        // Gosper's hack: generate next combination
+        uint64_t c = state & -state;  // rightmost bit
+        uint64_t r = state + c;        // add 1 to rightmost bit
+        uint64_t new_state = (((r ^ state) >> 2) / c) | r;
+        
+        if (new_state >= limit) break;
+        state = new_state;
+    }
+    
+    return basis;
+}
+
+/**
+ * Build inverse mapping: basis state (integer) -> index in fixed-Sz basis
+ * @param basis Vector of basis states
+ * @return Unordered map from state to index
+ */
+inline std::unordered_map<uint64_t, int> buildBasisIndexMap(const std::vector<uint64_t>& basis) {
+    std::unordered_map<uint64_t, int> index_map;
+    for (size_t i = 0; i < basis.size(); ++i) {
+        index_map[basis[i]] = i;
+    }
+    return index_map;
+}
+
+/**
  * Apply a permutation to a basis state (represented as an integer)
  * @param basis The basis state as a bit string
  * @param perm The permutation to apply
@@ -881,8 +933,8 @@ public:
         return blocks;
     }
     
-private:
-    // Member variables
+protected:
+    // Member variables (protected so derived classes can access)
     std::vector<TransformFunction> transforms_;
     int n_bits_;
     float spin_l_;
@@ -893,6 +945,7 @@ private:
         {{0, 1, 0, 0}, {0, 0, 1, 0}, {1, 0, 0, -1}}
     };
     
+private:
     // ========================================================================
     // Private Helper Functions
     // ========================================================================
@@ -1060,6 +1113,381 @@ private:
         std::cout << " done (" << nnz << " nnz, "
                   << std::fixed << std::setprecision(2)
                   << (100.0 * nnz / (block_size * block_size)) << "% fill)" << std::endl;
+    }
+};
+
+// ============================================================================
+// Fixed Sz Operator Class
+// ============================================================================
+
+/**
+ * Operator class for fixed total Sz sector
+ * Restricts Hilbert space to states with fixed number of up spins
+ * Reduces dimension from 2^N to C(N, N_up)
+ */
+class FixedSzOperator : public Operator {
+protected:
+    int n_up_;  // Number of up spins (fixed Sz = N/2 - n_up for spin-1/2)
+    std::vector<uint64_t> basis_states_;  // Basis states in fixed Sz sector
+    std::unordered_map<uint64_t, int> state_to_index_;  // Map state -> index
+    int fixed_sz_dim_;  // Dimension of fixed Sz sector
+    mutable Eigen::SparseMatrix<Complex> fixed_sz_matrix_;  // Sparse matrix in fixed Sz basis
+    mutable bool fixed_sz_matrix_built_;
+    
+public:
+    /**
+     * Constructor
+     * @param n_bits Number of sites
+     * @param spin_l Spin length (1/2 for spin-1/2)
+     * @param n_up Number of up spins (determines Sz sector)
+     */
+    FixedSzOperator(int n_bits, float spin_l, int n_up) 
+        : Operator(n_bits, spin_l), 
+          n_up_(n_up),
+          fixed_sz_matrix_built_(false) {
+        
+        if (n_up < 0 || n_up > n_bits) {
+            throw std::invalid_argument("Invalid n_up: must be between 0 and n_bits");
+        }
+        
+        // Generate fixed Sz basis
+        basis_states_ = generateFixedSzBasis(n_bits, n_up);
+        state_to_index_ = buildBasisIndexMap(basis_states_);
+        fixed_sz_dim_ = basis_states_.size();
+        
+        std::cout << "Fixed Sz basis: n_bits=" << n_bits 
+                  << ", n_up=" << n_up 
+                  << ", dimension=" << fixed_sz_dim_ << std::endl;
+    }
+    
+    // Get dimension of fixed Sz sector
+    int getFixedSzDim() const { return fixed_sz_dim_; }
+    
+    // Get basis states
+    const std::vector<uint64_t>& getBasisStates() const { return basis_states_; }
+    
+    /**
+     * Apply operator to vector in fixed Sz basis
+     * Override to work with reduced dimension
+     */
+    std::vector<Complex> apply(const std::vector<Complex>& vec) const {
+        if (vec.size() != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
+        }
+        
+        buildFixedSzMatrix();
+        
+        Eigen::VectorXcd eigenVec(fixed_sz_dim_);
+        for (int i = 0; i < fixed_sz_dim_; ++i) {
+            eigenVec(i) = vec[i];
+        }
+        
+        Eigen::VectorXcd result = fixed_sz_matrix_ * eigenVec;
+        
+        std::vector<Complex> resultVec(fixed_sz_dim_);
+        for (int i = 0; i < fixed_sz_dim_; ++i) {
+            resultVec[i] = result(i);
+        }
+        return resultVec;
+    }
+    
+    /**
+     * Apply operator to raw arrays in fixed Sz basis
+     */
+    void apply(const Complex* in, Complex* out, size_t size) const {
+        if (size != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument("Input/output vector size mismatch with fixed Sz dimension");
+        }
+        
+        buildFixedSzMatrix();
+        
+        Eigen::Map<const Eigen::VectorXcd> eigenIn(in, fixed_sz_dim_);
+        Eigen::Map<Eigen::VectorXcd> eigenOut(out, fixed_sz_dim_);
+        eigenOut = fixed_sz_matrix_ * eigenIn;
+    }
+    
+    /**
+     * Build sparse matrix in fixed Sz basis
+     * Only computes matrix elements between states in the same Sz sector
+     */
+    void buildFixedSzMatrix() const {
+        if (fixed_sz_matrix_built_) return;
+        
+        fixed_sz_matrix_.resize(fixed_sz_dim_, fixed_sz_dim_);
+        std::vector<Eigen::Triplet<Complex>> triplets;
+        
+        // For each basis state
+        for (int i = 0; i < fixed_sz_dim_; ++i) {
+            uint64_t basis_i = basis_states_[i];
+            
+            // Apply all transforms
+            for (const auto& transform : transforms_) {
+                auto [j_state, scalar] = transform(basis_i);
+                
+                // Check if resulting state is in the fixed Sz sector
+                if (j_state >= 0 && popcount(j_state) == n_up_) {
+                    auto it = state_to_index_.find(j_state);
+                    if (it != state_to_index_.end()) {
+                        int j = it->second;
+                        triplets.emplace_back(j, i, scalar);
+                    }
+                }
+            }
+        }
+        
+        fixed_sz_matrix_.setFromTriplets(triplets.begin(), triplets.end());
+        fixed_sz_matrix_built_ = true;
+        
+        std::cout << "Built fixed Sz matrix: " << fixed_sz_dim_ << "x" << fixed_sz_dim_ 
+                  << " with " << triplets.size() << " non-zero elements" << std::endl;
+    }
+    
+    /**
+     * Get sparse matrix in fixed Sz basis
+     */
+    Eigen::SparseMatrix<Complex> getFixedSzMatrix() const {
+        buildFixedSzMatrix();
+        return fixed_sz_matrix_;
+    }
+    
+    /**
+     * Convert vector from full basis to fixed Sz basis
+     * Projects out components not in the fixed Sz sector
+     */
+    std::vector<Complex> projectToFixedSz(const std::vector<Complex>& full_vec) const {
+        int full_dim = 1 << n_bits_;
+        if (full_vec.size() != static_cast<size_t>(full_dim)) {
+            throw std::invalid_argument("Input vector size mismatch with full dimension");
+        }
+        
+        std::vector<Complex> fixed_sz_vec(fixed_sz_dim_, Complex(0.0, 0.0));
+        for (int i = 0; i < fixed_sz_dim_; ++i) {
+            uint64_t state = basis_states_[i];
+            fixed_sz_vec[i] = full_vec[state];
+        }
+        return fixed_sz_vec;
+    }
+    
+    /**
+     * Convert vector from fixed Sz basis to full basis
+     * Embeds into full Hilbert space with zeros outside the sector
+     */
+    std::vector<Complex> embedToFull(const std::vector<Complex>& fixed_sz_vec) const {
+        if (fixed_sz_vec.size() != static_cast<size_t>(fixed_sz_dim_)) {
+            throw std::invalid_argument("Input vector size mismatch with fixed Sz dimension");
+        }
+        
+        int full_dim = 1 << n_bits_;
+        std::vector<Complex> full_vec(full_dim, Complex(0.0, 0.0));
+        for (int i = 0; i < fixed_sz_dim_; ++i) {
+            uint64_t state = basis_states_[i];
+            full_vec[state] = fixed_sz_vec[i];
+        }
+        return full_vec;
+    }
+    
+    /**
+     * Override addTransform to invalidate fixed Sz matrix cache
+     */
+    void addTransform(TransformFunction transform) {
+        Operator::addTransform(transform);
+        fixed_sz_matrix_built_ = false;
+    }
+    
+    /**
+     * Generate symmetrized basis for fixed Sz sector with spatial symmetries
+     * Combines Sz conservation with spatial symmetry group
+     */
+    void generateSymmetrizedBasisFixedSz(const std::string& dir) {
+        std::cout << "\n=== Generating Symmetrized Basis (Fixed Sz) ===" << std::endl;
+        std::cout << "Fixed Sz sector: n_up=" << n_up_ 
+                  << ", dimension=" << fixed_sz_dim_ << std::endl;
+        
+        // Load symmetry information
+        symmetry_info.loadFromDirectory(dir);
+        
+        // Setup output directory
+        std::string sym_basis_dir = dir + "/sym_basis_fixed_sz";
+        system(("mkdir -p " + sym_basis_dir).c_str());
+        
+        // Generate basis for each sector
+        size_t total_written = 0;
+        symmetrized_block_ham_sizes.assign(symmetry_info.sectors.size(), 0);
+        
+        for (size_t sector_idx = 0; sector_idx < symmetry_info.sectors.size(); ++sector_idx) {
+            const auto& sector = symmetry_info.sectors[sector_idx];
+            
+            std::cout << "\nProcessing sector " << (sector_idx + 1) << "/"
+                      << symmetry_info.sectors.size() << " (QN: ";
+            for (int qn : sector.quantum_numbers) std::cout << qn << " ";
+            std::cout << ")" << std::endl;
+            
+            std::set<uint64_t> processed_orbits;
+            size_t sector_basis_count = 0;
+            
+            // Only iterate over fixed Sz basis states
+            for (int basis_idx = 0; basis_idx < fixed_sz_dim_; ++basis_idx) {
+                uint64_t basis = basis_states_[basis_idx];
+                
+                if (basis_idx % (fixed_sz_dim_ / 20) == 0 && fixed_sz_dim_ > 20) {
+                    std::cout << "\r  Progress: " << (100 * basis_idx / fixed_sz_dim_) << "%" << std::flush;
+                }
+                
+                // Check if this basis state's orbit was already processed
+                uint64_t orbit_rep = getOrbitRepresentativeFixedSz(basis);
+                if (processed_orbits.count(orbit_rep)) continue;
+                processed_orbits.insert(orbit_rep);
+                
+                // Create symmetrized vector for this sector
+                std::vector<Complex> sym_vec = createSymmetrizedVectorFixedSz(
+                    basis, sector.quantum_numbers, sector.phase_factors);
+                
+                // Check if vector is valid (non-zero norm)
+                double norm_sq = 0.0;
+                for (const auto& v : sym_vec) norm_sq += std::norm(v);
+                
+                if (norm_sq > 1e-10) {
+                    // Normalize
+                    double norm = std::sqrt(norm_sq);
+                    for (auto& v : sym_vec) v /= norm;
+                    
+                    // Save vector
+                    saveSymBasisVectorFixedSz(sym_basis_dir, total_written, sym_vec);
+                    sector_basis_count++;
+                    total_written++;
+                }
+            }
+            
+            symmetrized_block_ham_sizes[sector_idx] = sector_basis_count;
+            std::cout << "\r  Sector " << (sector_idx + 1) << " complete: "
+                      << sector_basis_count << " basis vectors" << std::endl;
+        }
+        
+        // Save block sizes
+        saveBlockSizesFixedSz(dir);
+        
+        std::cout << "\nTotal symmetrized basis vectors (Fixed Sz): " << total_written << std::endl;
+        std::cout << "=== Symmetrized Basis Generation Complete ===" << std::endl;
+    }
+    
+protected:
+    /**
+     * Get orbit representative for a state in fixed Sz sector
+     */
+    uint64_t getOrbitRepresentativeFixedSz(uint64_t state) const {
+        uint64_t min_state = state;
+        
+        for (const auto& generator : symmetry_info.generators) {
+            uint64_t permuted = applyPermutation(state, generator);
+            if (permuted < min_state) {
+                min_state = permuted;
+            }
+        }
+        
+        return min_state;
+    }
+    
+    /**
+     * Create symmetrized vector in fixed Sz basis
+     */
+    std::vector<Complex> createSymmetrizedVectorFixedSz(
+        uint64_t seed_state,
+        const std::vector<int>& quantum_numbers,
+        const std::vector<Complex>& phase_factors) const {
+        
+        std::vector<Complex> sym_vec(fixed_sz_dim_, Complex(0.0, 0.0));
+        
+        // Apply symmetry operations and accumulate
+        std::set<uint64_t> orbit;
+        std::queue<uint64_t> to_process;
+        to_process.push(seed_state);
+        orbit.insert(seed_state);
+        
+        while (!to_process.empty()) {
+            uint64_t current = to_process.front();
+            to_process.pop();
+            
+            for (size_t g = 0; g < symmetry_info.generators.size(); ++g) {
+                uint64_t permuted = applyPermutation(current, symmetry_info.generators[g]);
+                
+                // Check if still in fixed Sz sector
+                if (popcount(permuted) != n_up_) continue;
+                
+                if (orbit.find(permuted) == orbit.end()) {
+                    orbit.insert(permuted);
+                    to_process.push(permuted);
+                }
+            }
+        }
+        
+        // Build symmetrized vector with phase factors
+        for (uint64_t state : orbit) {
+            auto it = state_to_index_.find(state);
+            if (it != state_to_index_.end()) {
+                int idx = it->second;
+                
+                // Calculate phase based on how we got to this state
+                Complex phase = calculatePhaseFixedSz(seed_state, state, quantum_numbers, phase_factors);
+                sym_vec[idx] = phase;
+            }
+        }
+        
+        return sym_vec;
+    }
+    
+    /**
+     * Calculate phase factor for symmetrized state
+     */
+    Complex calculatePhaseFixedSz(
+        uint64_t seed_state,
+        uint64_t target_state,
+        const std::vector<int>& quantum_numbers,
+        const std::vector<Complex>& phase_factors) const {
+        
+        // Simple implementation: accumulate phases along transformation path
+        // For more sophisticated implementation, track actual group element
+        Complex phase(1.0, 0.0);
+        
+        uint64_t current = seed_state;
+        for (size_t g = 0; g < symmetry_info.generators.size(); ++g) {
+            uint64_t permuted = applyPermutation(current, symmetry_info.generators[g]);
+            if (permuted == target_state) {
+                phase *= phase_factors[g];
+                break;
+            }
+        }
+        
+        return phase;
+    }
+    
+    /**
+     * Save symmetrized basis vector for fixed Sz
+     */
+    void saveSymBasisVectorFixedSz(const std::string& dir, size_t index, 
+                                    const std::vector<Complex>& vec) const {
+        std::string filename = dir + "/basis_" + std::to_string(index) + ".dat";
+        std::ofstream file(filename, std::ios::binary);
+        
+        int dim = fixed_sz_dim_;
+        file.write(reinterpret_cast<const char*>(&dim), sizeof(int));
+        file.write(reinterpret_cast<const char*>(vec.data()), dim * sizeof(Complex));
+    }
+    
+    /**
+     * Save block sizes for fixed Sz sectors
+     */
+    void saveBlockSizesFixedSz(const std::string& dir) const {
+        std::string filename = dir + "/sym_basis_fixed_sz/block_sizes.txt";
+        std::ofstream file(filename);
+        
+        file << "# Fixed Sz symmetrized block sizes\n";
+        file << "# n_up = " << n_up_ << "\n";
+        file << "# fixed_sz_dim = " << fixed_sz_dim_ << "\n";
+        file << "# num_sectors = " << symmetrized_block_ham_sizes.size() << "\n\n";
+        
+        for (size_t i = 0; i < symmetrized_block_ham_sizes.size(); ++i) {
+            file << i << " " << symmetrized_block_ham_sizes[i] << "\n";
+        }
     }
 };
 
@@ -1529,4 +1957,113 @@ public:
     }
 };
 
+// ============================================================================
+// Fixed Sz Derived Operator Classes
+// ============================================================================
+
+/**
+ * Single site operator for fixed Sz sector (S+, S-, Sz, Sx, Sy)
+ */
+class FixedSzSingleSiteOperator : public FixedSzOperator {
+public:
+    FixedSzSingleSiteOperator(int num_site, float spin_l, int n_up, int op, int site_j) 
+        : FixedSzOperator(num_site, spin_l, n_up) {
+        
+        if (op < 0 || op > 4) {
+            throw std::invalid_argument("Invalid operator type");
+        }
+        
+        if (site_j < 0 || site_j >= num_site) {
+            throw std::invalid_argument("Invalid site index");
+        }
+        
+        if (op <= 2) {
+            // S+, S-, Sz
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                if (op == 2) {
+                    return {basis, Complex(spin_l * pow(-1, (basis >> site_j) & 1), 0.0)};
+                } else {
+                    if (((basis >> site_j) & 1) != op) {
+                        int flipped = basis ^ (1 << site_j);
+                        return {flipped, Complex(1.0, 0.0)};
+                    }
+                }
+                return {basis, Complex(0.0, 0.0)};
+            });
+        } else {
+            // Sx or Sy
+            addTransform([=](int basis) -> std::pair<int, Complex> {
+                int flipped = basis ^ (1 << site_j);
+                if (op == 3) {
+                    // Sx = (S+ + S-) / 2
+                    return {flipped, Complex(0.5, 0.0)};
+                } else {
+                    // Sy = (S+ - S-) / (2i)
+                    bool is_up = ((basis >> site_j) & 1) == 0;
+                    return {flipped, Complex(0.0, is_up ? 0.5 : -0.5)};
+                }
+            });
+        }
+    }
+};
+
+/**
+ * Two-site operator for fixed Sz sector
+ */
+class FixedSzDoubleSiteOperator : public FixedSzOperator {
+public:
+    FixedSzDoubleSiteOperator(int num_site, float spin_l, int n_up, 
+                              int op_i, int site_i, int op_j, int site_j)
+        : FixedSzOperator(num_site, spin_l, n_up) {
+        
+        if (op_i < 0 || op_i > 2 || op_j < 0 || op_j > 2) {
+            throw std::invalid_argument("Invalid operator types");
+        }
+        
+        if (site_i < 0 || site_i >= num_site || site_j < 0 || site_j >= num_site) {
+            throw std::invalid_argument("Invalid site indices");
+        }
+        
+        addTransform([=](int basis) -> std::pair<int, Complex> {
+            int bit_i = (basis >> site_i) & 1;
+            int bit_j = (basis >> site_j) & 1;
+            
+            Complex factor(1.0, 0.0);
+            
+            if (op_i == 2 && op_j == 2) {
+                return {basis, Complex(spin_l * spin_l * pow(-1, bit_i) * pow(-1, bit_j), 0.0)};
+            }
+            
+            int new_basis = basis;
+            bool valid = true;
+            
+            if (op_i != 2) {
+                if (bit_i != op_i) {
+                    new_basis ^= (1 << site_i);
+                } else {
+                    valid = false;
+                }
+            } else {
+                factor *= Complex(spin_l * pow(-1, bit_i), 0.0);
+            }
+            
+            if (valid && op_j != 2) {
+                int new_bit_j = (new_basis >> site_j) & 1;
+                if (new_bit_j != op_j) {
+                    new_basis ^= (1 << site_j);
+                } else {
+                    valid = false;
+                }
+            } else if (valid) {
+                int new_bit_j = (new_basis >> site_j) & 1;
+                factor *= Complex(spin_l * pow(-1, new_bit_j), 0.0);
+            }
+            
+            if (valid) return {new_basis, factor};
+            return {basis, Complex(0.0, 0.0)};
+        });
+    }
+};
+
 #endif // CONSTRUCT_HAM_H
+

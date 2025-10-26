@@ -82,6 +82,10 @@ struct SystemConfig {
     float spin_length = 0.5;
     int sublattice_size = 1;
     
+    // Fixed Sz mode
+    bool use_fixed_sz = false;
+    int n_up = -1;  // Number of up spins (-1 = not set, will use num_sites/2)
+    
     std::string hamiltonian_dir = "";
     std::string interaction_file = "InterAll.dat";
     std::string single_site_file = "Trans.dat";
@@ -174,6 +178,8 @@ public:
         system.hamiltonian_dir = dir; 
         return *this; 
     }
+    EDConfig& fixedSz(bool use = true) { system.use_fixed_sz = use; return *this; }
+    EDConfig& numUp(int n) { system.n_up = n; return *this; }
     
     // Workflow
     EDConfig& standard(bool b = true) { workflow.run_standard = b; return *this; }

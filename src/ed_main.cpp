@@ -35,12 +35,31 @@ EDResults run_standard_workflow(const EDConfig& config) {
     
     auto start = std::chrono::high_resolution_clock::now();
     
-    auto results = exact_diagonalization_from_directory(
-        config.system.hamiltonian_dir,
-        config.method,
-        params,
-        HamiltonianFileFormat::STANDARD
-    );
+    EDResults results;
+    
+    // Check if fixed Sz mode is enabled
+    if (config.system.use_fixed_sz) {
+        int n_up = (config.system.n_up >= 0) ? config.system.n_up : config.system.num_sites / 2;
+        std::string interaction_file = config.system.hamiltonian_dir + "/" + config.system.interaction_file;
+        std::string single_site_file = config.system.hamiltonian_dir + "/" + config.system.single_site_file;
+        
+        results = exact_diagonalization_fixed_sz(
+            interaction_file,
+            single_site_file,
+            config.system.num_sites,
+            config.system.spin_length,
+            n_up,
+            config.method,
+            params
+        );
+    } else {
+        results = exact_diagonalization_from_directory(
+            config.system.hamiltonian_dir,
+            config.method,
+            params,
+            HamiltonianFileFormat::STANDARD
+        );
+    }
     
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();

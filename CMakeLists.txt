@@ -300,6 +300,9 @@ add_executable(ED ${NEW_MAIN_SOURCES})  # New elegant main
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/TPQ.cpp)
 
+# Add Fixed Sz example
+add_executable(FIXED_SZ_EXAMPLE examples/fixed_sz_example.cpp ${SRC_DIR}/lanczos.cpp)
+
 
 
 # Add CUDA example executable if CUDA is enabled and example exists
@@ -358,6 +361,17 @@ if(TARGET TPQ_DSSF)
     )
 endif()
 
+# Link libraries for Fixed Sz example
+if(TARGET FIXED_SZ_EXAMPLE)
+    target_link_libraries(FIXED_SZ_EXAMPLE
+        ${BLAS_LIBRARIES}
+        ${LAPACK_LIBRARIES}
+        ${LAPACKE_LIBRARIES}
+        ${EXTRA_LINALG_LIBRARIES}
+        ${ARPACK_LIBRARY}
+    )
+endif()
+
 
 # Link libraries for CUDA example if it exists
 if(TARGET CUDA_EXAMPLE)
@@ -390,6 +404,10 @@ if(WITH_MKL)
         
         if(TARGET TPQ_DSSF)
             target_link_libraries(TPQ_DSSF MKL::MKL)
+        endif()
+        
+        if(TARGET FIXED_SZ_EXAMPLE)
+            target_link_libraries(FIXED_SZ_EXAMPLE MKL::MKL)
         endif()
         
         # Link MKL to CUDA example if it exists

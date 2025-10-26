@@ -10,6 +10,7 @@
 #include "lanczos.h"
 #include "construct_ham.h"
 #include "observables.h"
+#include "ed_config.h"
 #include <sys/stat.h>
 #include <filesystem>
 #include <algorithm>
@@ -775,6 +776,20 @@ void process_thermal_correlations(
 }
 
 /**
+ * @brief Factory function to create the appropriate operator type
+ * Creates either a standard Operator or FixedSzOperator based on config
+ */
+template<typename OperatorType = Operator>
+OperatorType* create_operator(const SystemConfig& config) {
+    if (config.use_fixed_sz) {
+        int n_up = (config.n_up >= 0) ? config.n_up : config.num_sites / 2;
+        return new FixedSzOperator(config.num_sites, config.spin_length, n_up);
+    } else {
+        return new OperatorType(config.num_sites, config.spin_length);
+    }
+}
+
+/**
  * @brief Load Hamiltonian from files based on format
  */
 Operator load_hamiltonian_from_files(
@@ -1123,7 +1138,88 @@ void setup_symmetry_basis(
     }
 }
 
-} // namespace ed_internal// ============================================================================
+} // namespace ed_internal
+
+// ============================================================================
+// FIXED SZ EXACT DIAGONALIZATION
+// ============================================================================
+
+/**
+ * @brief Exact diagonalization in fixed Sz sector
+ * 
+ * Performs diagonalization on a restricted Hilbert space with fixed
+ * total Sz quantum number, significantly reducing memory and computational cost.
+ * 
+ * @param interaction_file Path to interaction file
+ * @param single_site_file Path to single-site file
+ * @param num_sites Number of sites
+ * @param spin_length Spin length (usually 0.5)
+ * @param n_up Number of up spins (determines Sz sector)
+ * @param method Diagonalization method to use
+ * @param params Parameters for diagonalization
+ * @return EDResults containing eigenvalues and metadata
+ */
+inline EDResults exact_diagonalization_fixed_sz(
+    const std::string& interaction_file,
+    const std::string& single_site_file,
+    int num_sites,
+    float spin_length,
+    int n_up,
+    DiagonalizationMethod method,
+    const EDParameters& params
+) {
+    std::cout << "\n=== Fixed Sz Exact Diagonalization ===" << std::endl;
+    std::cout << "System: " << num_sites << " sites, spin = " << spin_length << std::endl;
+    std::cout << "Fixed Sz sector: n_up = " << n_up << " (Sz = " << (n_up - num_sites/2.0) << ")" << std::endl;
+    
+    // Create Fixed Sz operator
+    FixedSzOperator hamiltonian(num_sites, spin_length, n_up);
+    
+    // Load Hamiltonian terms
+    if (!single_site_file.empty()) {
+        std::ifstream file(single_site_file);
+        if (file.is_open()) {
+            hamiltonian.loadFromFile(single_site_file);
+        }
+    }
+    if (!interaction_file.empty()) {
+        std::ifstream file(interaction_file);
+        if (file.is_open()) {
+            hamiltonian.loadFromInterAllFile(interaction_file);
+        }
+    }
+    
+    // Get dimension of fixed Sz sector
+    int fixed_sz_dim = hamiltonian.getFixedSzDim();
+    int full_dim = 1 << num_sites;
+    
+    std::cout << "Hilbert space dimension:" << std::endl;
+    std::cout << "  Full space: " << full_dim << std::endl;
+    std::cout << "  Fixed Sz:   " << fixed_sz_dim << std::endl;
+    std::cout << "  Reduction:  " << (double)full_dim / fixed_sz_dim << "x" << std::endl;
+    
+    // Build sparse matrix
+    if (method != DiagonalizationMethod::FULL) {
+        hamiltonian.buildFixedSzMatrix();
+    }
+    
+    // Create apply function
+    auto apply_hamiltonian = [&hamiltonian, fixed_sz_dim](const Complex* in, Complex* out, int n) {
+        if (n != fixed_sz_dim) {
+            throw std::runtime_error("Dimension mismatch in fixed Sz apply");
+        }
+        hamiltonian.apply(in, out, n);
+    };
+    
+    // Perform diagonalization
+    std::cout << "\nDiagonalizing..." << std::endl;
+    auto results = exact_diagonalization_core(apply_hamiltonian, fixed_sz_dim, method, params);
+    
+    std::cout << "=== Fixed Sz Diagonalization Complete ===" << std::endl;
+    return results;
+}
+
+// ============================================================================
 // FILE-BASED WRAPPER FUNCTIONS
 // ============================================================================
 

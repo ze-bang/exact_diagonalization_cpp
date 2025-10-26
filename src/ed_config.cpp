@@ -88,6 +88,8 @@ EDConfig EDConfig::fromFile(const std::string& filename) {
             else if (key == "num_sites") config.system.num_sites = std::stoi(value);
             else if (key == "spin_length") config.system.spin_length = std::stof(value);
             else if (key == "hamiltonian_dir") config.system.hamiltonian_dir = value;
+            else if (key == "use_fixed_sz") config.system.use_fixed_sz = (value == "true" || value == "1");
+            else if (key == "n_up") config.system.n_up = std::stoi(value);
             else if (key == "output_dir") config.workflow.output_dir = value;
             else if (key == "num_samples") config.thermal.num_samples = std::stoi(value);
             else if (key == "temp_min") config.thermal.temp_min = std::stod(value);
@@ -150,6 +152,8 @@ EDConfig EDConfig::fromCommandLine(int argc, char* argv[]) {
             else if (arg.find("--block-size=") == 0) config.diag.block_size = std::stoi(parse_value("--block-size="));
             else if (arg.find("--num_sites=") == 0) config.system.num_sites = std::stoi(parse_value("--num_sites="));
             else if (arg.find("--spin_length=") == 0) config.system.spin_length = std::stof(parse_value("--spin_length="));
+            else if (arg == "--fixed-sz") config.system.use_fixed_sz = true;
+            else if (arg.find("--n-up=") == 0) config.system.n_up = std::stoi(parse_value("--n-up="));
             else if (arg.find("--output=") == 0) config.workflow.output_dir = parse_value("--output=");
             else if (arg.find("--samples=") == 0) config.thermal.num_samples = std::stoi(parse_value("--samples="));
             else if (arg.find("--temp_min=") == 0) config.thermal.temp_min = std::stod(parse_value("--temp_min="));
@@ -298,6 +302,28 @@ void EDConfig::print(std::ostream& out) const {
     
     out << "Method: " << ed_config::methodToString(method) << "\n";
     out << "System: " << system.num_sites << " sites, spin = " << system.spin_length << "\n";
+    
+    if (system.use_fixed_sz) {
+        int n_up_actual = (system.n_up >= 0) ? system.n_up : system.num_sites / 2;
+        double sz = n_up_actual - system.num_sites / 2.0;
+        out << "Fixed Sz: n_up = " << n_up_actual << " (Sz = " << sz << ")\n";
+        
+        // Calculate dimension reduction
+        auto binomial = [](int n, int k) {
+            if (k > n || k < 0) return 0;
+            if (k == 0 || k == n) return 1;
+            long long result = 1;
+            for (int i = 1; i <= k; ++i) {
+                result = result * (n - k + i) / i;
+            }
+            return (int)result;
+        };
+        int full_dim = 1 << system.num_sites;
+        int fixed_dim = binomial(system.num_sites, n_up_actual);
+        out << "Hilbert space: " << fixed_dim << " (reduced from " << full_dim 
+            << ", factor: " << (double)full_dim / fixed_dim << "x)\n";
+    }
+    
     out << "Eigenvalues: " << diag.num_eigenvalues << " (tol=" << diag.tolerance << ")\n";
     out << "Output: " << workflow.output_dir << "\n";
     
