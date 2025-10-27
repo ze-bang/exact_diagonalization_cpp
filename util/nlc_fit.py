@@ -14,6 +14,7 @@ import logging
 import tempfile
 import shutil
 import json
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from multiprocessing import Pool
 
@@ -218,6 +219,58 @@ def get_symmetry_equivalent_field_dirs(field_dir):
         return [v]
 
 
+@dataclass
+class OptionalFitParameters:
+    sigmas: list
+    random_transverse_field: float
+    g_renorm: float
+    provided_sigma_count: int
+    has_random_transverse_field: bool
+    has_g_renorm: bool
+
+    @property
+    def has_sigmas(self):
+        return self.provided_sigma_count > 0
+
+
+def extract_optional_fit_parameters(params, fixed_params, n_datasets):
+    """Return optional fit parameters using a consistent ordering convention."""
+    offset = 3
+
+    sigmas = [0.0] * n_datasets
+    provided_sigma_count = 0
+    if fixed_params.get("fit_broadening", False):
+        extracted = list(params[offset:offset + n_datasets])
+        for idx, value in enumerate(extracted[:n_datasets]):
+            sigmas[idx] = float(value)
+        provided_sigma_count = min(len(extracted), n_datasets)
+        offset += n_datasets
+
+    random_transverse_field = 0.0
+    has_random_transverse_field = False
+    if fixed_params.get("fit_random_transverse_field", False):
+        if len(params) > offset:
+            random_transverse_field = float(params[offset])
+            has_random_transverse_field = True
+        offset += 1
+
+    g_renorm = 1.0
+    has_g_renorm = False
+    if fixed_params.get("fit_g_renorm", False):
+        if len(params) > offset:
+            g_renorm = float(params[offset])
+            has_g_renorm = True
+        offset += 1
+
+    return OptionalFitParameters(
+        sigmas=sigmas,
+        random_transverse_field=random_transverse_field,
+        g_renorm=g_renorm,
+        provided_sigma_count=provided_sigma_count,
+        has_random_transverse_field=has_random_transverse_field,
+        has_g_renorm=has_g_renorm,
+    )
+
 
 def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=None):
     """Run NLCE with the given parameters and return the calculated specific heat"""
@@ -226,8 +279,14 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
 
     Jxx, Jyy, Jzz = params[:3]
     
+    n_datasets = fixed_params.get("n_datasets", 1)
+    optional_params = extract_optional_fit_parameters(params, fixed_params, n_datasets)
+
+    g_renorm = optional_params.g_renorm if fixed_params.get("fit_g_renorm", False) else 1.0
+
     # Use provided h_field if given, otherwise use the one from fixed_params
-    h_value = h_field if h_field is not None else fixed_params["h"]
+    base_h_value = h_field if h_field is not None else fixed_params["h"]
+    h_value = g_renorm * base_h_value
     field_dir = fixed_params["field_dir"]
     
     # Currently using single field direction (symmetry averaging commented out)
@@ -242,15 +301,12 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
         
         # Determine number of runs for averaging (only when fitting random transverse field)
         fit_random_transverse_field = fixed_params.get("fit_random_transverse_field", False)
-        # Get random_transverse_field parameter from params if present
-        if fit_random_transverse_field:
-            # The index depends on whether broadening is fitted
-            n_datasets = fixed_params.get("n_datasets", 1)
-            idx = 3 + n_datasets if fixed_params.get("fit_broadening", False) else 3
-            random_transverse_field = params[idx] if len(params) > idx else 0.0
-        else:
-            random_transverse_field = 0.0
-        n_runs = fixed_params.get("random_field_n_runs", 10) if fit_random_transverse_field and random_transverse_field > 0 else 1
+        random_transverse_field = optional_params.random_transverse_field if fit_random_transverse_field else 0.0
+        n_runs = (
+            fixed_params.get("random_field_n_runs", 10)
+            if fit_random_transverse_field and random_transverse_field > 0
+            else 1
+        )
 
         # Base command for nlce.py
         if fixed_params["ED_method"] == 'FULL' or fixed_params["ED_method"] == 'OSS':
@@ -303,14 +359,20 @@ def run_nlce(params, fixed_params, exp_temp, work_dir, h_field=None, temp_range=
             
         if n_runs > 1:
             num_workers = fixed_params.get("num_workers", os.cpu_count())
-            logging.info(f"Running {n_runs} NLCE instances in parallel with {num_workers} workers (symmetry field_dir: {sym_field_dir})")
+            logging.info(
+                f"Running {n_runs} NLCE instances in parallel with {num_workers} workers "
+                f"(symmetry field_dir: {sym_field_dir}, g_renorm={g_renorm})"
+            )
             pool_args = [(i, n_runs, cmd, work_dir, fixed_params) for i in range(n_runs)]
             with Pool(processes=num_workers) as pool:
                 results = pool.map(_run_single_nlce, pool_args)
             calc_temp_list = [res[0] for res in results if res[0] is not None]
             calc_spec_heat_list = [res[1] for res in results if res[1] is not None]
         else:
-            logging.info(f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}, field_dir={sym_field_dir}")
+            logging.info(
+                f"Running NLCE with Jxx={Jxx}, Jyy={Jyy}, Jzz={Jzz}, h={h_value}, "
+                f"field_dir={sym_field_dir}, g_renorm={g_renorm}"
+            )
             cmd.extend(['--base_dir', work_dir])
             try:
                 env = os.environ.copy()
@@ -382,48 +444,29 @@ def interpolate_calc_data(calc_temp, calc_spec_heat, exp_temp):
     
     # Replace NaN values with zeros
     interp_spec_heat = np.nan_to_num(interp_spec_heat)
-    
-    return interp_spec_heat
 
-
-    # Replace NaN values with zeros
-    interp_spec_heat = np.nan_to_num(interp_spec_heat)
-    
     return interp_spec_heat
 
 def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
     """Calculate combined chi-squared between experimental and calculated specific heat for multiple datasets"""
     total_chi_squared = 0.0
     
-    # Extract J parameters and sigma parameters
     n_datasets = len(exp_datasets)
-    
-    # Extract sigma parameters if fitting broadening
+    optional_params = extract_optional_fit_parameters(params, fixed_params, n_datasets)
+
     fit_broadening = fixed_params.get("fit_broadening", False)
-    if fit_broadening:
-        sigmas = params[3:3+n_datasets] if len(params) > 3 else [0.0] * n_datasets
-        sigmas[1:-1] = np.array(sigmas[1:-1])/2
-    else:
-        # sigmas = [5, 0.4771, 0.4771, 0.4771]
-        sigmas = [0, 0, 0, 0]
-    
-    # Extract g_renorm parameter if fitting
+    sigmas = optional_params.sigmas.copy()
+    if fit_broadening and optional_params.has_sigmas:
+        interior = np.array(sigmas[1:-1]) / 2
+        if interior.size:
+            sigmas[1:-1] = interior.tolist()
+    elif not fit_broadening:
+        sigmas = [0.0] * n_datasets
+
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
     fit_random_transverse_field = fixed_params.get("fit_random_transverse_field", False)
-    
-    if fit_g_renorm:
-        if fit_broadening and fit_random_transverse_field:
-            g_renorm_idx = 3 + n_datasets + 1
-        elif fit_broadening:
-            g_renorm_idx = 3 + n_datasets
-        elif fit_random_transverse_field:
-            g_renorm_idx = 3 + 1
-        else:
-            g_renorm_idx = 3
-        g_renorm = params[g_renorm_idx] if len(params) > g_renorm_idx else 1.0
-    else:
-        g_renorm = 1.0
-    
+    g_renorm = optional_params.g_renorm if fit_g_renorm and optional_params.has_g_renorm else 1.0
+
     for i, dataset in enumerate(exp_datasets):
         exp_temp = dataset['temp']
         exp_spec_heat = dataset['spec_heat']
@@ -576,15 +619,12 @@ def calc_chi_squared(params, fixed_params, exp_datasets, work_dir):
         logging.info(log_msg)
     
     param_str = f"Jxx={params[0]:.4f}, Jyy={params[1]:.4f}, Jzz={params[2]:.4f}"
-    if fit_broadening and len(params) > 3:
+    if fit_broadening and optional_params.has_sigmas:
         sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(sigmas)])
         param_str += f", {sigma_str}"
-    if fit_random_transverse_field:
-        # Get the correct index for random transverse field
-        random_field_idx = 3 + n_datasets if fit_broadening else 3
-        if len(params) > random_field_idx:
-            param_str += f", random_field_strength={params[random_field_idx]:.4f}"
-    if fit_g_renorm:
+    if fit_random_transverse_field and optional_params.has_random_transverse_field:
+        param_str += f", random_field_strength={optional_params.random_transverse_field:.4f}"
+    if fit_g_renorm and optional_params.has_g_renorm:
         param_str += f", g_renorm={g_renorm:.4f}"
 
     logging.info(f"Parameters: {param_str}, Total Chi-squared={total_chi_squared:.4f}")
@@ -598,22 +638,11 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
     colors = plt.cm.tab10(np.linspace(0, 1, len(exp_datasets)))
     n_datasets = len(exp_datasets)
     fit_broadening = fixed_params.get("fit_broadening", False)
-    
-    if fit_broadening:
-        sigmas = best_params[3:3+n_datasets] if len(best_params) > 3 else [0.0] * n_datasets
-    else:
-        sigmas = [0.0] * n_datasets
-    
-    # Extract g_renorm if fitted
     fit_g_renorm = fixed_params.get("fit_g_renorm", False)
-    if fit_g_renorm:
-        if fit_broadening:
-            g_renorm_idx = 3 + n_datasets
-        else:
-            g_renorm_idx = 3
-        g_renorm = best_params[g_renorm_idx] if len(best_params) > g_renorm_idx else 1.0
-    else:
-        g_renorm = 1.0
+
+    optional_params = extract_optional_fit_parameters(best_params, fixed_params, n_datasets)
+    sigmas = optional_params.sigmas if fit_broadening else [0.0] * n_datasets
+    g_renorm = optional_params.g_renorm if fit_g_renorm and optional_params.has_g_renorm else 1.0
     
     for i, (dataset, color) in enumerate(zip(exp_datasets, colors)):
         exp_temp = dataset['temp']
@@ -645,7 +674,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
             label_str = f'NLCE Fit (h={h_field}'
             if sigma > 0:
                 label_str += f', σ={sigma:.3f}'
-            if fit_g_renorm:
+            if fit_g_renorm and optional_params.has_g_renorm:
                 label_str += f', g={g_renorm:.3f}'
             label_str += ')'
             
@@ -653,7 +682,7 @@ def plot_results(exp_datasets, fixed_params, best_params, work_dir, output_dir):
                     label=label_str)
     
     title_str = f'Specific Heat Fit: Jxx={best_params[0]:.3f}, Jyy={best_params[1]:.3f}, Jzz={best_params[2]:.3f}'
-    if fit_g_renorm:
+    if fit_g_renorm and optional_params.has_g_renorm:
         title_str += f', g_renorm={g_renorm:.3f}'
     
     plt.xlabel('Temperature (K)')
@@ -1581,28 +1610,20 @@ def main():
             # Skip optimization and just plot initial parameters
             logging.info("Plot-only mode: Using initial parameters without optimization")
             best_params = initial_params
-            
+
             # Calculate chi-squared for initial parameters
             initial_chi_squared = calc_chi_squared(initial_params, fixed_params, exp_datasets, work_dir)
             logging.info(f"Initial parameters: Jxx={initial_params[0]:.4f}, Jyy={initial_params[1]:.4f}, Jzz={initial_params[2]:.4f}")
-            if args.fit_broadening and len(initial_params) > 3:
-                sigma_str = ", ".join([f"σ{i+1}={initial_params[3+i]:.4f}" for i in range(len(exp_datasets))])
+            optional_initial = extract_optional_fit_parameters(initial_params, fixed_params, len(exp_datasets))
+            if optional_initial.has_sigmas:
+                sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(optional_initial.sigmas)])
                 logging.info(f"Initial broadening parameters: {sigma_str}")
-            if args.fit_random_transverse_field:
-                random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
-                if len(initial_params) > random_field_idx:
-                    logging.info(f"Initial random transverse field parameter: {initial_params[random_field_idx]:.4f}")
-            if args.fit_g_renorm:
-                if args.fit_broadening and args.fit_random_transverse_field:
-                    g_renorm_idx = 3 + len(exp_datasets) + 1
-                elif args.fit_broadening:
-                    g_renorm_idx = 3 + len(exp_datasets)
-                elif args.fit_random_transverse_field:
-                    g_renorm_idx = 3 + 1
-                else:
-                    g_renorm_idx = 3
-                if len(initial_params) > g_renorm_idx:
-                    logging.info(f"Initial g_renorm parameter: {initial_params[g_renorm_idx]:.4f}")
+            if optional_initial.has_random_transverse_field:
+                logging.info(
+                    f"Initial random transverse field parameter: {optional_initial.random_transverse_field:.4f}"
+                )
+            if optional_initial.has_g_renorm:
+                logging.info(f"Initial g_renorm parameter: {optional_initial.g_renorm:.4f}")
             logging.info(f"Initial chi-squared: {initial_chi_squared:.4f}")
             
             # Create a mock result object for consistency with plotting function
@@ -1667,25 +1688,17 @@ def main():
                 logging.info("Optimization finished successfully")
 
         best_params = result.x
+        optional_best = extract_optional_fit_parameters(best_params, fixed_params, len(exp_datasets))
         logging.info(f"Best parameters: Jxx={best_params[0]:.4f}, Jyy={best_params[1]:.4f}, Jzz={best_params[2]:.4f}")
-        if args.fit_broadening and len(best_params) > 3:
-            sigma_str = ", ".join([f"σ{i+1}={best_params[3+i]:.4f}" for i in range(len(exp_datasets))])
+        if optional_best.has_sigmas:
+            sigma_str = ", ".join([f"σ{i+1}={s:.4f}" for i, s in enumerate(optional_best.sigmas)])
             logging.info(f"Best broadening parameters: {sigma_str}")
-        if args.fit_random_transverse_field:
-            random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
-            if len(best_params) > random_field_idx:
-                logging.info(f"Best random transverse field parameter: {best_params[random_field_idx]:.4f}")
-        if args.fit_g_renorm:
-            if args.fit_broadening and args.fit_random_transverse_field:
-                g_renorm_idx = 3 + len(exp_datasets) + 1
-            elif args.fit_broadening:
-                g_renorm_idx = 3 + len(exp_datasets)
-            elif args.fit_random_transverse_field:
-                g_renorm_idx = 3 + 1
-            else:
-                g_renorm_idx = 3
-            if len(best_params) > g_renorm_idx:
-                logging.info(f"Best g_renorm parameter: {best_params[g_renorm_idx]:.4f}")
+        if optional_best.has_random_transverse_field:
+            logging.info(
+                f"Best random transverse field parameter: {optional_best.random_transverse_field:.4f}"
+            )
+        if optional_best.has_g_renorm:
+            logging.info(f"Best g_renorm parameter: {optional_best.g_renorm:.4f}")
         logging.info(f"Final chi-squared: {result.fun:.4f}")
         
         # Analyze optimization landscape (only if optimization was performed)
@@ -1717,24 +1730,13 @@ def main():
             f.write(f"Jxx = {best_params[0]:.8f}\n")
             f.write(f"Jyy = {best_params[1]:.8f}\n")
             f.write(f"Jzz = {best_params[2]:.8f}\n")
-            if args.fit_broadening and len(best_params) > 3:
-                for i in range(len(exp_datasets)):
-                    f.write(f"sigma_{i+1} = {best_params[3+i]:.8f}\n")
-            if args.fit_random_transverse_field:
-                random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
-                if len(best_params) > random_field_idx:
-                    f.write(f"random_transverse_field = {best_params[random_field_idx]:.8f}\n")
-            if args.fit_g_renorm:
-                if args.fit_broadening and args.fit_random_transverse_field:
-                    g_renorm_idx = 3 + len(exp_datasets) + 1
-                elif args.fit_broadening:
-                    g_renorm_idx = 3 + len(exp_datasets)
-                elif args.fit_random_transverse_field:
-                    g_renorm_idx = 3 + 1
-                else:
-                    g_renorm_idx = 3
-                if len(best_params) > g_renorm_idx:
-                    f.write(f"g_renorm = {best_params[g_renorm_idx]:.8f}\n")
+            if optional_best.has_sigmas:
+                for i, sigma in enumerate(optional_best.sigmas):
+                    f.write(f"sigma_{i+1} = {sigma:.8f}\n")
+            if optional_best.has_random_transverse_field:
+                f.write(f"random_transverse_field = {optional_best.random_transverse_field:.8f}\n")
+            if optional_best.has_g_renorm:
+                f.write(f"g_renorm = {optional_best.g_renorm:.8f}\n")
         
         # Save detailed results
         results_file = os.path.join(args.output_dir, 'optimization_results.json')
@@ -1762,30 +1764,19 @@ def main():
             }
         
         # Add broadening parameters if they were fitted
-        if args.fit_broadening and len(best_params) > 3:
+        if optional_best.has_sigmas:
             broadening_params = {}
-            for i in range(len(exp_datasets)):
-                broadening_params[f'sigma_{i+1}'] = float(best_params[3+i])
+            for i, sigma in enumerate(optional_best.sigmas):
+                broadening_params[f'sigma_{i+1}'] = float(sigma)
             results_dict['broadening_parameters'] = broadening_params
-        
+
         # Add random transverse field parameter if it was fitted
-        if args.fit_random_transverse_field:
-            random_field_idx = 3 + (len(exp_datasets) if args.fit_broadening else 0)
-            if len(best_params) > random_field_idx:
-                results_dict['random_transverse_field'] = float(best_params[random_field_idx])
-        
+        if optional_best.has_random_transverse_field:
+            results_dict['random_transverse_field'] = float(optional_best.random_transverse_field)
+
         # Add g_renorm parameter if it was fitted
-        if args.fit_g_renorm:
-            if args.fit_broadening and args.fit_random_transverse_field:
-                g_renorm_idx = 3 + len(exp_datasets) + 1
-            elif args.fit_broadening:
-                g_renorm_idx = 3 + len(exp_datasets)
-            elif args.fit_random_transverse_field:
-                g_renorm_idx = 3 + 1
-            else:
-                g_renorm_idx = 3
-            if len(best_params) > g_renorm_idx:
-                results_dict['g_renorm'] = float(best_params[g_renorm_idx])
+        if optional_best.has_g_renorm:
+            results_dict['g_renorm'] = float(optional_best.g_renorm)
         
         with open(results_file, 'w') as f:
             json.dump(results_dict, f, indent=2, cls=NumpyJSONEncoder)
