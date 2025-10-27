@@ -267,8 +267,6 @@ set(HEADER_SOURCES
 if(WITH_CUDA)
     # Define GPU-specific sources (do NOT add to SOURCES - only for GPU targets)
     set(GPU_SOURCES
-        ${SRC_DIR}/gpu_hamiltonian.cu
-        ${SRC_DIR}/lanczos_gpu.cu
     )
     
     # Check if GPU source files exist
@@ -427,14 +425,6 @@ if(WITH_CUDA)
         CUDA::cusparse
         CUDA::curand
     )
-    
-    target_link_libraries(ED
-        CUDA::cudart
-        CUDA::cublas
-        CUDA::cusparse
-        CUDA::curand
-    )
-    
     
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF
