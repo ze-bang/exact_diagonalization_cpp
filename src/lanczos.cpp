@@ -1,5 +1,8 @@
 #include "lanczos.h"
 
+#include <cstdlib>
+#include <unordered_map>
+
 ComplexVector generateRandomVector(int N, std::mt19937& gen, std::uniform_real_distribution<double>& dist) {
     ComplexVector v(N);
     
@@ -215,7 +218,44 @@ void refine_degenerate_eigenvectors(std::function<void(const Complex*, Complex*,
 }
 
 
-ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
+namespace {
+
+constexpr size_t kDefaultBasisCacheBudget = 512ull * 1024ull * 1024ull;  // 512 MiB
+
+size_t GetBasisCacheBudgetBytes() {
+    static const size_t budget = []() {
+        size_t parsed_budget = kDefaultBasisCacheBudget;
+        if (const char* bytes_env = std::getenv("ED_LANCZOS_CACHE_BYTES")) {
+            char* end = nullptr;
+            unsigned long long bytes = std::strtoull(bytes_env, &end, 10);
+            if (end != bytes_env && bytes > 0) {
+                parsed_budget = static_cast<size_t>(bytes);
+            }
+        } else if (const char* mb_env = std::getenv("ED_LANCZOS_CACHE_MB")) {
+            char* end = nullptr;
+            unsigned long long mb = std::strtoull(mb_env, &end, 10);
+            if (end != mb_env && mb > 0) {
+                parsed_budget = static_cast<size_t>(mb) * 1024ull * 1024ull;
+            }
+        }
+        return parsed_budget;
+    }();
+    return budget;
+}
+
+struct BasisCacheEntry {
+    int dimension = 0;
+    size_t bytes_per_vector = 0;
+    size_t budget_bytes = 0;
+    size_t bytes_in_use = 0;
+    bool memory_enabled = true;
+    std::vector<ComplexVector> vectors;
+};
+
+std::mutex basis_cache_mutex;
+std::unordered_map<std::string, BasisCacheEntry> basis_cache;
+
+ComplexVector ReadBasisVectorFromDisk(const std::string& temp_dir, int index, int N) {
     ComplexVector vec(N);
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ifstream infile(filename, std::ios::binary);
@@ -223,21 +263,94 @@ ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
         std::cerr << "Error: Cannot open file " << filename << " for reading" << std::endl;
         return vec;
     }
-    infile.read(reinterpret_cast<char*>(vec.data()), N * sizeof(Complex));
+    infile.read(reinterpret_cast<char*>(vec.data()), static_cast<std::streamsize>(N) * sizeof(Complex));
     return vec;
 }
 
-// Helper function to write a basis vector to file
-bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
+bool WriteBasisVectorToDisk(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
     std::string filename = temp_dir + "/basis_" + std::to_string(index) + ".dat";
     std::ofstream outfile(filename, std::ios::binary);
     if (!outfile) {
         std::cerr << "Error: Cannot open file " << filename << " for writing" << std::endl;
         return false;
     }
-    outfile.write(reinterpret_cast<const char*>(vec.data()), N * sizeof(Complex));
-    outfile.close();
-    return true;
+    outfile.write(reinterpret_cast<const char*>(vec.data()), static_cast<std::streamsize>(N) * sizeof(Complex));
+    return static_cast<bool>(outfile);
+}
+
+void release_cached_basis(const std::string& temp_dir) {
+    std::lock_guard<std::mutex> lock(basis_cache_mutex);
+    basis_cache.erase(temp_dir);
+}
+
+}  // namespace
+
+ComplexVector read_basis_vector(const std::string& temp_dir, int index, int N) {
+    {
+        std::lock_guard<std::mutex> lock(basis_cache_mutex);
+        auto it = basis_cache.find(temp_dir);
+        if (it != basis_cache.end() && it->second.memory_enabled) {
+            if (index >= 0 && static_cast<size_t>(index) < it->second.vectors.size()) {
+                const ComplexVector& cached = it->second.vectors[index];
+                if (!cached.empty()) {
+                    return cached;
+                }
+            }
+        }
+    }
+    return ReadBasisVectorFromDisk(temp_dir, index, N);
+}
+
+// Helper function to write a basis vector, preferring in-memory caching when feasible
+bool write_basis_vector(const std::string& temp_dir, int index, const ComplexVector& vec, int N) {
+    std::vector<ComplexVector> vectors_to_flush;
+    int flush_dimension = N;
+
+    {
+        std::lock_guard<std::mutex> lock(basis_cache_mutex);
+        BasisCacheEntry& entry = basis_cache[temp_dir];
+        if (entry.dimension == 0) {
+            entry.dimension = N;
+            entry.bytes_per_vector = static_cast<size_t>(N) * sizeof(Complex);
+            entry.budget_bytes = GetBasisCacheBudgetBytes();
+        } else if (entry.dimension != N) {
+            entry.memory_enabled = false;
+        }
+
+        if (entry.memory_enabled) {
+            const size_t idx = static_cast<size_t>(std::max(index, 0));
+            if (entry.vectors.size() <= idx) {
+                entry.vectors.resize(idx + 1);
+            }
+
+            const size_t previous_bytes = entry.vectors[idx].empty() ? 0 : entry.bytes_per_vector;
+            const size_t projected = entry.bytes_in_use - previous_bytes + entry.bytes_per_vector;
+
+            if (projected <= entry.budget_bytes) {
+                entry.vectors[idx] = vec;
+                entry.bytes_in_use = projected;
+                return true;
+            }
+
+            vectors_to_flush = std::move(entry.vectors);
+            entry.vectors.clear();
+            entry.bytes_in_use = 0;
+            entry.memory_enabled = false;
+            flush_dimension = entry.dimension;
+        }
+    }
+
+    bool ok = true;
+    if (!vectors_to_flush.empty()) {
+        for (size_t i = 0; i < vectors_to_flush.size(); ++i) {
+            if (vectors_to_flush[i].empty()) {
+                continue;
+            }
+            ok = WriteBasisVectorToDisk(temp_dir, static_cast<int>(i), vectors_to_flush[i], flush_dimension) && ok;
+        }
+    }
+
+    return WriteBasisVectorToDisk(temp_dir, index, vec, N) && ok;
 }
 
 // Helper function to solve tridiagonal eigenvalue problem
@@ -272,102 +385,100 @@ int solve_tridiagonal_matrix(const std::vector<double>& alpha, const std::vector
         }
         
         std::cout << "Eigendecomposition successful, transforming eigenvectors..." << std::endl;
-        
-        // Transform and save eigenvectors with improved accuracy
-        #pragma omp parallel for
+
+        std::vector<ComplexVector> full_vectors(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+        std::vector<ComplexVector> compensation(n_eigenvalues, ComplexVector(N, Complex(0.0, 0.0)));
+
+        for (int j = 0; j < m; j++) {
+            ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
+
+            if (j % 50 == 0 || j == m - 1) {
+                std::cout << "  Accumulating basis vector " << j + 1 << " / " << m << std::endl;
+            }
+
+            #pragma omp parallel for schedule(static)
+            for (int i = 0; i < n_eigenvalues; i++) {
+                double coef = evecs[j + i * m];
+                ComplexVector& full_vector = full_vectors[i];
+                ComplexVector& comp_vec = compensation[i];
+
+                for (int k = 0; k < N; k++) {
+                    Complex contrib = basis_j[k] * coef;
+                    Complex y = contrib - comp_vec[k];
+                    Complex t = full_vector[k] + y;
+                    comp_vec[k] = (t - full_vector[k]) - y;
+                    full_vector[k] = t;
+                }
+            }
+        }
+
         for (int i = 0; i < n_eigenvalues; i++) {
             if (i % 10 == 0) {
                 std::cout << "Transforming eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
             }
-            
-            ComplexVector full_vector(N, Complex(0.0, 0.0));
-            
-            // Transform from Lanczos basis to original basis
-            // Use compensated summation for better accuracy
-            ComplexVector compensation(N, Complex(0.0, 0.0));
-            
-            for (int j = 0; j < m; j++) {
-                ComplexVector basis_j = read_basis_vector(temp_dir, j, N);
-                double coef = evecs[j + i * m];  // Column i of eigenvector matrix
-                
-                // Kahan summation for improved accuracy
-                for (int k = 0; k < N; k++) {
-                    Complex y = basis_j[k] * coef - compensation[k];
-                    Complex t = full_vector[k] + y;
-                    compensation[k] = (t - full_vector[k]) - y;
-                    full_vector[k] = t;
-                }
-            }
-            
-            // Normalize with high precision
+
+            ComplexVector& full_vector = full_vectors[i];
+
             double norm = cblas_dznrm2(N, full_vector.data(), 1);
             if (norm < 1e-14) {
                 std::cerr << "Warning: Eigenvector " << i << " has very small norm: " << norm << std::endl;
                 continue;
             }
-            
+
             Complex scale = Complex(1.0/norm, 0.0);
             cblas_zscal(N, &scale, full_vector.data(), 1);
-            
-            // Verify orthogonality and refine if needed
-            if (i > 0 && i < 10) {  // Check first few eigenvectors
-                // Read previous eigenvector for orthogonality check
+
+            if (i > 0 && i < 10) {
                 std::string prev_file = evec_dir + "/eigenvector_" + std::to_string(i-1) + ".dat";
                 std::ifstream prev_infile(prev_file, std::ios::binary);
                 if (prev_infile) {
                     ComplexVector prev_vec(N);
                     prev_infile.read(reinterpret_cast<char*>(prev_vec.data()), N * sizeof(Complex));
                     prev_infile.close();
-                    
+
                     Complex overlap;
                     cblas_zdotc_sub(N, prev_vec.data(), 1, full_vector.data(), 1, &overlap);
-                    
+
                     if (std::abs(overlap) > 1e-10) {
-                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i 
+                        std::cerr << "Warning: Eigenvectors " << i-1 << " and " << i
                                   << " have overlap " << std::abs(overlap) << std::endl;
-                        
-                        // Orthogonalize
+
                         Complex neg_overlap = -overlap;
                         cblas_zaxpy(N, &neg_overlap, prev_vec.data(), 1, full_vector.data(), 1);
-                        
-                        // Re-normalize
+
                         norm = cblas_dznrm2(N, full_vector.data(), 1);
                         scale = Complex(1.0/norm, 0.0);
                         cblas_zscal(N, &scale, full_vector.data(), 1);
                     }
                 }
             }
-            
-            
-            // Save to file in binary format for accuracy
+
             std::string evec_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".dat";
             std::ofstream evec_outfile(evec_file, std::ios::binary);
             if (!evec_outfile) {
                 std::cerr << "Error: Cannot open file " << evec_file << " for writing" << std::endl;
                 continue;
             }
-            
-            // Write in binary format for full precision
+
             evec_outfile.write(reinterpret_cast<const char*>(full_vector.data()), N * sizeof(Complex));
             evec_outfile.close();
-            
-            // Also save in text format for debugging
+
             std::string evec_text_file = evec_dir + "/eigenvector_" + std::to_string(i) + ".txt";
             std::ofstream evec_text_outfile(evec_text_file);
             if (evec_text_outfile) {
                 evec_text_outfile << std::scientific << std::setprecision(15);
                 for (int j = 0; j < N; j++) {
-                    evec_text_outfile << std::real(full_vector[j]) << " " 
+                    evec_text_outfile << std::real(full_vector[j]) << " "
                                      << std::imag(full_vector[j]) << std::endl;
                 }
                 evec_text_outfile.close();
             }
-            
+
             if (i % 10 == 0 || i == n_eigenvalues - 1) {
                 std::cout << "  Saved eigenvector " << i + 1 << " of " << n_eigenvalues << std::endl;
             }
         }
-    
+
     } else {
         // Just compute eigenvalues
         info = LAPACKE_dstevd(LAPACK_COL_MAJOR, 'N', m, diag.data(), offdiag.data(), nullptr, m);
@@ -524,11 +635,13 @@ void lanczos_no_ortho(std::function<void(const Complex*, Complex*, int)> H, int 
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
+        release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
-    
+
     // Clean up temporary files
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
 }
 
@@ -755,11 +868,13 @@ void lanczos_selective_reorth(std::function<void(const Complex*, Complex*, int)>
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
+        release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
-    
+
     // Clean up temporary files
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
 }
 
@@ -888,11 +1003,13 @@ void lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, int ma
     if (info != 0) {
         std::cerr << "Tridiagonal eigenvalue solver failed with error code " << info << std::endl;
         // Clean up temporary files before returning
+    release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
     
     // Clean up temporary files
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
 }
 
@@ -1130,6 +1247,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     
     if (info != 0) {
         std::cerr << "LAPACKE_dsyev failed with error code " << info << std::endl;
+    release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1182,6 +1300,7 @@ void block_lanczos(std::function<void(const Complex*, Complex*, int)> H, int N, 
     }
     
     // Cleanup
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
     
     std::cout << "Block Lanczos completed successfully" << std::endl;
@@ -1530,6 +1649,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+    release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1589,6 +1709,7 @@ void chebyshev_filtered_lanczos(std::function<void(const Complex*, Complex*, int
     }
     
     // Cleanup
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
     
     std::cout << "Chebyshev Filtered Lanczos completed successfully" << std::endl;
@@ -1900,6 +2021,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     
     if (info != 0) {
         std::cerr << "LAPACKE_dstevd failed with error code " << info << std::endl;
+    release_cached_basis(temp_dir);
         system(("rm -rf " + temp_dir).c_str());
         return;
     }
@@ -1984,6 +2106,7 @@ void shift_invert_lanczos(std::function<void(const Complex*, Complex*, int)> H, 
     }
     
     // Cleanup
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
     
     std::cout << "Shift-Invert Lanczos completed successfully" << std::endl;
@@ -2542,6 +2665,7 @@ void krylov_schur(std::function<void(const Complex*, Complex*, int)> H, int N, i
     }
     
     // Clean up temporary files
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
     
     if (!converged) {
@@ -2876,6 +3000,7 @@ void implicitly_restarted_lanczos(std::function<void(const Complex*, Complex*, i
     }
     
     // Cleanup temporary files
+    release_cached_basis(temp_dir);
     system(("rm -rf " + temp_dir).c_str());
     
     if (converged) {
