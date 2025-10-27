@@ -263,27 +263,6 @@ set(HEADER_SOURCES
     ${SRC_DIR}/*.h
 )
 
-# Add CUDA sources if available and CUDA is enabled
-if(WITH_CUDA)
-    # Define GPU-specific sources (do NOT add to SOURCES - only for GPU targets)
-    set(GPU_SOURCES
-    )
-    
-    # Check if GPU source files exist
-    foreach(cuda_file ${GPU_SOURCES})
-        if(EXISTS ${cuda_file})
-            message(STATUS "Found GPU source: ${cuda_file}")
-        else()
-            message(WARNING "GPU source file not found: ${cuda_file}")
-        endif()
-    endforeach()
-    
-    # Create GPU example file path
-    set(GPU_LANCZOS_EXAMPLE ${CMAKE_CURRENT_SOURCE_DIR}/examples/gpu_lanczos_example.cu)
-else()
-    message(STATUS "CUDA disabled, skipping CUDA sources")
-endif()
-
 # Define executables
 
 # New elegant main (add GPU sources if CUDA is enabled)
@@ -296,30 +275,6 @@ endif()
 # Add TPQ_DSSF executable (only if MPI is enabled since it uses MPI)
 add_executable(TPQ_DSSF ${SRC_DIR}/TPQ_DSSF.cpp ${SRC_DIR}/dynamics.cpp ${SRC_DIR}/TPQ.cpp)
 
-# Add GPU Lanczos example if CUDA is enabled
-if(WITH_CUDA AND EXISTS ${GPU_LANCZOS_EXAMPLE})
-    add_executable(GPU_LANCZOS_EXAMPLE ${GPU_LANCZOS_EXAMPLE} ${GPU_SOURCES})
-    message(STATUS "Adding GPU Lanczos example executable")
-endif()
-
-
-
-# Add CUDA example executable if CUDA is enabled and example exists
-if(WITH_CUDA)
-    
-    if(EXISTS ${CUDA_EXAMPLE_FILE})
-        add_executable(CUDA_EXAMPLE ${CUDA_EXAMPLE_FILE} ${SOURCES})
-        message(STATUS "Adding CUDA example executable")
-    else()
-        message(STATUS "CUDA example file not found at: ${CUDA_EXAMPLE_FILE}")
-    endif()
-    
-    if(EXISTS ${CUDA_TEST_FILE})
-        add_executable(CUDA_TEST ${CUDA_TEST_FILE} ${CUDA_ONLY_SOURCES})
-        message(STATUS "Adding CUDA test executable")
-    endif()
-
-endif()
 
 
 # Link libraries for new main
@@ -435,26 +390,6 @@ if(WITH_CUDA)
         )
     endif()
     
-    # Link CUDA libraries to example if it exists
-    if(TARGET CUDA_EXAMPLE)
-        target_link_libraries(CUDA_EXAMPLE
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-        )
-    endif()
-    
-    # Link CUDA libraries to test if it exists
-    if(TARGET CUDA_TEST)
-        target_link_libraries(CUDA_TEST
-            CUDA::cudart
-            CUDA::cublas
-            CUDA::cusparse
-            CUDA::curand
-        )
-    endif()
-    
 endif()
 
 # Add MPI if enabled
@@ -464,17 +399,6 @@ if(WITH_MPI)
     if(TARGET TPQ_DSSF)
         target_link_libraries(TPQ_DSSF ${MPI_CXX_LIBRARIES})
     endif()
-    
-    # Link MPI to CUDA example if it exists
-    if(TARGET CUDA_EXAMPLE)
-        target_link_libraries(CUDA_EXAMPLE ${MPI_CXX_LIBRARIES})
-    endif()
-    
-    # Link MPI to CUDA test if it exists
-    if(TARGET CUDA_TEST)
-        target_link_libraries(CUDA_TEST ${MPI_CXX_LIBRARIES})
-    endif()
-    
 endif()
 
 # Install targets
@@ -538,26 +462,6 @@ if(WITH_CUDA)
     if(TARGET TPQ_DSSF)
         set_property(TARGET TPQ_DSSF PROPERTY CUDA_SEPARABLE_COMPILATION ON)
         target_compile_options(TPQ_DSSF PRIVATE 
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        )
-    endif()
-    
-    # Set CUDA compile options for CUDA example if it exists
-    if(TARGET CUDA_EXAMPLE)
-        set_property(TARGET CUDA_EXAMPLE PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(CUDA_EXAMPLE PRIVATE 
-            $<$<COMPILE_LANGUAGE:CUDA>:-O3>
-            $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
-            $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-        )
-    endif()
-    
-    # Set CUDA compile options for CUDA test if it exists
-    if(TARGET CUDA_TEST)
-        set_property(TARGET CUDA_TEST PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-        target_compile_options(CUDA_TEST PRIVATE 
             $<$<COMPILE_LANGUAGE:CUDA>:-O3>
             $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
             $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
